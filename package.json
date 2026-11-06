@@ -16,7 +16,8 @@
     "test": "npm --workspace @asm/shared run test",
     "test:rules": "firebase emulators:exec --only firestore,storage --project demo-asm-rules \"vitest run tests/rules\"",
     "test:all": "npm run test && npm run test:rules",
-    "deploy:firebase": "firebase deploy --only firestore,storage,functions"
+    "deploy:firebase": "firebase deploy --only firestore,storage,functions",
+    "audit:prod": "npm audit --omit=dev"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",
@@ -27,9 +28,13 @@
     "tsx": "^4.19.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0",
-    "zod": "^3.25.0"
+    "zod": "^4.6.6"
   },
   "engines": {
     "node": ">=22"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.5",
+    "uuid": "^11.1.1"
   }
 }

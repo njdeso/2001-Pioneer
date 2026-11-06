@@ -34,6 +34,7 @@ Legend: ✅ done & tested here · 🟡 written, must be verified on your machine
 - ✅ 20 new automated tests incl. an end-to-end synthetic agency export (48 total); functions bundle and app compile
 - 🟡 Rules test for import batches added — run `npm run test:rules`
 - ✅ Excel reading switched to `exceljs` from the npm registry (no remote tarballs); .xlsx/.xlsm supported, legacy .xls asked to be re-saved as .xlsx
+- ✅ Production dependency audit remediated (zod 4.6.6+, grpc-js and uuid overrides) — see docs/SECURITY-AUDIT.md
 - 🟡 Type-check / build / deploy on your machine
 - ⏳ Phase 2 sign-off by you
 ## Phase 3 — Statement processing ⏳

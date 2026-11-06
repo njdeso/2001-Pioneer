@@ -3,7 +3,7 @@ import {
   brokerInput, carrierInput, clientInput, fieldErrors, formatBps, formatCents, parseMoneyToCents, parsePercentToBps, policyInput,
   UNASSIGNED_BROKER_ID, type Broker, type Carrier, type Client, type Policy,
 } from '@asm/shared';
-import type { ZodTypeAny } from 'zod';
+import type { ZodType, z } from 'zod';
 import { api, ApiError } from './api';
 import { useData } from './data';
 import { Button, ErrorNote, Field, Modal, Select, TextArea, TextInput } from './ui';
@@ -13,7 +13,7 @@ function useSubmit() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  async function run<S extends ZodTypeAny>(schema: S, raw: unknown, send: (data: S['_output']) => Promise<unknown>, done: () => void) {
+  async function run<S extends ZodType>(schema: S, raw: unknown, send: (data: z.output<S>) => Promise<unknown>, done: () => void) {
     setFormError(null);
     const parsed = schema.safeParse(raw);
     if (!parsed.success) { setErrors(fieldErrors(parsed.error)); return; }

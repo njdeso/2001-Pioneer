@@ -3,7 +3,7 @@ import { getFirestore, FieldValue, type Transaction, type DocumentReference } fr
 import { getAuth } from 'firebase-admin/auth';
 import { HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { logger } from 'firebase-functions';
-import { ZodError, type ZodTypeAny, type z } from 'zod';
+import { ZodError, type ZodType, type z } from 'zod';
 import { fieldErrors, type Role } from '@asm/shared';
 
 if (!getApps().length) initializeApp();
@@ -29,7 +29,7 @@ export function requireRole(req: CallableRequest<unknown>, allowed: Role[] = ['a
 }
 
 /** Validate callable input; return structured field errors the form can show. */
-export function parse<S extends ZodTypeAny>(schema: S, data: unknown): z.infer<S> {
+export function parse<S extends ZodType>(schema: S, data: unknown): z.output<S> {
   try {
     return schema.parse(data);
   } catch (err) {

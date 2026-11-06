@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "zod": "^3.25.0",
+    "zod": "^4.6.6",
     "exceljs": "^4.4.0"
   },
   "devDependencies": {

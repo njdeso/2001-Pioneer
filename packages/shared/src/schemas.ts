@@ -19,7 +19,8 @@ export const contactSchema = z
     address: optionalText(300),
     notes: optionalText(2000),
   })
-  .default({});
+  // zod 4: prefault parses the fallback, so inner defaults ('' for each field) apply.
+  .prefault({});
 
 export const statusSchema = z.enum(['active', 'inactive']);
 
@@ -105,7 +106,7 @@ export type SettingsInput = z.infer<typeof settingsInput>;
 export function fieldErrors(err: z.ZodError): Record<string, string> {
   const out: Record<string, string> = {};
   for (const issue of err.issues) {
-    const key = issue.path.join('.') || '_';
+    const key = issue.path.map((p) => String(p)).join('.') || '_';
     if (!out[key]) out[key] = issue.message;
   }
   return out;
