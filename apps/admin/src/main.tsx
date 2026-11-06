@@ -1,0 +1,56 @@
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter, Route, Routes } from 'react-router';
+import './index.css';
+import { AuthProvider, useAuth } from './auth';
+import { DataProvider } from './data';
+import { AppLayout } from './layout';
+import { LoginPage } from './pages/Login';
+import { DashboardPage } from './pages/Dashboard';
+import { CarriersPage, CarrierDetailPage } from './pages/Carriers';
+import { BrokersPage, BrokerDetailPage } from './pages/Brokers';
+import { ClientsPage, ClientDetailPage } from './pages/Clients';
+import { SettingsPage } from './pages/Settings';
+import { ComingSoonPage } from './pages/ComingSoon';
+import { configMissing } from './firebase';
+
+function Gate() {
+  const { loading, user, role } = useAuth();
+  if (configMissing) {
+    return (
+      <div className="mx-auto max-w-lg p-10 text-sm">
+        <h1 className="text-lg font-semibold text-ink">Firebase is not configured</h1>
+        <p className="mt-2 text-slate-600">Copy <code>.env.example</code> to <code>apps/admin/.env.local</code> and fill in your Firebase web app settings, then restart <code>npm run dev</code>.</p>
+      </div>
+    );
+  }
+  if (loading) return <div className="p-10 text-sm text-slate-500">Loading…</div>;
+  if (!user || !role) return <LoginPage />;
+  return (
+    <DataProvider>
+      <AppLayout>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/carriers" element={<CarriersPage />} />
+          <Route path="/carriers/:id" element={<CarrierDetailPage />} />
+          <Route path="/brokers" element={<BrokersPage />} />
+          <Route path="/brokers/:id" element={<BrokerDetailPage />} />
+          <Route path="/clients" element={<ClientsPage />} />
+          <Route path="/clients/:id" element={<ClientDetailPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={<ComingSoonPage />} />
+        </Routes>
+      </AppLayout>
+    </DataProvider>
+  );
+}
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <AuthProvider>
+      <BrowserRouter>
+        <Gate />
+      </BrowserRouter>
+    </AuthProvider>
+  </StrictMode>,
+);

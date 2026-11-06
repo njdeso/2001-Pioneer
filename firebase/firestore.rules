@@ -1,0 +1,50 @@
+rules_version = '2';
+
+// Agency Sale Manager — Firestore security rules.
+// Deny by default. Signed-in admin/staff may READ business data.
+// NOTHING is written from the browser: every write goes through a Cloud Function,
+// which checks the caller's role on the server and records an audit event.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function role() {
+      return signedIn() ? request.auth.token.get('role', '') : '';
+    }
+    function isStaff() {
+      return role() in ['admin', 'staff'];
+    }
+    function isAdmin() {
+      return role() == 'admin';
+    }
+
+    // Business data: read-only to admin/staff.
+    match /carriers/{id}           { allow read: if isStaff(); allow write: if false; }
+    match /brokers/{id}            { allow read: if isStaff(); allow write: if false; }
+    match /clients/{id}            { allow read: if isStaff(); allow write: if false; }
+    match /policies/{id}           { allow read: if isStaff(); allow write: if false; }
+    match /settings/{id}           { allow read: if isStaff(); allow write: if false; }
+    match /ledger/{id}             { allow read: if isStaff(); allow write: if false; }
+    match /statements/{id}         { allow read: if isStaff(); allow write: if false;
+      match /lines/{lineId}        { allow read: if isStaff(); allow write: if false; }
+    }
+    match /importBatches/{id}      { allow read: if isStaff(); allow write: if false;
+      match /rows/{rowId}          { allow read: if isStaff(); allow write: if false; }
+    }
+    match /reconExceptions/{id}    { allow read: if isStaff(); allow write: if false; }
+    match /valuations/{id}         { allow read: if isStaff(); allow write: if false; }
+    match /packages/{id}           { allow read: if isStaff(); allow write: if false; }
+
+    // Audit trail: admin only, append-only from the server.
+    match /auditLog/{id}           { allow read: if isAdmin(); allow write: if false; }
+
+    // A user can read their own profile.
+    match /users/{uid}             { allow read: if signedIn() && request.auth.uid == uid; allow write: if false; }
+
+    // Uniqueness keys and anything else: server only.
+    match /{document=**}           { allow read, write: if false; }
+  }
+}

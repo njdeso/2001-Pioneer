@@ -1,0 +1,18 @@
+node_modules/
+dist/
+functions/lib/
+*.log
+.env
+.env.*
+!.env.example
+.firebase/
+.firebaserc
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+.DS_Store
+coverage/
+# Never commit real statements, client lists or exports
+data/
+exports/
+*.local

@@ -1,0 +1,14 @@
+rules_version = '2';
+
+// Agency Sale Manager — Cloud Storage rules.
+// Phase 1: no browser access at all. Phase 3 adds a one-time, size- and type-limited
+// upload path (incoming/{uploadId}) for commission statements. Originals are never
+// readable from the browser; downloads use short-lived signed URLs from Cloud Functions.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "name": "agency-sale-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agency Sale Manager \u2014 Vudu Tech. Retrospective 12-month commission snapshot for an insurance agency sale.",
+  "workspaces": [
+    "packages/shared",
+    "apps/admin",
+    "functions"
+  ],
+  "scripts": {
+    "dev": "npm --workspace @asm/admin run dev",
+    "dev:emulators": "firebase emulators:start --only auth,firestore,functions",
+    "build": "npm --workspace @asm/admin run build && npm --workspace @asm/functions run build",
+    "typecheck": "npm --workspace @asm/shared run typecheck && npm --workspace @asm/functions run typecheck && npm --workspace @asm/admin run typecheck",
+    "test": "npm --workspace @asm/shared run test",
+    "test:rules": "firebase emulators:exec --only firestore,storage --project demo-asm-rules \"vitest run tests/rules\"",
+    "test:all": "npm run test && npm run test:rules",
+    "deploy:firebase": "firebase deploy --only firestore,storage,functions"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.0",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "firebase": "^12.0.0",
+    "firebase-tools": "^14.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0",
+    "zod": "^3.25.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
