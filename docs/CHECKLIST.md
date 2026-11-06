@@ -33,7 +33,8 @@ Legend: ✅ done & tested here · 🟡 written, must be verified on your machine
 - ✅ Wizard UI (upload → columns → carriers & brokers → review with filters → commit → summary) and Import history with Undo
 - ✅ 20 new automated tests incl. an end-to-end synthetic agency export (48 total); functions bundle and app compile
 - 🟡 Rules test for import batches added — run `npm run test:rules`
-- 🟡 Type-check / build / deploy on your machine (new dependency: `xlsx` from cdn.sheetjs.com)
+- ✅ Excel reading switched to `exceljs` from the npm registry (no remote tarballs); .xlsx/.xlsm supported, legacy .xls asked to be re-saved as .xlsx
+- 🟡 Type-check / build / deploy on your machine
 - ⏳ Phase 2 sign-off by you
 ## Phase 3 — Statement processing ⏳
 ## Phase 4 — Reconciliation and ledger ⏳

@@ -7,3 +7,4 @@ export * from './aggregate.js';
 export * from './csv.js';
 export * from './importMap.js';
 export * from './importPlan.js';
+export * from './excel.js';

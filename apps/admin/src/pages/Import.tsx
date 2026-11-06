@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
-import * as XLSX from 'xlsx';
 import {
   detectColumns, IMPORT_FIELDS, MAX_IMPORT_ROWS, normalizeName, parseCsv, toTable, UNASSIGNED_BROKER_ID,
   type ColumnMapping, type ImportField, type ImportOptionsInput, type ImportRecordInput, type ImportPlanSummary,
@@ -31,16 +30,14 @@ async function readFile(file: File): Promise<Loaded> {
     const text = new TextDecoder('utf-8').decode(buf);
     return { fileName: file.name, fileHash, sheets: [{ name: 'CSV', rows: parseCsv(text) }] };
   }
-  if (lower.endsWith('.xlsx') || lower.endsWith('.xls') || lower.endsWith('.xlsm')) {
-    const wb = XLSX.read(buf, { type: 'array', cellDates: false });
-    const sheets = wb.SheetNames.map((name) => ({
-      name,
-      rows: (XLSX.utils.sheet_to_json<string[]>(wb.Sheets[name], { header: 1, raw: false, defval: '', blankrows: false }))
-        .map((r) => r.map((c) => String(c ?? ''))),
-    })).filter((s) => s.rows.length > 0);
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm')) {
+    // Loaded on demand so the Excel library is only downloaded when needed.
+    const { readXlsx } = await import('@asm/shared/excel');
+    const sheets = await readXlsx(buf);
     if (!sheets.length) throw new Error('The workbook has no data.');
     return { fileName: file.name, fileHash, sheets };
   }
+  if (lower.endsWith('.xls')) throw new Error('Old .xls files are not supported. Open the file in Excel and save it as .xlsx.');
   throw new Error('Upload a .csv or .xlsx file.');
 }
 
@@ -213,7 +210,7 @@ function ImportWizard({ onFinished }: { onFinished: () => void }) {
           onDrop={(e) => { e.preventDefault(); void onFile(e.dataTransfer.files[0]); }}>
           <span className="text-sm font-medium text-ink">Drop a CSV or Excel file here, or click to choose</span>
           <span className="mt-1 text-xs text-slate-500">Client and policy list · .csv or .xlsx · up to 10 MB · commissions are not needed</span>
-          <input type="file" accept=".csv,.txt,.tsv,.xlsx,.xls,.xlsm" className="hidden" onChange={(e) => void onFile(e.target.files?.[0])} />
+          <input type="file" accept=".csv,.txt,.tsv,.xlsx,.xlsm" className="hidden" onChange={(e) => void onFile(e.target.files?.[0])} />
         </label>
       )}
 
