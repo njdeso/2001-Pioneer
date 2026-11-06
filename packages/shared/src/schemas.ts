@@ -58,6 +58,8 @@ export const lineSchema = z.enum(['personal', 'commercial']);
 
 export const clientInput = z.object({
   name: trimmed(200).min(1, 'Client name is required'),
+  /** The client's ID/code in your agency management system, when available. */
+  externalId: trimmed(60).default(''),
   classification: lineSchema,
   brokerId: z.string().min(1).default(UNASSIGNED_BROKER_ID),
   contact: contactSchema,

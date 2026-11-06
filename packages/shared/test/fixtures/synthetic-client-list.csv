@@ -1,0 +1,10 @@
+SYNTHETIC TEST DATA - NOT REAL CLIENTS
+Insured Name,Client Code,Policy #,Company,LOB,Producer,Eff Date,Exp Date,Annual Premium,Status,Pers/Comm,Phone
+"Synthetic Cab, LLC",SC01,CA-1001,Synthetic Mutual,Commercial Auto,Broker One,11/1/2025,11/1/2026,"$12,500.00",In Force,CL,518-555-0101
+"Synthetic Cab, LLC",SC01,GL-2002,Example Casualty,General Liability,Broker One,01/15/26,01/15/27,"1,850",Active,CL,
+Pat Example,PE01,HO-77,Synthetic Mutual,Homeowners,Broker Two,2026-03-01,2027-03-01,"1,200.00",Active,PL,
+Pat Example,PE01,PA-78,Synthetic Mutual,Personal Auto,Broker Two,3/1/2026,9/1/2026,640,Active,PL,
+Pat Examples,PE02,PA-79,Synthetic Mutual,Personal Auto,Broker Two,3/1/2026,9/1/2026,610,Active,PL,
+Synthetic Towing Inc,ST09,ES-5001,J&J,Garage Liability,,6/1/2026,6/1/2027,"4,400.00",Active,CL,
+Synthetic Towing Inc,ST09,ES-5001,J&J,Garage Liability,,6/1/2026,6/1/2027,"4,400.00",Active,CL,
+Mystery Row,MR01,ZZ-1,Unknown Insurance Co,BOP,Broker One,13/40/2026,,abc,Active,CL,

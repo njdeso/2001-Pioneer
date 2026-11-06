@@ -48,11 +48,11 @@ const STATUS_OPTIONS = [{ value: 'active', label: 'Active' }, { value: 'inactive
 
 // ---------------- Carrier / wholesaler ----------------
 
-export function CarrierForm({ open, onClose, carrier, defaultKind = 'carrier' }: {
-  open: boolean; onClose: () => void; carrier?: Carrier; defaultKind?: 'carrier' | 'wholesaler';
+export function CarrierForm({ open, onClose, carrier, defaultKind = 'carrier', initialName = '' }: {
+  open: boolean; onClose: () => void; carrier?: Carrier; defaultKind?: 'carrier' | 'wholesaler'; initialName?: string;
 }) {
   const [f, setF] = useState(() => ({
-    name: carrier?.name ?? '',
+    name: carrier?.name ?? initialName,
     code: carrier?.code ?? '',
     kind: carrier?.kind ?? defaultKind,
     commissionMethod: carrier?.commissionMethod ?? 'statement',
@@ -167,6 +167,7 @@ export function ClientForm({ open, onClose, client, onSaved }: {
   const { brokers } = useData();
   const [f, setF] = useState(() => ({
     name: client?.name ?? '',
+    externalId: client?.externalId ?? '',
     classification: client?.classification ?? 'commercial',
     brokerId: client?.brokerId ?? UNASSIGNED_BROKER_ID,
     status: client?.status ?? 'active',
@@ -184,7 +185,7 @@ export function ClientForm({ open, onClose, client, onSaved }: {
   function submit(e: FormEvent) {
     e.preventDefault();
     void s.run(clientInput, {
-      name: f.name, classification: f.classification, brokerId: f.brokerId, status: f.status,
+      name: f.name, externalId: f.externalId, classification: f.classification, brokerId: f.brokerId, status: f.status,
       contact: { name: f.contactName, phone: f.phone, email: f.email, address: f.address, notes: f.notes },
     }, async (data) => {
       const res = await api.saveClient(data, client?.id, !!brokerChanged && applyToPolicies);
@@ -197,6 +198,9 @@ export function ClientForm({ open, onClose, client, onSaved }: {
       <form onSubmit={submit}>
         <Grid>
           <Field label="Client name" error={s.errors.name} className="sm:col-span-2"><TextInput value={f.name} onChange={set('name')} autoFocus /></Field>
+          <Field label="Client ID in your system" error={s.errors.externalId} hint="Optional; used to match future imports">
+            <TextInput value={f.externalId} onChange={set('externalId')} />
+          </Field>
           <Field label="Classification" error={s.errors.classification}>
             <Select value={f.classification} onChange={set('classification')} options={[{ value: 'commercial', label: 'Commercial' }, { value: 'personal', label: 'Personal' }]} />
           </Field>
@@ -273,7 +277,10 @@ export function PolicyForm({ open, onClose, client, policy }: {
         <Grid>
           <Field label="Policy number" error={s.errors.policyNumber}><TextInput value={f.policyNumber} onChange={set('policyNumber')} autoFocus /></Field>
           <Field label="Insurance carrier" error={s.errors.carrierId}>
-            <Select value={f.carrierId} onChange={set('carrierId')} placeholder="Select carrier…" options={insurers.map((c) => ({ value: c.id, label: c.name }))} />
+            <Select value={f.carrierId} onChange={set('carrierId')} placeholder="Select carrier…" options={[
+              ...insurers.map((c) => ({ value: c.id, label: c.name })),
+              ...(f.wholesalerId ? [{ value: f.wholesalerId, label: 'Unknown — placed via the wholesaler' }] : []),
+            ]} />
           </Field>
           <Field label="Placed through wholesaler" error={s.errors.wholesalerId} hint="Leave blank if placed direct">
             <Select value={f.wholesalerId} onChange={set('wholesalerId')} placeholder="Direct with carrier" options={wholesalers.map((c) => ({ value: c.id, label: c.name }))} />

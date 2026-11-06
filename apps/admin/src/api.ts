@@ -1,5 +1,25 @@
 import { httpsCallable } from 'firebase/functions';
-import type { BrokerInput, CarrierInput, ClientInput, PolicyInput, SettingsInput } from '@asm/shared';
+import type {
+  BrokerInput, CarrierInput, ClientInput, ImportOptionsInput, ImportPlanSummary, ImportRecordInput, Message, PolicyInput, SettingsInput,
+} from '@asm/shared';
+
+export interface StagedRow {
+  rowNumber: number;
+  clientName: string;
+  policyNumber: string;
+  carrier: string;
+  status: 'ok' | 'warning' | 'error';
+  clientAction: 'create' | 'existing' | 'update' | 'none';
+  policyAction: 'create' | 'update' | 'unchanged' | 'duplicate' | 'conflict' | 'none';
+  policyChanges: Record<string, { before: unknown; after: unknown }>;
+  messages: Message[];
+}
+export interface StageResult { batchId: string; duplicateOf: string | null; summary: ImportPlanSummary; rows: StagedRow[] }
+export type CommitResult = ImportPlanSummary & { clientsCreated: number; clientsUpdated: number; policiesCreated: number; policiesUpdated: number };
+export interface UndoResult {
+  policiesDeleted: number; policiesRestored: number; clientsDeleted: number; clientsRestored: number;
+  skipped: { id: string; type: 'policy' | 'client'; reason: string }[];
+}
 import { functions } from './firebase';
 
 /** Error carrying per-field messages from the server for forms. */
@@ -33,6 +53,12 @@ export const api = {
       'saveClient', { id, data, applyBrokerToPolicies }),
   savePolicy: (data: PolicyInput, id?: string) =>
     call<{ id?: string; data: PolicyInput }, { id: string }>('savePolicy', { id, data }),
+  stageImport: (fileName: string, fileHash: string, options: ImportOptionsInput, records: ImportRecordInput[]) =>
+    call<{ fileName: string; fileHash: string; options: ImportOptionsInput; records: ImportRecordInput[] }, StageResult>(
+      'stageImport', { fileName, fileHash, options, records }),
+  commitImport: (batchId: string) => call<{ batchId: string }, CommitResult>('commitImport', { batchId }),
+  undoImport: (batchId: string) => call<{ batchId: string }, UndoResult>('undoImport', { batchId }),
+  discardImport: (batchId: string) => call<{ batchId: string }, { ok: true }>('discardImport', { batchId }),
   reassignPolicies: (policyIds: string[], brokerId: string) =>
     call<{ policyIds: string[]; brokerId: string }, { moved: number }>('reassignPolicies', { policyIds, brokerId }),
 };

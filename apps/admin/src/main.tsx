@@ -11,6 +11,7 @@ import { CarriersPage, CarrierDetailPage } from './pages/Carriers';
 import { BrokersPage, BrokerDetailPage } from './pages/Brokers';
 import { ClientsPage, ClientDetailPage } from './pages/Clients';
 import { SettingsPage } from './pages/Settings';
+import { ImportPage } from './pages/Import';
 import { ComingSoonPage } from './pages/ComingSoon';
 import { configMissing } from './firebase';
 
@@ -37,6 +38,7 @@ function Gate() {
           <Route path="/brokers/:id" element={<BrokerDetailPage />} />
           <Route path="/clients" element={<ClientsPage />} />
           <Route path="/clients/:id" element={<ClientDetailPage />} />
+          <Route path="/import" element={<ImportPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<ComingSoonPage />} />
         </Routes>

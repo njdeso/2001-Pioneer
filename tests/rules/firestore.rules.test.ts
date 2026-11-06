@@ -78,6 +78,19 @@ describe('writes', () => {
   });
 });
 
+describe('imports', () => {
+  it('staff can read import batches but nobody can write them from the browser', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'importBatches/SYN-B1'), { status: 'committed' });
+      await setDoc(doc(ctx.firestore(), 'importBatches/SYN-B1/rows/000002'), { rowNumber: 2 });
+    });
+    await assertSucceeds(getDoc(doc(staff(), 'importBatches/SYN-B1')));
+    await assertSucceeds(getDoc(doc(staff(), 'importBatches/SYN-B1/rows/000002')));
+    await assertFails(setDoc(doc(admin(), 'importBatches/SYN-B1'), { status: 'staged' }));
+    await assertFails(getDoc(doc(noRole(), 'importBatches/SYN-B1')));
+  });
+});
+
 describe('storage', () => {
   it('storage is closed to the browser in Phase 1', async () => {
     const s = env.authenticatedContext('admin1', { role: 'admin' }).storage();

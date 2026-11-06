@@ -25,7 +25,7 @@ export const saveClient = onCall(async (req) => {
     const data = {
       ...input,
       normalizedName: normalizeName(input.name),
-      searchTokens: searchTokens(input.name),
+      searchTokens: searchTokens(input.name, input.externalId),
     };
     tx.set(ref, { ...data, ...meta(actor, !before) }, { merge: true });
 
@@ -64,7 +64,7 @@ export const savePolicy = onCall(async (req) => {
     await mustExist(tx, db.collection('clients').doc(input.clientId), 'Client');
     await mustExist(tx, db.collection('brokers').doc(input.brokerId), 'Broker');
     const carrier = await mustExist(tx, db.collection('carriers').doc(input.carrierId), 'Carrier');
-    if (carrier.kind !== 'carrier') {
+    if (carrier.kind !== 'carrier' && input.wholesalerId !== input.carrierId) {
       throw new HttpsError('invalid-argument', 'Choose the underlying insurance carrier, not a wholesaler.', {
         fieldErrors: { carrierId: 'Pick the insurance carrier; put the wholesaler in the Wholesaler field' },
       });

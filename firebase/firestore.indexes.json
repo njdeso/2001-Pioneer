@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "importBatches",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "fileHash", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "policies",
       "queryScope": "COLLECTION",
       "fields": [

@@ -68,8 +68,13 @@ export interface AuditInput {
   changes?: Record<string, { before: unknown; after: unknown }>;
 }
 
-/** Append an audit event inside the caller's transaction so the change and its record commit together. */
-export function audit(tx: Transaction, actor: Actor, a: AuditInput): void {
+/** Anything that can stage a document write: a Transaction or a WriteBatch. */
+export interface Writer {
+  set(ref: DocumentReference, data: Record<string, unknown>): unknown;
+}
+
+/** Append an audit event inside the caller's transaction/batch so the change and its record commit together. */
+export function audit(tx: Writer, actor: Actor, a: AuditInput): void {
   tx.set(db.collection('auditLog').doc(), {
     at: FieldValue.serverTimestamp(),
     actor: actor.uid,

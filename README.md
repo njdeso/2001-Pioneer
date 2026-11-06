@@ -9,7 +9,7 @@ Independent of Broker Desk: separate repository, Firebase project, Netlify site 
 
 ## Status
 
-Phase 1 (Foundation) — see [docs/CHECKLIST.md](docs/CHECKLIST.md).
+Phase 2 (Client import) — see [docs/CHECKLIST.md](docs/CHECKLIST.md).
 
 ## Stack
 

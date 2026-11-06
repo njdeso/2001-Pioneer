@@ -87,8 +87,8 @@ npm run dev
 
 | Command | What it checks |
 |---|---|
-| `npm test` | Shared financial core: money parsing/rounding, negative commissions, policy-number normalization, same number at two carriers, similar client names, snapshot window math, T12/monthly totals, statement-period vs paid-month, carrier-level bonuses kept separate, broker 50% split, schemas |
-| `npm run test:rules` | Firestore + Storage security rules in the emulator: role-based reads, no browser writes, audit log admin-only, keys server-only |
+| `npm test` | Shared financial core: money parsing/rounding, negative commissions, policy-number normalization, same number at two carriers, similar client names, snapshot window math, T12/monthly totals, statement-period vs paid-month, carrier-level bonuses kept separate, broker 50% split, schemas, CSV parsing, column detection, import planning (duplicates, conflicts, similar names, updates), undo planning, end-to-end synthetic import |
+| `npm run test:rules` | Firestore + Storage security rules in the emulator: role-based reads, no browser writes, audit log admin-only, keys server-only, import batches read-only |
 | `npm run typecheck` | TypeScript across shared, functions and the app |
 | `npm run build` | Production build of the app and functions bundle |
 

@@ -20,9 +20,21 @@ Legend: ✅ done & tested here · 🟡 written, must be verified on your machine
 - 🟡 Firestore & Storage rules + emulator tests (`npm run test:rules`) — could not run here (no emulator)
 - 🟡 Full TypeScript check of app and functions (`npm run typecheck`) — needs `npm install`
 - 🟡 Production build (`npm run build`) and first Netlify / Firebase deploy
-- ⏳ Phase 1 sign-off by you
+- ✅ Phase 1 signed off by you (deployed; Netlify dependency fix 152ed40)
 
-## Phase 2 — Client import ⏳
+## Phase 2 — Client import
+
+- ✅ RFC 4180 CSV parser (quotes, embedded commas/newlines, BOM, delimiter detection); XLSX via SheetJS in the browser
+- ✅ Automatic column detection for common agency-export headers; manual mapping; header-row picker for files with title rows; multi-sheet workbooks
+- ✅ Value mapping: carrier/company, wholesaler and broker values matched by name, code or alias, with inline "Add carrier/broker"
+- ✅ Flexible dates (MM/DD/YYYY, YY, ISO, month names, Excel serials), money, personal/commercial and status words
+- ✅ Import planner: one client → many policies; Client ID matching; similar-name warnings (never merged); same policy number at different carriers; duplicates within file; conflicts with other clients; blank cells never erase data; ledger never touched
+- ✅ Staged import: `stageImport` writes only the import batch; `commitImport` re-checks against current data, applies, and records before-values; `undoImport` removes/restores only records untouched since, never policies with commission history; `discardImport`
+- ✅ Wizard UI (upload → columns → carriers & brokers → review with filters → commit → summary) and Import history with Undo
+- ✅ 20 new automated tests incl. an end-to-end synthetic agency export (48 total); functions bundle and app compile
+- 🟡 Rules test for import batches added — run `npm run test:rules`
+- 🟡 Type-check / build / deploy on your machine (new dependency: `xlsx` from cdn.sheetjs.com)
+- ⏳ Phase 2 sign-off by you
 ## Phase 3 — Statement processing ⏳
 ## Phase 4 — Reconciliation and ledger ⏳
 ## Phase 5 — Reports, valuation, lock, due-diligence package ⏳

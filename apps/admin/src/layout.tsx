@@ -10,7 +10,7 @@ export const NAV = [
   { to: '/carriers', label: 'Insurance Carriers', icon: '◈' },
   { to: '/brokers', label: 'Brokers', icon: '◉' },
   { to: '/clients', label: 'Clients & Policies', icon: '☰' },
-  { to: '/import', label: 'Import Clients', icon: '⇪', phase: 2 },
+  { to: '/import', label: 'Import Clients', icon: '⇪' },
   { to: '/statements', label: 'Upload Commission Statements', icon: '⇧', phase: 3 },
   { to: '/queue', label: 'AI Processing Queue', icon: '⟳', phase: 3 },
   { to: '/reconciliation', label: 'Reconciliation', icon: '⚖', phase: 4 },
