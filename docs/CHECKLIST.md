@@ -36,8 +36,27 @@ Legend: ✅ done & tested here · 🟡 written, must be verified on your machine
 - ✅ Excel reading switched to `exceljs` from the npm registry (no remote tarballs); .xlsx/.xlsm supported, legacy .xls asked to be re-saved as .xlsx
 - ✅ Production dependency audit remediated (zod 4.6.6+, grpc-js and uuid overrides) — see docs/SECURITY-AUDIT.md
 - 🟡 Type-check / build / deploy on your machine
-- ⏳ Phase 2 sign-off by you
-## Phase 3 — Statement processing ⏳
-## Phase 4 — Reconciliation and ledger ⏳
-## Phase 5 — Reports, valuation, lock, due-diligence package ⏳
-## Phase 6 — Final hardening ⏳
+- ✅ Phase 2 signed off by you (deployed to pioneer-285cf; Excel import, duplicates and undo verified)
+## Phase 3 — Commission statements (plan approved; stages 3A–3F)
+
+Decisions: match on carrier + normalized policy number (stored numbers untouched; multiple candidates → manual review);
+separate `pioneer-dev` project; broker statement month = carrier statement month; two-step payment approval;
+one PR per stage; per-policy broker % (default broker %); payment-only rows kept as reference; Lancer = Stage 3F.
+
+### Stage 3A — Upload, extraction, reconciliation (PR open, branch `feature/phase-3a-statement-extraction`)
+- ✅ Upload registration with SHA-256 fingerprint; duplicate files rejected; one-time upload path; Storage rules (admin-only create, PDF/XLSX/CSV ≤ 20 MB, no reads/overwrites)
+- ✅ Server re-verifies size, fingerprint and file type; preserves the original at `statements/{id}/original.*` (never overwritten)
+- ✅ Deterministic Travelers PL parser; reconciles exactly to $3,631.14 on the real statement (local test) and on the anonymized fixture
+- ✅ Exact-to-the-cent reconciliation: paid commission, month payable (with adjustments), payment received, premiums, fees; per-line rate and sign checks
+- ✅ Payment-only rows, negative adjustments, multiple rows per policy and identical installment rows handled
+- ✅ Claude fallback (PDF and spreadsheets): forced tool + strict schema, amounts as printed, retries/backoff, timeouts, malformed-output handling, monthly limit; key in Secret Manager only
+- ✅ Carrier resolution by agency code / name; same carrier+agency+month detection; manual carrier choice; discard with reason
+- ✅ Review screen, processing queue, upload page, DEV banner, AI settings, carrier agency codes
+- ✅ pioneer-dev configuration (aliases, guarded scripts, env examples, seed) — instructions only, nothing created
+- 🟡 Run `npm test`, `npm run test:rules`, `npm run typecheck`, `npm run build` in Cloud Shell; manual test in pioneer-dev (docs/STAGE-3A-TESTING.md)
+- ⏳ Stage 3A review and approval
+
+### Stages 3B–3F ⏳ (matching · approval & posting · broker statements & payments · corrections & revisions · Lancer)
+
+## Phase 4 — Reports, valuation, lock, due-diligence package ⏳
+## Phase 5 — Final hardening ⏳

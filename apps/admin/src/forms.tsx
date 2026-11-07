@@ -58,6 +58,7 @@ export function CarrierForm({ open, onClose, carrier, defaultKind = 'carrier', i
     commissionMethod: carrier?.commissionMethod ?? 'statement',
     rate: carrier?.defaultRateBps != null ? formatBps(carrier.defaultRateBps).replace('%', '') : '',
     aliases: (carrier?.aliases ?? []).join(', '),
+    agencyCodes: (carrier?.agencyCodes ?? []).join(', '),
     status: carrier?.status ?? 'active',
     contactName: carrier?.contact?.name ?? '',
     phone: carrier?.contact?.phone ?? '',
@@ -76,7 +77,8 @@ export function CarrierForm({ open, onClose, carrier, defaultKind = 'carrier', i
     }
     void s.run(carrierInput, {
       name: f.name, code: f.code, kind: f.kind, commissionMethod: f.commissionMethod, defaultRateBps: rate,
-      aliases: f.aliases.split(',').map((a) => a.trim()).filter(Boolean), status: f.status,
+      aliases: f.aliases.split(',').map((a) => a.trim()).filter(Boolean),
+      agencyCodes: f.agencyCodes.split(',').map((a) => a.trim()).filter(Boolean), status: f.status,
       contact: { name: f.contactName, phone: f.phone, email: f.email, address: f.address, notes: f.notes },
     }, (data) => api.saveCarrier(data, carrier?.id), onClose);
   }
@@ -100,8 +102,11 @@ export function CarrierForm({ open, onClose, carrier, defaultKind = 'carrier', i
             <TextInput value={f.rate} onChange={set('rate')} inputMode="decimal" placeholder="e.g. 10" />
           </Field>
           <Field label="Status"><Select value={f.status} onChange={set('status')} options={STATUS_OPTIONS} /></Field>
-          <Field label="Other names on statements" hint="Comma-separated aliases" className="sm:col-span-2" error={s.errors.aliases}>
+          <Field label="Other names on statements" hint="Comma-separated aliases" error={s.errors.aliases}>
             <TextInput value={f.aliases} onChange={set('aliases')} />
+          </Field>
+          <Field label="Your agency codes on its statements" hint="Comma-separated, e.g. 0AB123. Used to recognize statements." error={s.errors.agencyCodes}>
+            <TextInput value={f.agencyCodes} onChange={set('agencyCodes')} />
           </Field>
         </Grid>
         <h3 className="mb-2 mt-5 text-xs font-semibold uppercase tracking-wide text-slate-500">Contact</h3>

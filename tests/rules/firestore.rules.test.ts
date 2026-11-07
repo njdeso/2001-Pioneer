@@ -91,10 +91,54 @@ describe('imports', () => {
   });
 });
 
+describe('statements (Firestore)', () => {
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, 'statements/SYN-S1'), { status: 'needs_review' });
+      await setDoc(doc(db, 'statements/SYN-S1/lines/00001'), { paidCommissionCents: 100 });
+      await setDoc(doc(db, 'extractionRuns/SYN-R1'), { ok: true });
+      await setDoc(doc(db, 'aiUsage/2026-11'), { calls: 1 });
+      await setDoc(doc(db, 'statementKeys/abc'), { statementId: 'SYN-S1' });
+    });
+  });
+  it('admin and staff can read statements and lines; nobody can write them', async () => {
+    await assertSucceeds(getDoc(doc(staff(), 'statements/SYN-S1')));
+    await assertSucceeds(getDoc(doc(staff(), 'statements/SYN-S1/lines/00001')));
+    await assertFails(setDoc(doc(admin(), 'statements/SYN-S1'), { status: 'posted' }));
+    await assertFails(setDoc(doc(admin(), 'statements/SYN-S1/lines/00001'), { paidCommissionCents: 999 }));
+    await assertFails(getDoc(doc(noRole(), 'statements/SYN-S1')));
+  });
+  it('extraction runs and AI usage are admin-read-only; fingerprint keys are server-only', async () => {
+    await assertSucceeds(getDoc(doc(admin(), 'extractionRuns/SYN-R1')));
+    await assertFails(getDoc(doc(staff(), 'extractionRuns/SYN-R1')));
+    await assertSucceeds(getDoc(doc(admin(), 'aiUsage/2026-11')));
+    await assertFails(setDoc(doc(admin(), 'aiUsage/2026-11'), { calls: 0 }));
+    await assertFails(getDoc(doc(admin(), 'statementKeys/abc')));
+  });
+});
+
 describe('storage', () => {
-  it('storage is closed to the browser in Phase 1', async () => {
+  const pdf = { contentType: 'application/pdf' };
+  it('an admin can create an upload only in their own incoming folder', async () => {
     const s = env.authenticatedContext('admin1', { role: 'admin' }).storage();
-    await assertFails(uploadString(ref(s, 'incoming/x.pdf'), 'data'));
-    await assertFails(getBytes(ref(s, 'statements/x.pdf')));
+    await assertSucceeds(uploadString(ref(s, 'incoming/admin1/SYN-S1/upload.pdf'), '%PDF-1.4 synthetic', 'raw', pdf));
+    await assertFails(uploadString(ref(s, 'incoming/someone-else/SYN-S1/upload.pdf'), '%PDF-1.4', 'raw', pdf));
+    await assertFails(uploadString(ref(s, 'incoming/admin1/SYN-S1/evil.exe'), 'MZ', 'raw', { contentType: 'application/octet-stream' }));
+    await assertFails(uploadString(ref(s, 'incoming/admin1/SYN-S2/upload.pdf'), 'x', 'raw', { contentType: 'text/html' }));
+    await assertFails(uploadString(ref(s, 'statements/SYN-S1/original.pdf'), '%PDF', 'raw', pdf));
+  });
+  it('uploads cannot be overwritten, read or listed from the browser', async () => {
+    const s = env.authenticatedContext('admin1', { role: 'admin' }).storage();
+    await assertSucceeds(uploadString(ref(s, 'incoming/admin1/SYN-S3/upload.pdf'), '%PDF-1.4 a', 'raw', pdf));
+    await assertFails(uploadString(ref(s, 'incoming/admin1/SYN-S3/upload.pdf'), '%PDF-1.4 b', 'raw', pdf));
+    await assertFails(getBytes(ref(s, 'incoming/admin1/SYN-S3/upload.pdf')));
+    await assertFails(getBytes(ref(s, 'statements/SYN-S1/original.pdf')));
+  });
+  it('staff and signed-out users cannot upload', async () => {
+    const st = env.authenticatedContext('staff1', { role: 'staff' }).storage();
+    await assertFails(uploadString(ref(st, 'incoming/staff1/SYN-S4/upload.pdf'), '%PDF', 'raw', pdf));
+    const an = env.unauthenticatedContext().storage();
+    await assertFails(uploadString(ref(an, 'incoming/x/SYN-S5/upload.pdf'), '%PDF', 'raw', pdf));
   });
 });

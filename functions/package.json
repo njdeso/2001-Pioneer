@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "firebase-admin": "^13.0.0",
-    "firebase-functions": "^6.3.0"
+    "firebase-functions": "^6.3.0",
+    "pdfjs-dist": "^6.2.108"
   }
 }

@@ -16,14 +16,19 @@
     "test": "npm --workspace @asm/shared run test",
     "test:rules": "firebase emulators:exec --only firestore,storage --project demo-asm-rules \"vitest run tests/rules\"",
     "test:all": "npm run test && npm run test:rules",
-    "deploy:firebase": "firebase deploy --only firestore,storage,functions",
-    "audit:prod": "npm audit --omit=dev"
+    "audit:prod": "npm audit --omit=dev",
+    "dev:pioneer-dev": "npm --workspace @asm/admin run dev:pioneer-dev",
+    "assert:dev": "node scripts/assert-dev-target.mjs dev",
+    "deploy:dev": "node scripts/assert-dev-target.mjs dev && firebase deploy --project dev --only firestore,storage,functions",
+    "seed:dev": "node scripts/assert-dev-target.mjs dev && node scripts/seed-dev.mjs dev",
+    "deploy:prod": "echo 'Production deploys are run manually after explicit approval: firebase deploy --project prod --only firestore,storage,functions' && exit 1"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",
     "@types/node": "^22.10.0",
     "esbuild": "^0.25.0",
     "firebase": "^12.0.0",
+    "firebase-admin": "^13.0.0",
     "firebase-tools": "^14.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0",

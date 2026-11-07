@@ -38,6 +38,10 @@ service cloud.firestore {
     match /valuations/{id}         { allow read: if isStaff(); allow write: if false; }
     match /packages/{id}           { allow read: if isStaff(); allow write: if false; }
 
+    // Extraction history and AI usage counters: admin read only.
+    match /extractionRuns/{id}     { allow read: if isAdmin(); allow write: if false; }
+    match /aiUsage/{id}            { allow read: if isAdmin(); allow write: if false; }
+
     // Audit trail: admin only, append-only from the server.
     match /auditLog/{id}           { allow read: if isAdmin(); allow write: if false; }
 
