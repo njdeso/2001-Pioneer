@@ -38,6 +38,9 @@ jobs:
       - name: npm install
         run: npm install --no-audit --no-fund
 
+      - name: Dev deploy configuration agrees (workflow, setup script, .firebaserc)
+        run: node scripts/check-dev-wif-config.mjs
+
       - name: npm run typecheck
         run: npm run typecheck
 
