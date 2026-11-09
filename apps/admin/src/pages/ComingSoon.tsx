@@ -3,8 +3,6 @@ import { NAV } from '../layout';
 import { Card, PageHeader } from '../ui';
 
 const DESCRIPTIONS: Record<string, string> = {
-  '/statements': 'Drag and drop the 12 months of carrier and wholesaler statements, plus Lancer bind documents. Duplicate files are rejected by fingerprint.',
-  '/queue': 'Track each statement through AI extraction and validation, then review extracted lines beside the original document.',
   '/reconciliation': 'Balance every statement to $0.00, resolve unmatched lines, approve exceptions, and post to the ledger. Includes the carrier × month completeness grid.',
   '/reports': 'All financial reports with filters and PDF / Excel / CSV export, each tied to the posted ledger.',
   '/valuation': 'Book valuation on T12 commission with adjustable multiples and saved scenarios.',

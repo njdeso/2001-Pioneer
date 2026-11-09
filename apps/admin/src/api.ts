@@ -31,9 +31,9 @@ export class ApiError extends Error {
   }
 }
 
-async function call<Req, Res>(name: string, data: Req): Promise<Res> {
+async function call<Req, Res>(name: string, data: Req, timeoutMs?: number): Promise<Res> {
   try {
-    const res = await httpsCallable<Req, Res>(functions, name)(data);
+    const res = await httpsCallable<Req, Res>(functions, name, timeoutMs ? { timeout: timeoutMs } : undefined)(data);
     return res.data;
   } catch (err: unknown) {
     const e = err as { message?: string; details?: { fieldErrors?: Record<string, string> } };
@@ -59,6 +59,18 @@ export const api = {
   commitImport: (batchId: string) => call<{ batchId: string }, CommitResult>('commitImport', { batchId }),
   undoImport: (batchId: string) => call<{ batchId: string }, UndoResult>('undoImport', { batchId }),
   discardImport: (batchId: string) => call<{ batchId: string }, { ok: true }>('discardImport', { batchId }),
+  registerStatementUpload: (fileName: string, sha256: string, size: number) =>
+    call<{ fileName: string; sha256: string; size: number }, { duplicate: true; statementId: string } | { duplicate: false; statementId: string; uploadPath: string }>(
+      'registerStatementUpload', { fileName, sha256, size }),
+  processStatement: (statementId: string, method: 'auto' | 'ai' = 'auto') =>
+    call<{ statementId: string; method: string }, { status: string; reconciled?: boolean; lines?: number; possibleDuplicateOf?: string | null; failure?: { code: string; message: string } }>(
+      'processStatement', { statementId, method }, 540_000),
+  setStatementPayer: (statementId: string, payerId: string) =>
+    call<{ statementId: string; payerId: string }, { ok: true }>('setStatementPayer', { statementId, payerId }),
+  discardStatement: (statementId: string, reason: string) =>
+    call<{ statementId: string; reason: string }, { ok: true }>('discardStatement', { statementId, reason }),
+  getStatementFileUrl: (statementId: string) =>
+    call<{ statementId: string }, { url: string; expiresInSeconds: number }>('getStatementFileUrl', { statementId }),
   reassignPolicies: (policyIds: string[], brokerId: string) =>
     call<{ policyIds: string[]; brokerId: string }, { moved: number }>('reassignPolicies', { policyIds, brokerId }),
 };

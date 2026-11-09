@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { collection, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { formatBps, formatWindow, parsePercentToBps, settingsInput, fieldErrors, type AuditEvent } from '@asm/shared';
 import { db } from '../firebase';
 import { api, ApiError } from '../api';
@@ -15,7 +15,8 @@ function stampToText(v: unknown): string {
 export function SettingsPage() {
   const { settings } = useData();
   const { user, role } = useAuth();
-  const [f, setF] = useState({ agencyName: '', snapshotStartMonth: '', snapshotMonths: '12', share: '50' });
+  const [f, setF] = useState({ agencyName: '', snapshotStartMonth: '', snapshotMonths: '12', share: '50', aiEnabled: false, aiModel: 'claude-sonnet-5-5', aiLimit: '100' });
+  const [usage, setUsage] = useState<{ calls?: number; inputTokens?: number; outputTokens?: number } | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -29,8 +30,16 @@ export function SettingsPage() {
       snapshotStartMonth: settings.snapshotStartMonth,
       snapshotMonths: String(settings.snapshotMonths ?? 12),
       share: formatBps(settings.defaultBrokerShareBps ?? 5000).replace('%', ''),
+      aiEnabled: settings.aiEnabled ?? false,
+      aiModel: settings.aiModel ?? 'claude-sonnet-5-5',
+      aiLimit: String(settings.aiMonthlyCallLimit ?? 100),
     });
   }, [settings]);
+
+  useEffect(() => {
+    if (role !== 'admin') return;
+    return onSnapshot(doc(db, 'aiUsage', new Date().toISOString().slice(0, 7)), (s) => setUsage(s.exists() ? s.data() : null));
+  }, [role]);
 
   useEffect(() => {
     if (role !== 'admin') return;
@@ -46,6 +55,7 @@ export function SettingsPage() {
     const parsed = settingsInput.safeParse({
       agencyName: f.agencyName, snapshotStartMonth: f.snapshotStartMonth,
       snapshotMonths: Number(f.snapshotMonths), revenueBasis: 'statementPeriod', defaultBrokerShareBps: share,
+      aiEnabled: f.aiEnabled, aiModel: f.aiModel, aiMonthlyCallLimit: Number(f.aiLimit),
     });
     if (!parsed.success) { setErrors(fieldErrors(parsed.error)); return; }
     setErrors({}); setBusy(true);
@@ -80,6 +90,23 @@ export function SettingsPage() {
             </Field>
             <Field label="Revenue month" hint="Decided: commissions count in their statement-period month">
               <TextInput value="Statement period" disabled />
+            </Field>
+            <div className="border-t border-slate-100 pt-4 sm:col-span-2">
+              <h3 className="text-sm font-semibold text-ink">AI statement reader (Claude)</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Used only for statement layouts without a built-in parser (Travelers is parsed without AI). Runs on the server; the API key is a
+                Firebase secret and is never sent to the browser. AI results are never posted automatically.
+              </p>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input type="checkbox" checked={f.aiEnabled} onChange={(e) => setF({ ...f, aiEnabled: e.target.checked })} /> Turn on the AI reader
+            </label>
+            <Field label="Model" error={errors.aiModel}>
+              <TextInput value={f.aiModel} onChange={(e) => setF({ ...f, aiModel: e.target.value })} />
+            </Field>
+            <Field label="Monthly limit (statements read by AI)" error={errors.aiMonthlyCallLimit}
+              hint={usage ? `This month: ${usage.calls ?? 0} statements, ${(usage.inputTokens ?? 0).toLocaleString()} input / ${(usage.outputTokens ?? 0).toLocaleString()} output tokens` : 'No AI use this month'}>
+              <TextInput type="number" min={0} max={2000} value={f.aiLimit} onChange={(e) => setF({ ...f, aiLimit: e.target.value })} />
             </Field>
             <div className="sm:col-span-2">
               <ErrorNote message={error} />

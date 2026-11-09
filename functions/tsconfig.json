@@ -3,13 +3,28 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "baseUrl": ".",
-    "paths": { "@asm/shared": ["../packages/shared/src/index.ts"] }
+    "paths": {
+      "@asm/shared": [
+        "../packages/shared/src/index.ts"
+      ],
+      "@asm/shared/pdf": [
+        "../packages/shared/src/pdfText.ts"
+      ],
+      "@asm/shared/excel": [
+        "../packages/shared/src/excelRead.ts"
+      ]
+    }
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts"
+  ]
 }

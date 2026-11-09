@@ -11,7 +11,12 @@ await build({
   target: 'node22',
   format: 'esm',
   sourcemap: true,
-  external: ['firebase-admin', 'firebase-admin/*', 'firebase-functions', 'firebase-functions/*'],
-  alias: { '@asm/shared': fileURLToPath(new URL('../packages/shared/src/index.ts', import.meta.url)) },
+  // Heavy parsers stay external and are installed as function dependencies.
+  external: ['firebase-admin', 'firebase-admin/*', 'firebase-functions', 'firebase-functions/*', 'pdfjs-dist', 'pdfjs-dist/*', 'exceljs'],
+  alias: {
+    '@asm/shared/pdf': fileURLToPath(new URL('../packages/shared/src/pdfText.ts', import.meta.url)),
+    '@asm/shared/excel': fileURLToPath(new URL('../packages/shared/src/excelRead.ts', import.meta.url)),
+    '@asm/shared': fileURLToPath(new URL('../packages/shared/src/index.ts', import.meta.url)),
+  },
   logLevel: 'info',
 });

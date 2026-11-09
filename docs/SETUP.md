@@ -46,7 +46,7 @@ Fill in the `VITE_FIREBASE_*` values from step 2.6.
 ## 5. Deploy the backend
 
 ```bash
-npm run deploy:firebase          # rules, indexes, storage rules, functions
+npx firebase deploy --project prod --only firestore,storage,functions   # production: only after explicit approval
 ```
 
 The first deploy may ask to enable APIs (Cloud Functions, Cloud Build, Artifact Registry,
@@ -83,6 +83,10 @@ npm run dev
 # put that email in functions/.env OWNER_EMAILS, then sign in and activate owner access.
 ```
 
+## Development environment
+
+Phase 3 onward is developed and tested in `pioneer-dev`. See [DEV-ENVIRONMENT.md](DEV-ENVIRONMENT.md).
+
 ## Testing
 
 | Command | What it checks |
@@ -111,7 +115,7 @@ All test data is synthetic and labelled `SYN-…`.
 - Firestore: `gcloud firestore import gs://<project-id>-backups/<date>` (into the same or a new
   project). Restore into a new project first if you only need to inspect old data.
 - Storage: restore a prior object version from the bucket's versions list.
-- Code/config: redeploy from GitHub (`npm run deploy:firebase`, Netlify redeploy).
+- Code/config: redeploy from GitHub (`npx firebase deploy --project prod --only firestore,storage,functions` after approval, Netlify redeploy).
 - After any restore, open the dashboard and confirm the T12 total matches the last exported
   due-diligence package.
 

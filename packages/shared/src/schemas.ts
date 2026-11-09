@@ -37,6 +37,8 @@ export const carrierInput = z.object({
   defaultRateBps: bps.nullable().default(null),
   contact: contactSchema,
   aliases: z.array(trimmed(120).min(1)).max(20).default([]),
+  /** Agency/agent codes this carrier prints on statements (e.g. "0AB123"). */
+  agencyCodes: z.array(trimmed(30).min(1).transform((s) => s.toUpperCase())).max(20).default([]),
   status: statusSchema.default('active'),
 });
 export type CarrierInput = z.infer<typeof carrierInput>;
@@ -99,6 +101,10 @@ export const settingsInput = z.object({
   snapshotMonths: z.number().int().min(1).max(36).default(12),
   revenueBasis: z.literal('statementPeriod').default('statementPeriod'),
   defaultBrokerShareBps: bps.default(5000),
+  /** Claude fallback for unfamiliar statement layouts. Off until you turn it on. */
+  aiEnabled: z.boolean().default(false),
+  aiModel: z.string().trim().regex(/^[a-z0-9.-]{3,60}$/, 'Use a Claude model id such as claude-sonnet-5-5').default('claude-sonnet-5-5'),
+  aiMonthlyCallLimit: z.number().int().min(0).max(2000).default(100),
 });
 export type SettingsInput = z.infer<typeof settingsInput>;
 

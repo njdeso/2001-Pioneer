@@ -3,6 +3,7 @@ import { NavLink, useNavigate } from 'react-router';
 import { formatWindow, normalizeName, normalizePolicyNumber } from '@asm/shared';
 import { useAuth } from './auth';
 import { useData } from './data';
+import { isProduction, projectId, usingEmulators } from './firebase';
 import { cx } from './ui';
 
 export const NAV = [
@@ -11,8 +12,8 @@ export const NAV = [
   { to: '/brokers', label: 'Brokers', icon: '◉' },
   { to: '/clients', label: 'Clients & Policies', icon: '☰' },
   { to: '/import', label: 'Import Clients', icon: '⇪' },
-  { to: '/statements', label: 'Upload Commission Statements', icon: '⇧', phase: 3 },
-  { to: '/queue', label: 'AI Processing Queue', icon: '⟳', phase: 3 },
+  { to: '/statements', label: 'Upload Commission Statements', icon: '⇧' },
+  { to: '/queue', label: 'AI Processing Queue', icon: '⟳' },
   { to: '/reconciliation', label: 'Reconciliation', icon: '⚖', phase: 4 },
   { to: '/reports', label: 'Reports & Analytics', icon: '▤', phase: 5 },
   { to: '/valuation', label: 'Book Valuation', icon: '$', phase: 5 },
@@ -128,6 +129,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
             <button type="button" onClick={() => void logout()} className="rounded px-2 py-1 text-slate-600 hover:bg-slate-100">Sign out</button>
           </div>
         </header>
+        {!isProduction && (
+          <div className="bg-amber-400 px-6 py-1.5 text-center text-xs font-semibold tracking-wide text-amber-950">
+            DEVELOPMENT ENVIRONMENT · {usingEmulators ? 'local emulators' : `project ${projectId}`} · not production data
+          </div>
+        )}
         {error && <div className="bg-red-50 px-6 py-2 text-sm text-red-700">Data error: {error}</div>}
         <main className="flex-1 px-4 py-6 sm:px-6">{children}</main>
         <Footer />

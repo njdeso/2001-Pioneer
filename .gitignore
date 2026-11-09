@@ -5,6 +5,8 @@ functions/lib/
 .env
 .env.*
 !.env.example
+!**/.env.*.example
+!.firebaserc.example
 .firebase/
 .firebaserc
 firebase-debug.log*
@@ -16,3 +18,4 @@ coverage/
 data/
 exports/
 *.local
+.local-check/
