@@ -109,6 +109,19 @@ describe('statements (Firestore)', () => {
     await assertFails(setDoc(doc(admin(), 'statements/SYN-S1/lines/00001'), { paidCommissionCents: 999 }));
     await assertFails(getDoc(doc(noRole(), 'statements/SYN-S1')));
   });
+  it('Stage 3B: match results and the matching summary are server-only, even for admin', async () => {
+    const matchedLine = { paidCommissionCents: 100, match: { status: 'matched', method: 'manual', policyId: 'SYN-P1' } };
+    await assertSucceeds(getDoc(doc(staff(), 'statements/SYN-S1/lines/00001')));
+    // A browser cannot set, change or clear a match, or rewrite the extracted values beside it.
+    await assertFails(setDoc(doc(admin(), 'statements/SYN-S1/lines/00001'), matchedLine));
+    await assertFails(setDoc(doc(admin(), 'statements/SYN-S1/lines/00001'), { match: { status: 'unmatched' } }, { merge: true }));
+    await assertFails(setDoc(doc(staff(), 'statements/SYN-S1/lines/00001'), { match: null }, { merge: true }));
+    await assertFails(deleteDoc(doc(admin(), 'statements/SYN-S1/lines/00001')));
+    await assertFails(setDoc(doc(admin(), 'statements/SYN-S1'), { matching: { matched: 99 } }, { merge: true }));
+    // Matching never needs browser writes to clients, policies or the ledger either.
+    await assertFails(setDoc(doc(admin(), 'policies/SYN-P1'), { brokerId: 'X' }, { merge: true }));
+    await assertFails(setDoc(doc(admin(), 'ledger/SYN-L2'), { amountCents: 1 }));
+  });
   it('extraction runs and AI usage are admin-read-only; fingerprint keys are server-only', async () => {
     await assertSucceeds(getDoc(doc(admin(), 'extractionRuns/SYN-R1')));
     await assertFails(getDoc(doc(staff(), 'extractionRuns/SYN-R1')));

@@ -83,6 +83,8 @@ export const policyInput = z
     line: lineSchema,
     namedInsured: trimmed(200).default(''),
     brokerId: z.string().min(1).default(UNASSIGNED_BROKER_ID),
+    /** Broker's share on THIS policy, overriding the broker's standard share. null = use the broker's share. */
+    brokerShareBps: bps.nullable().default(null),
     effectiveDate: isoDate.nullable().default(null),
     expirationDate: isoDate.nullable().default(null),
     premiumCents: cents.nullable().default(null),

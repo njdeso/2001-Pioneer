@@ -352,6 +352,7 @@ export const processStatement = onCall(
         postedCents: 0,
         pendingCents: rec.totals.commissionCents,
         lastRunId: runRef.id,
+        matching: null, // lines were replaced; matching starts again
         extractedAt: FieldValue.serverTimestamp(),
         ...meta(actor, false),
       });
@@ -386,7 +387,8 @@ export const setStatementPayer = onCall(async (req) => {
     if (!carrier.exists) throw new HttpsError('not-found', 'Carrier not found.');
     if (!['needs_review', 'discrepancy'].includes(snap.get('status'))) throw new HttpsError('failed-precondition', 'The statement must be extracted first.');
     const lines = await tx.get(ref.collection('lines'));
-    tx.update(ref, { payerId, payerNote: `Chosen by ${actor.email}`, ...meta(actor, false) });
+    // Matches were scoped to the previous payer: keep them, but flag the summary for a re-run.
+    tx.update(ref, { payerId, payerNote: `Chosen by ${actor.email}`, ...(snap.get('matching') ? { 'matching.stale': true } : {}), ...meta(actor, false) });
     lines.docs.forEach((d) => tx.update(d.ref, { payerId }));
     audit(tx, actor, { action: 'set_payer', entityType: 'statement', entityId: statementId, summary: `Statement carrier set to ${carrier.get('name')}`, changes: { payerId: { before: snap.get('payerId') ?? null, after: payerId } } });
     return { ok: true };

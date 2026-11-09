@@ -256,6 +256,7 @@ export function PolicyForm({ open, onClose, client, policy }: {
     expirationDate: policy?.expirationDate ?? '',
     premium: policy?.premiumCents != null ? formatCents(policy.premiumCents, { symbol: false }) : '',
     rate: policy?.commissionRateBps != null ? formatBps(policy.commissionRateBps).replace('%', '') : '',
+    brokerShare: policy?.brokerShareBps != null ? formatBps(policy.brokerShareBps).replace('%', '') : '',
     status: policy?.status ?? 'active',
   }));
   const s = useSubmit();
@@ -267,10 +268,12 @@ export function PolicyForm({ open, onClose, client, policy }: {
     let rate: number | null = null;
     try { if (f.premium.trim()) premiumCents = parseMoneyToCents(f.premium); } catch { s.setErrors({ premiumCents: 'Enter an amount like 2,450.00' }); return; }
     try { if (f.rate.trim()) rate = parsePercentToBps(f.rate); } catch { s.setErrors({ commissionRateBps: 'Enter a percentage like 10' }); return; }
+    let brokerShare: number | null = null;
+    try { if (f.brokerShare.trim()) brokerShare = parsePercentToBps(f.brokerShare); } catch { s.setErrors({ brokerShareBps: 'Enter a percentage like 50' }); return; }
     void s.run(policyInput, {
       clientId: client.id, carrierId: f.carrierId, wholesalerId: f.wholesalerId || null,
       policyNumber: f.policyNumber, alternateNumbers: f.alternateNumbers.split(',').map((a) => a.trim()).filter(Boolean),
-      policyType: f.policyType, line: f.line, namedInsured: f.namedInsured, brokerId: f.brokerId,
+      policyType: f.policyType, line: f.line, namedInsured: f.namedInsured, brokerId: f.brokerId, brokerShareBps: brokerShare,
       effectiveDate: f.effectiveDate || null, expirationDate: f.expirationDate || null,
       premiumCents, commissionRateBps: rate, status: f.status,
     }, (data) => api.savePolicy(data, policy?.id), onClose);
@@ -296,6 +299,10 @@ export function PolicyForm({ open, onClose, client, policy }: {
           </Field>
           <Field label="Assigned broker" error={s.errors.brokerId}>
             <Select value={f.brokerId} onChange={set('brokerId')} options={brokers.map((b) => ({ value: b.id, label: b.name }))} />
+          </Field>
+          <Field label="Broker share on this policy (%)" error={s.errors.brokerShareBps}
+            hint={`Blank = the broker's standard share (${formatBps(brokers.find((b) => b.id === f.brokerId)?.shareBps ?? 0)})`}>
+            <TextInput value={f.brokerShare} onChange={set('brokerShare')} inputMode="decimal" />
           </Field>
           <Field label="Named insured" error={s.errors.namedInsured} className="sm:col-span-2"><TextInput value={f.namedInsured} onChange={set('namedInsured')} /></Field>
           <Field label="Effective date" error={s.errors.effectiveDate}><TextInput type="date" value={f.effectiveDate} onChange={set('effectiveDate')} /></Field>
