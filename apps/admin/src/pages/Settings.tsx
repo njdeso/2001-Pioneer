@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
-import { formatBps, formatWindow, parsePercentToBps, settingsInput, fieldErrors, type AuditEvent } from '@asm/shared';
+import { formatBps, formatWindow, parsePercentToBps, settingsInput, fieldErrors, type AiDiagnosis, type AuditEvent } from '@asm/shared';
 import { db } from '../firebase';
 import { api, ApiError } from '../api';
 import { useAuth } from '../auth';
@@ -22,6 +22,16 @@ export function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [diag, setDiag] = useState<AiDiagnosis | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testError, setTestError] = useState<string | null>(null);
+
+  async function testAi() {
+    setTesting(true); setTestError(null); setDiag(null);
+    try { setDiag(await api.checkAiConnection(f.aiModel.trim() || undefined)); }
+    catch (e) { setTestError(e instanceof Error ? e.message : 'The check could not run.'); }
+    finally { setTesting(false); }
+  }
 
   useEffect(() => {
     if (!settings) return;
@@ -102,12 +112,32 @@ export function SettingsPage() {
               <input type="checkbox" checked={f.aiEnabled} onChange={(e) => setF({ ...f, aiEnabled: e.target.checked })} /> Turn on the AI reader
             </label>
             <Field label="Model" error={errors.aiModel}>
-              <TextInput value={f.aiModel} onChange={(e) => setF({ ...f, aiModel: e.target.value })} />
+              <TextInput list="ai-models" value={f.aiModel} onChange={(e) => setF({ ...f, aiModel: e.target.value })} />
+              <datalist id="ai-models">{(diag?.models.available ?? []).map((m) => <option key={m} value={m} />)}</datalist>
             </Field>
             <Field label="Monthly limit (statements read by AI)" error={errors.aiMonthlyCallLimit}
               hint={usage ? `This month: ${usage.calls ?? 0} statements, ${(usage.inputTokens ?? 0).toLocaleString()} input / ${(usage.outputTokens ?? 0).toLocaleString()} output tokens` : 'No AI use this month'}>
               <TextInput type="number" min={0} max={2000} value={f.aiLimit} onChange={(e) => setF({ ...f, aiLimit: e.target.value })} />
             </Field>
+            <div className="sm:col-span-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <Button type="button" size="sm" variant="secondary" disabled={testing} onClick={() => void testAi()}>{testing ? 'Testing…' : 'Test AI connection'}</Button>
+                <span className="text-xs text-slate-500">Checks the stored key, whether this key can use the model above, and sends one tiny synthetic request (a fraction of a cent). No statement data is sent.</span>
+              </div>
+              <ErrorNote message={testError} />
+              {diag && (
+                <div className="mt-3 space-y-1 text-sm">
+                  <p className={diag.ok ? 'font-medium text-emerald-700' : 'font-medium text-red-700'}>{diag.summary}</p>
+                  <ul className="mt-1 space-y-0.5 text-xs text-slate-700">
+                    <li>{icon(diag.key.state)} API key: {diag.key.length ? `${diag.key.length} characters, ends ${diag.key.hint}` : 'not set'}{diag.key.problems.map((p) => <span key={p} className="block pl-5 text-amber-700">{p}</span>)}</li>
+                    <li>{icon(diag.auth.state)} Authentication: {diag.auth.detail || '—'}</li>
+                    <li>{icon(diag.model_.state)} Model: {diag.model_.detail || '—'}</li>
+                    <li>{icon(diag.request.state)} Test request: {diag.request.detail || '—'}</li>
+                    {diag.models.available.length > 0 && <li className="pt-1 text-slate-500">Models this key can use: {diag.models.available.join(', ')}</li>}
+                  </ul>
+                </div>
+              )}
+            </div>
             <div className="sm:col-span-2">
               <ErrorNote message={error} />
               <div className="mt-2 flex items-center gap-3">
@@ -142,4 +172,8 @@ export function SettingsPage() {
       )}
     </div>
   );
+}
+
+function icon(state: string): string {
+  return state === 'pass' ? '✓' : state === 'fail' ? '✗' : state === 'warn' ? '!' : '–';
 }

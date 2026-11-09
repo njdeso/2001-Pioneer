@@ -123,7 +123,7 @@ test('persistent failures stop after the retry limit', async () => {
 test('non-retryable HTTP errors fail immediately', async () => {
   const { f, calls } = mockFetch(reply({}, 401));
   const res = await extractWithClaude({ apiKey: FAKE_KEY, input, fetchImpl: f, sleep: noSleep });
-  assert.ok(!res.ok && res.code === 'http' && !res.retryable);
+  assert.ok(!res.ok && res.code === 'http' && !res.retryable && res.http?.kind === 'auth');
   assert.equal(calls.length, 1);
 });
 

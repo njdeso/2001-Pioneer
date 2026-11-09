@@ -1,3 +1,4 @@
+import type { AiDiagnosis } from '@asm/shared';
 import { httpsCallable } from 'firebase/functions';
 import type {
   BrokerInput, CarrierInput, ClientInput, ImportOptionsInput, ImportPlanSummary, ImportRecordInput, Message, PolicyInput, SettingsInput,
@@ -60,17 +61,21 @@ export const api = {
   undoImport: (batchId: string) => call<{ batchId: string }, UndoResult>('undoImport', { batchId }),
   discardImport: (batchId: string) => call<{ batchId: string }, { ok: true }>('discardImport', { batchId }),
   registerStatementUpload: (fileName: string, sha256: string, size: number) =>
-    call<{ fileName: string; sha256: string; size: number }, { duplicate: true; statementId: string } | { duplicate: false; statementId: string; uploadPath: string }>(
+    call<{ fileName: string; sha256: string; size: number }, { duplicate: true; statementId: string } | { duplicate: false; resumed?: boolean; statementId: string; uploadPath: string }>(
       'registerStatementUpload', { fileName, sha256, size }),
   processStatement: (statementId: string, method: 'auto' | 'ai' = 'auto') =>
-    call<{ statementId: string; method: string }, { status: string; reconciled?: boolean; lines?: number; possibleDuplicateOf?: string | null; failure?: { code: string; message: string } }>(
+    call<{ statementId: string; method: string }, { status: string; reconciled?: boolean; lines?: number; possibleDuplicateOf?: string | null; failure?: StatementFailure }>(
       'processStatement', { statementId, method }, 540_000),
   setStatementPayer: (statementId: string, payerId: string) =>
     call<{ statementId: string; payerId: string }, { ok: true }>('setStatementPayer', { statementId, payerId }),
   discardStatement: (statementId: string, reason: string) =>
     call<{ statementId: string; reason: string }, { ok: true }>('discardStatement', { statementId, reason }),
+  checkAiConnection: (model?: string, skipRequest = false) =>
+    call<{ model?: string; skipRequest: boolean }, AiDiagnosis>('checkAiConnection', { model, skipRequest }, 120_000),
   getStatementFileUrl: (statementId: string) =>
     call<{ statementId: string }, { url: string; expiresInSeconds: number }>('getStatementFileUrl', { statementId }),
   reassignPolicies: (policyIds: string[], brokerId: string) =>
     call<{ policyIds: string[]; brokerId: string }, { moved: number }>('reassignPolicies', { policyIds, brokerId }),
 };
+
+export interface StatementFailure { code: string; message: string; httpStatus?: number; errorType?: string | null; apiMessage?: string | null; requestId?: string | null }

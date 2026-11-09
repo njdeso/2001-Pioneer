@@ -46,7 +46,7 @@ interface StatementDoc {
   extractedCommissionCents?: Cents;
   postedCents?: Cents;
   pendingCents?: Cents;
-  failure?: { code: string; message: string } | null;
+  failure?: { code: string; message: string; httpStatus?: number; errorType?: string | null; requestId?: string | null } | null;
   discardReason?: string;
   createdAt?: { toDate?: () => Date };
 }
@@ -111,7 +111,7 @@ export function StatementUploadPage() {
       if (reg.duplicate) {
         return update(key, { state: 'duplicate', statementId: reg.statementId, message: 'This exact file was already uploaded.' });
       }
-      update(key, { state: 'uploading', statementId: reg.statementId });
+      update(key, { state: 'uploading', statementId: reg.statementId, message: reg.resumed ? 'Completing an earlier upload of this file that never reached storage.' : undefined });
       await new Promise<void>((resolve, reject) => {
         const task = uploadBytesResumable(storageRef(storage, reg.uploadPath), file, { contentType: CONTENT_TYPES[type] });
         task.on('state_changed', (snap) => update(key, { progress: Math.round((snap.bytesTransferred / snap.totalBytes) * 100) }), reject, () => resolve());
@@ -317,6 +317,12 @@ export function StatementReviewPage() {
       {stmt.status === 'extraction_failed' && stmt.failure && (
         <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
           <b>Processing failed:</b> {stmt.failure.message}
+          {(stmt.failure.httpStatus || stmt.failure.requestId) && (
+            <div className="mt-1 font-mono text-xs text-red-700">
+              {stmt.failure.code}{stmt.failure.httpStatus ? ` · HTTP ${stmt.failure.httpStatus}` : ''}{stmt.failure.errorType ? ` · ${stmt.failure.errorType}` : ''}{stmt.failure.requestId ? ` · ${stmt.failure.requestId}` : ''}
+            </div>
+          )}
+          {stmt.failure.code.startsWith('ai_') && <div className="mt-1 text-xs">Use <Link className="underline" to="/settings">Settings → Test AI connection</Link> to check the key and model before retrying.</div>}
           <div className="mt-2 flex gap-2">
             <Button size="sm" disabled={busy} onClick={() => void act(() => api.processStatement(stmt.id, 'auto'))}>Retry</Button>
             <Button size="sm" variant="secondary" disabled={busy} onClick={() => void act(() => api.processStatement(stmt.id, 'ai'))}>Retry with AI</Button>

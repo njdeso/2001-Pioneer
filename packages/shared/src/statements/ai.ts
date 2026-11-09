@@ -3,6 +3,7 @@ import { parseMoneyToCents, parsePercentToBps, type Cents } from '../money.js';
 import { normalizePolicyNumber } from '../normalize.js';
 import { parseFlexibleDate } from '../importMap.js';
 import { isMonth, type IsoDate } from '../period.js';
+import { ANTHROPIC_API_BASE, MODEL_ID_PATTERN, anthropicHeaders, cleanApiKey, explainApiError, readApiError, type ApiErrorInfo } from './anthropic.js';
 import { TRANSACTION_TYPES, type ExtractedLine, type ExtractedStatement, type LineIssue, type TransactionType } from './types.js';
 
 /**
@@ -18,8 +19,6 @@ import { TRANSACTION_TYPES, type ExtractedLine, type ExtractedStatement, type Li
 
 export const AI_PROMPT_VERSION = 'statement-extract-v1';
 export const DEFAULT_AI_MODEL = 'claude-sonnet-5-5';
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_VERSION = '2023-06-01';
 
 const amountProp = { type: ['string', 'null'], description: 'Exactly as printed, including any sign, trailing minus, parentheses or CR. null if blank.' };
 
@@ -231,19 +230,37 @@ export interface AiCallOptions {
   model?: string;
   input: AiInput;
   fetchImpl?: typeof fetch;
+  /** Per-attempt timeout. */
   timeoutMs?: number;
+  /**
+   * Total time allowed for all attempts and waits. Must stay below the Cloud Function timeout
+   * (540 s) so a slow run fails cleanly instead of the function being killed mid-write.
+   */
+  deadlineMs?: number;
   maxRetries?: number;
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
   maxTokens?: number;
 }
 
+export type AiFailureCode =
+  | 'no_key' | 'bad_model' | 'http' | 'timeout' | 'network' | 'no_tool_call' | 'truncated' | 'invalid_output' | 'refused';
+
 export type AiResult =
-  | { ok: true; statement: ExtractedStatement; usage: { inputTokens: number; outputTokens: number }; model: string; attempts: number }
-  | { ok: false; code: 'no_key' | 'http' | 'timeout' | 'network' | 'no_tool_call' | 'truncated' | 'invalid_output' | 'refused'; message: string; retryable: boolean; attempts: number; usage?: { inputTokens: number; outputTokens: number } };
+  | { ok: true; statement: ExtractedStatement; usage: { inputTokens: number; outputTokens: number }; model: string; attempts: number; requestId: string | null }
+  | {
+      ok: false; code: AiFailureCode; message: string; retryable: boolean; attempts: number;
+      usage?: { inputTokens: number; outputTokens: number };
+      /** Present when Anthropic answered with an HTTP error: the real reason, classified. */
+      http?: ApiErrorInfo;
+    };
 
-const RETRY_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
+export interface AiRequestVariant {
+  /** Forced tool call (default) or let the model choose (fallback when a model rejects forcing). */
+  toolChoice: 'forced' | 'auto';
+}
 
-export function buildAiRequest(model: string, input: AiInput, maxTokens: number): Record<string, unknown> {
+export function buildAiRequest(model: string, input: AiInput, maxTokens: number, variant: AiRequestVariant = { toolChoice: 'forced' }): Record<string, unknown> {
   const doc = input.kind === 'pdf'
     ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: input.base64 } }
     : { type: 'text', text: `Statement file "${input.fileName}" rendered as tab-separated rows:\n\n${input.text}` };
@@ -252,7 +269,7 @@ export function buildAiRequest(model: string, input: AiInput, maxTokens: number)
     max_tokens: maxTokens,
     system: SYSTEM_PROMPT,
     tools: [STATEMENT_TOOL],
-    tool_choice: { type: 'tool', name: STATEMENT_TOOL.name },
+    tool_choice: variant.toolChoice === 'forced' ? { type: 'tool', name: STATEMENT_TOOL.name } : { type: 'auto' },
     messages: [{
       role: 'user',
       content: [doc, { type: 'text', text: 'Extract this commission statement with the record_statement tool.' }],
@@ -260,31 +277,73 @@ export function buildAiRequest(model: string, input: AiInput, maxTokens: number)
   };
 }
 
+/** If Anthropic says max_tokens is above the model's limit, read the limit it reports. */
+export function maxTokensLimitFrom(message: string | null): number | null {
+  if (!message || !/max_tokens/i.test(message)) return null;
+  const m = /max_tokens[^0-9]*\d+\s*>\s*(\d{3,7})/i.exec(message) ?? /(?:maximum|limit|at most|up to)[^0-9]{0,40}(\d{3,7})/i.exec(message);
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isFinite(n) && n >= 1024 ? n : null;
+}
+
 /** Call Claude with retries; never logs or returns the document or response text. */
 export async function extractWithClaude(opts: AiCallOptions): Promise<AiResult> {
-  if (!opts.apiKey) return { ok: false, code: 'no_key', message: 'The Anthropic API key is not configured.', retryable: false, attempts: 0 };
+  const { key } = cleanApiKey(opts.apiKey);
+  if (!key) return { ok: false, code: 'no_key', message: 'The Anthropic API key is not configured (the ANTHROPIC_API_KEY secret is empty).', retryable: false, attempts: 0 };
+  const model = (opts.model || DEFAULT_AI_MODEL).trim();
+  if (!MODEL_ID_PATTERN.test(model)) {
+    return { ok: false, code: 'bad_model', message: `"${model}" is not a valid Claude model ID. Pick a model in Settings (use "Test AI connection" to list the models this key can use).`, retryable: false, attempts: 0 };
+  }
   const f = opts.fetchImpl ?? fetch;
-  const model = opts.model || DEFAULT_AI_MODEL;
+  const now = opts.now ?? Date.now;
   const maxRetries = opts.maxRetries ?? 2;
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  const body = JSON.stringify(buildAiRequest(model, opts.input, opts.maxTokens ?? 32000));
+  const perAttempt = opts.timeoutMs ?? 240_000;
+  const deadline = now() + (opts.deadlineMs ?? 450_000);
+  let maxTokens = opts.maxTokens ?? 32000;
+  let variant: AiRequestVariant = { toolChoice: 'forced' };
+  let adjustments = 0; // request-shape fallbacks used (do not count against transient retries)
   let attempt = 0;
+  let transientFailures = 0;
   let last: AiResult | null = null;
 
-  while (attempt <= maxRetries) {
+  const backoff = async (retryAfterMs: number | null): Promise<boolean> => {
+    const wait = Math.min(Math.max(retryAfterMs ?? 0, 1000 * 2 ** (transientFailures - 1)), 20_000);
+    if (now() + wait + 30_000 > deadline) return false; // not enough time left for another try
+    await sleep(wait);
+    return true;
+  };
+
+  while (true) {
     attempt++;
+    const remaining = deadline - now();
+    if (remaining < 5_000) {
+      return last ?? { ok: false, code: 'timeout', message: 'There was not enough time left to call Claude.', retryable: true, attempts: attempt - 1 };
+    }
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? 240000);
+    const timer = setTimeout(() => ctl.abort(), Math.min(perAttempt, remaining));
     try {
-      const res = await f(ANTHROPIC_URL, {
+      const res = await f(`${ANTHROPIC_API_BASE}/v1/messages`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': opts.apiKey, 'anthropic-version': ANTHROPIC_VERSION },
-        body,
+        headers: anthropicHeaders(key),
+        body: JSON.stringify(buildAiRequest(model, opts.input, maxTokens, variant)),
         signal: ctl.signal,
       });
       if (!res.ok) {
-        last = { ok: false, code: 'http', message: `Claude API returned HTTP ${res.status}`, retryable: RETRY_STATUS.has(res.status), attempts: attempt };
-        if (last.retryable && attempt <= maxRetries) { await sleep(1000 * 2 ** (attempt - 1)); continue; }
+        const info = await readApiError(res);
+        last = { ok: false, code: 'http', message: explainApiError(info, model), retryable: info.retryable, attempts: attempt, http: info };
+
+        // Request-shape fallbacks: fix the request and try again straight away (at most twice).
+        if (info.kind === 'invalid_request' && adjustments < 2) {
+          const limit = maxTokensLimitFrom(info.apiMessage);
+          if (limit && limit < maxTokens) { maxTokens = limit; adjustments++; continue; }
+          if (variant.toolChoice === 'forced' && /tool_choice|tool use|thinking/i.test(info.apiMessage ?? '')) {
+            variant = { toolChoice: 'auto' }; adjustments++; continue;
+          }
+        }
+        if (info.retryable && transientFailures < maxRetries) {
+          transientFailures++;
+          if (await backoff(info.retryAfterMs)) continue;
+        }
         return last;
       }
       const json = (await res.json()) as {
@@ -292,9 +351,10 @@ export async function extractWithClaude(opts: AiCallOptions): Promise<AiResult> 
         usage?: { input_tokens?: number; output_tokens?: number };
         content?: { type: string; name?: string; input?: unknown }[];
       };
+      const requestId = res.headers.get('request-id');
       const usage = { inputTokens: json.usage?.input_tokens ?? 0, outputTokens: json.usage?.output_tokens ?? 0 };
       if (json.stop_reason === 'refusal') return { ok: false, code: 'refused', message: 'Claude declined to process this document.', retryable: false, attempts: attempt, usage };
-      if (json.stop_reason === 'max_tokens') return { ok: false, code: 'truncated', message: 'The statement was too long for one request; the answer was cut off.', retryable: false, attempts: attempt, usage };
+      if (json.stop_reason === 'max_tokens') return { ok: false, code: 'truncated', message: `The statement was too long for one request; the answer was cut off at ${maxTokens.toLocaleString('en-US')} output tokens. Split the PDF into smaller files.`, retryable: false, attempts: attempt, usage };
       const call = json.content?.find((c) => c.type === 'tool_use' && c.name === STATEMENT_TOOL.name);
       if (!call) return { ok: false, code: 'no_tool_call', message: 'Claude did not return structured statement data.', retryable: true, attempts: attempt, usage };
       const parsed = aiStatementSchema.safeParse(call.input);
@@ -303,17 +363,23 @@ export async function extractWithClaude(opts: AiCallOptions): Promise<AiResult> 
         return { ok: false, code: 'invalid_output', message: `Claude's answer did not match the required format (${first}).`, retryable: false, attempts: attempt, usage };
       }
       const pageCount = opts.input.kind === 'pdf' ? opts.input.pageCount : null;
-      return { ok: true, statement: aiToStatement(parsed.data, pageCount), usage, model, attempts: attempt };
+      return { ok: true, statement: aiToStatement(parsed.data, pageCount), usage, model, attempts: attempt, requestId };
     } catch (err) {
       const aborted = (err as { name?: string })?.name === 'AbortError';
-      last = { ok: false, code: aborted ? 'timeout' : 'network', message: aborted ? 'The Claude request timed out.' : 'Could not reach the Claude API.', retryable: true, attempts: attempt };
-      if (attempt <= maxRetries) { await sleep(1000 * 2 ** (attempt - 1)); continue; }
+      last = {
+        ok: false, code: aborted ? 'timeout' : 'network',
+        message: aborted ? 'The Claude request timed out.' : 'Could not reach the Claude API (network error from the Cloud Function).',
+        retryable: true, attempts: attempt,
+      };
+      if (transientFailures < maxRetries) {
+        transientFailures++;
+        if (await backoff(null)) continue;
+      }
       return last;
     } finally {
       clearTimeout(timer);
     }
   }
-  return last ?? { ok: false, code: 'network', message: 'Claude request failed.', retryable: true, attempts: attempt };
 }
 
 /** Render spreadsheet rows as compact tab-separated text for the AI (row cap keeps cost bounded). */
