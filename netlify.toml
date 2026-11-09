@@ -7,11 +7,16 @@
   NODE_VERSION = "22"
 
 # Pull-request previews and branch deploys must never talk to production (pioneer-285cf).
-# Values here override the Netlify UI, so previews always build against the development project.
-# The Firebase web config is not a secret (it only identifies the project); access is enforced by
-# Auth, security rules and server-side role checks. While the dev API key / app ID below are empty,
-# previews show the "not configured" screen instead of connecting anywhere.
-# The production context is not overridden: it keeps using the values set in the Netlify UI.
+# They are built by scripts/netlify-dev-build.mjs against the development project, pioneer-2001-dev.
+# The dev web API key and app ID are NOT in this public repo: they come from the Netlify environment
+# variables DEV_FIREBASE_API_KEY and DEV_FIREBASE_APP_ID (Deploy Previews + Branch deploys contexts).
+# If they are missing or belong to another project, the build fails with an explicit error. It never
+# falls back to the production values.
+# The blank VITE_ values below are a second safeguard: values in this file override the Netlify UI, so
+# even a preview built some other way can never pick up the production key.
+# The production context is not overridden: it keeps the normal build command and the UI values.
+[context.deploy-preview]
+  command = "npm install && node scripts/netlify-dev-build.mjs"
 [context.deploy-preview.environment]
   VITE_FIREBASE_PROJECT_ID = "pioneer-2001-dev"
   VITE_FIREBASE_AUTH_DOMAIN = "pioneer-2001-dev.firebaseapp.com"
@@ -21,6 +26,8 @@
   VITE_FUNCTIONS_REGION = "us-central1"
   VITE_USE_EMULATORS = "false"
 
+[context.branch-deploy]
+  command = "npm install && node scripts/netlify-dev-build.mjs"
 [context.branch-deploy.environment]
   VITE_FIREBASE_PROJECT_ID = "pioneer-2001-dev"
   VITE_FIREBASE_AUTH_DOMAIN = "pioneer-2001-dev.firebaseapp.com"

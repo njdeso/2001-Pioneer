@@ -6,6 +6,10 @@
 //   3. Interrupted upload   (register, upload never arrives, process fails "not_uploaded",
 //                            re-register the same file → resumes into the SAME record → processes)
 //   4. True duplicate       (same file again after it is stored → still reported as duplicate)
+//   5. Stage 3B matching    (fresh synthetic statement SYN3B-AUTO-…: automatic matching of every
+//                            scenario, broker percentages, negative commission, totals; manual assign /
+//                            unmatch / re-run keeps manual / return to automatic; audit entries;
+//                            extracted values and policies unchanged; nothing posted to the ledger)
 //
 // Synthetic data only: fictional carrier, insureds and policy numbers. Nothing is read from or
 // written to production. Prints no API keys (the AI key never leaves Secret Manager).
@@ -18,9 +22,11 @@ import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { initializeApp, applicationDefault } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { assertDevProjectNumber } from './lib/dev-guard.mjs';
+import { seedBook, writeStatement, LINES, EXPECTED_SUMMARY } from './lib/synthetic-3b.mjs';
 
 const DEV = 'pioneer-2001-dev';
 const PROD = 'pioneer-285cf';
@@ -43,6 +49,8 @@ if (credPath && existsSync(credPath)) {
 
 const credential = applicationDefault();
 initializeApp({ credential, projectId: DEV, serviceAccountId: SA });
+// Second, independent check: Google must report the dev project NUMBER for these credentials.
+await assertDevProjectNumber(DEV, async () => (await credential.getAccessToken()).access_token);
 const db = getFirestore();
 
 // ---------------------------------------------------------------- reporting
@@ -146,6 +154,98 @@ async function putFile(bucket, path, bytes) {
 const readOk = (p) => p && (p.status === 'needs_review' || p.status === 'discrepancy') && p.lines === 3 && p.reconciled === true;
 const describe = (p) => p.status === 'extraction_failed' ? `extraction_failed: ${p.failure?.code} — ${p.failure?.message}` : `${p.status}, ${p.lines} lines, reconciled=${p.reconciled}`;
 
+// ---------------------------------------------------------------- Stage 3B matching
+const $ = (c) => (c === null || c === undefined ? '—' : `${c < 0 ? '-' : ''}$${(Math.abs(c) / 100).toFixed(2)}`);
+const stable = (o) => JSON.stringify(o, (k, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v));
+const extractedOnly = (d) => { const { match, ...rest } = d; return stable(rest); };
+
+async function stage3b() {
+  summary('\n#### Stage 3B — commission matching (synthetic data)\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  // Clean up earlier automated statements (synthetic, dev only), then build a fresh one.
+  const old = await db.collection('statements').where('synthetic', '==', true).get();
+  for (const d of old.docs.filter((x) => x.id.startsWith('SYN3B-AUTO-'))) {
+    for (const l of await d.ref.collection('lines').listDocuments()) await l.delete();
+    await d.ref.delete();
+  }
+  await seedBook(db, FieldValue);
+  const sid = `SYN3B-AUTO-${Date.now()}`;
+  const ref = await writeStatement(db, FieldValue, sid, 'Stage 3B automated test');
+
+  const ledgerBefore = (await db.collection('ledger').count().get()).data().count;
+  const policiesBefore = stable((await db.collection('policies').where('synthetic', '==', true).get()).docs.map((d) => [d.id, d.data()]));
+  const linesBefore = new Map((await ref.collection('lines').get()).docs.map((d) => [d.id, extractedOnly(d.data())]));
+  const lineMatch = async (id) => (await ref.collection('lines').doc(id).get()).get('match');
+
+  // 1. Automatic matching
+  const run1 = await call('runStatementMatching', { statementId: sid });
+  const after1 = new Map((await ref.collection('lines').get()).docs.map((d) => [d.id, d.get('match')]));
+  LINES.forEach((l, i) => {
+    const id = String(i + 1).padStart(5, '0');
+    const m = after1.get(id) ?? {};
+    const e = l.expect;
+    const errs = [];
+    if (m.status !== e.status) errs.push(`status ${m.status}`);
+    if (e.policyId && m.policyId !== e.policyId) errs.push(`policy ${m.policyId}`);
+    if (e.reason && !(m.reasons ?? []).includes(e.reason)) errs.push(`reasons ${(m.reasons ?? []).join(',')}`);
+    if (e.confidence && m.confidence !== e.confidence) errs.push(`confidence ${m.confidence}`);
+    if (e.brokerId && m.brokerId !== e.brokerId) errs.push(`broker ${m.brokerId}`);
+    if (e.shareBps !== undefined && m.brokerShareBps !== e.shareBps) errs.push(`share ${m.brokerShareBps}`);
+    if (e.shareSource && m.brokerShareSource !== e.shareSource) errs.push(`share source ${m.brokerShareSource}`);
+    if (e.brokerCents !== undefined && (m.brokerCents !== e.brokerCents || m.agencyCents !== e.agencyCents)) errs.push(`split ${$(m.brokerCents)}/${$(m.agencyCents)}`);
+    const split = m.status === 'matched' ? ` · broker ${$(m.brokerCents)} (${(m.brokerShareBps ?? 0) / 100}%${m.brokerShareSource === 'policy' ? ' policy' : ''}) / agency ${$(m.agencyCents)}` : '';
+    record(`Auto: line ${i + 1} "${l.policyNumberRaw}" ${$(l.paid)}`, errs.length === 0,
+      `${m.status}${m.policyId ? ` → ${m.policyId}` : ''}${split}; ${(m.reasons ?? []).join(', ')}${errs.length ? ` — EXPECTED ${e.status}${e.policyId ? ` ${e.policyId}` : ''}: ${errs.join('; ')}` : ''}`);
+  });
+  const sumErrs = Object.entries(EXPECTED_SUMMARY).filter(([k, v]) => run1[k] !== v).map(([k, v]) => `${k} ${run1[k]} ≠ ${v}`);
+  record('Auto: statement totals and balance', sumErrs.length === 0,
+    `commission ${$(run1.commissionCents)} = matched ${$(run1.matchedCommissionCents)} + ambiguous ${$(run1.ambiguousCommissionCents)} + unmatched ${$(run1.unmatchedCommissionCents)}; broker ${$(run1.brokerCents)} + agency ${$(run1.agencyCents)}; balanced=${run1.balanced}${sumErrs.length ? ` — ${sumErrs.join('; ')}` : ''}`);
+
+  // 2. Manual: confirm the ambiguous line 2 by assigning its policy
+  const a = await call('setLineMatch', { action: 'assign', statementId: sid, lineId: '00002', policyId: 'SYN3B-P-BETA', note: 'smoke test: confirm ambiguous line' });
+  record('Manual: assign ambiguous line 2 to its policy', a.match.status === 'matched' && a.match.method === 'manual' && a.match.brokerId === 'SYN3B-B40' && a.match.brokerCents === 2000 && a.match.agencyCents === 3000,
+    `${a.match.status} (${a.match.method}) → ${a.match.policyId}; broker ${$(a.match.brokerCents)} (40%) / agency ${$(a.match.agencyCents)}`);
+  // 3. Manual: mark line 1 unmatched
+  const u = await call('setLineMatch', { action: 'unmatch', statementId: sid, lineId: '00001', note: 'smoke test: unmatch' });
+  record('Manual: mark line 1 unmatched', u.match.status === 'unmatched' && u.match.method === 'manual' && u.match.brokerCents === 0, `${u.match.status} (${u.match.method})`);
+  // 4. Re-running automatic matching keeps both manual decisions
+  const run2 = await call('runStatementMatching', { statementId: sid });
+  const [m1, m2] = [await lineMatch('00001'), await lineMatch('00002')];
+  record('Re-run automatic matching keeps manual decisions', run2.keptManual === 2 && m1.status === 'unmatched' && m1.method === 'manual' && m2.status === 'matched' && m2.method === 'manual',
+    `kept ${run2.keptManual} manual; line 1 ${m1.status}/${m1.method}, line 2 ${m2.status}/${m2.method}`);
+  // 5. Manual: return line 1 to automatic
+  const v = await call('setLineMatch', { action: 'auto', statementId: sid, lineId: '00001', note: 'smoke test: revert' });
+  record('Manual: return line 1 to automatic matching', v.match.status === 'matched' && v.match.method === 'auto' && v.match.policyId === 'SYN3B-P-ALPHA', `${v.match.status} (${v.match.method}) → ${v.match.policyId}`);
+  const s = v.summary;
+  record('Totals after manual changes', s.matched === 7 && s.matchedCommissionCents === 24500 && s.brokerCents === 10600 && s.agencyCents === 13900 && s.balanced === true,
+    `matched ${s.matched}, ${$(s.matchedCommissionCents)}; broker ${$(s.brokerCents)}, agency ${$(s.agencyCents)}; balanced=${s.balanced}`);
+
+  // 6. Audit trail
+  const auditFor = async (entityId) => (await db.collection('auditLog').where('entityId', '==', entityId).get()).docs.map((d) => d.data());
+  const a2 = await auditFor(`${sid}/00002`);
+  const a1 = await auditFor(`${sid}/00001`);
+  const aS = await auditFor(sid);
+  const assign = a2.find((x) => x.action === 'match_manual_assign');
+  const auditOk = !!assign && assign.changes?.status?.before === 'ambiguous' && assign.changes?.status?.after === 'matched' && /confirm ambiguous/.test(assign.summary)
+    && a1.some((x) => x.action === 'match_manual_unmatch') && a1.some((x) => x.action === 'match_revert_auto')
+    && aS.filter((x) => x.action === 'match_auto_run').length === 2;
+  record('Audit log records every change with before/after and note', auditOk,
+    `line 2: ${a2.map((x) => x.action).join(', ')}; line 1: ${a1.map((x) => x.action).join(', ')}; statement: ${aS.filter((x) => x.action === 'match_auto_run').length} automatic runs`);
+
+  // 7. Data protection
+  const linesAfter = new Map((await ref.collection('lines').get()).docs.map((d) => [d.id, extractedOnly(d.data())]));
+  const unchanged = [...linesBefore].every(([id, h]) => linesAfter.get(id) === h);
+  record('Extracted line values never changed', unchanged && linesAfter.size === linesBefore.size, `${linesAfter.size} lines compared field by field`);
+  const policiesAfter = stable((await db.collection('policies').where('synthetic', '==', true).get()).docs.map((d) => [d.id, d.data()]));
+  record('Clients and policies not modified by matching', policiesAfter === policiesBefore, 'synthetic policies compared field by field');
+  const ledgerAfter = (await db.collection('ledger').count().get()).data().count;
+  const ledgerForStmt = (await db.collection('ledger').where('statementId', '==', sid).count().get()).data().count;
+  const stmt = (await ref.get()).data();
+  record('Nothing posted to financial reports', ledgerAfter === ledgerBefore && ledgerForStmt === 0 && (stmt.postedCents ?? 0) === 0,
+    `ledger entries ${ledgerBefore} → ${ledgerAfter}; for this statement ${ledgerForStmt}; posted ${$(stmt.postedCents ?? 0)}`);
+}
+
 // ---------------------------------------------------------------- run
 summary(`### Live smoke test — ${DEV}\n`);
 summary('| | Check | Result |');
@@ -197,6 +297,8 @@ try {
     const r3 = await call('registerStatementUpload', { fileName: b.fileName, sha256: b.sha256, size: b.bytes.length });
     record('Stored file is still blocked as a duplicate', r3.duplicate === true, `duplicate=${r3.duplicate}`);
   }
+  // Stage 3B does not use Claude, so it runs even if the AI checks failed.
+  try { await stage3b(); } catch (err) { record('Stage 3B matching run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
 }

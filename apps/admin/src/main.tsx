@@ -14,10 +14,18 @@ import { SettingsPage } from './pages/Settings';
 import { ImportPage } from './pages/Import';
 import { StatementUploadPage, StatementQueuePage, StatementReviewPage } from './pages/Statements';
 import { ComingSoonPage } from './pages/ComingSoon';
-import { configMissing } from './firebase';
+import { configMissing, previewTargetsWrongProject } from './firebase';
 
 function Gate() {
   const { loading, user, role } = useAuth();
+  if (previewTargetsWrongProject) {
+    return (
+      <div className="mx-auto max-w-lg p-10 text-sm">
+        <h1 className="text-lg font-semibold text-red-700">Preview refused</h1>
+        <p className="mt-2 text-slate-600">This preview build is not pointed at the development project (pioneer-2001-dev), so it will not connect to anything. Previews never use production.</p>
+      </div>
+    );
+  }
   if (configMissing) {
     return (
       <div className="mx-auto max-w-lg p-10 text-sm">
