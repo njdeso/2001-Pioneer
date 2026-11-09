@@ -19,7 +19,9 @@ service firebase.storage {
     }
 
     match /incoming/{uid}/{statementId}/{fileName} {
+      // resource == null: the path must be empty, so an upload can never replace an earlier one.
       allow create: if isAdmin()
+        && resource == null
         && request.auth.uid == uid
         && fileName.matches('upload\\.(pdf|xlsx|csv)')
         && request.resource.size > 0
