@@ -15,23 +15,18 @@ stored field is additive.
 
 ## Step 0 — One-time dev access for GitHub Actions (≈5 minutes, dev project only)
 
-1. **Service account for dev.** Google Cloud console → project **pioneer-2001-dev** → IAM & Admin → Service accounts →
-   **Create service account** `github-dev-deployer` → role **Owner** (on pioneer-2001-dev only — never add it to
-   pioneer-285cf) → open it → **Keys → Add key → JSON**. A file downloads.
-2. **GitHub secrets.** github.com/njdeso/2001-Pioneer → Settings → Secrets and variables → Actions:
-   - Secret `FIREBASE_DEV_SERVICE_ACCOUNT` = the whole contents of that JSON file. Then delete the file.
-   - Secret `ANTHROPIC_API_KEY_DEV` = your Anthropic API key. Used only if dev does not already have the secret; the
-     workflow never prints it and never overwrites an existing one.
-   - Variables tab, variable `DEV_OWNER_EMAILS` = your email. Optional; it lets you claim the owner role in the dev
-     app.
-3. **Dev project basics.** All in pioneer-2001-dev:
-   - Blaze plan.
-   - A Web app registered (Project settings → Your apps).
-   - Firestore database created.
-   - Storage bucket created.
-   - Authentication → Email/Password enabled.
+The dev deploy uses **Workload Identity Federation**: no downloaded keys, no Owner role, nothing stored in GitHub except two
+non-secret identifiers. Full explanation: [DEV-DEPLOY-WIF.md](DEV-DEPLOY-WIF.md).
 
-   The workflow tells you exactly which one is missing if any is.
+1. In the Anthropic Console, create a **separate development API key** (ideally in its own workspace, with a low spend limit).
+2. Open Google Cloud Shell signed in as the owner of pioneer-2001-dev and paste:
+   ```bash
+   gh auth login        # optional: lets the script set the GitHub variables and start the dev run itself
+   curl -fsSL https://raw.githubusercontent.com/njdeso/2001-Pioneer/fix/ai-statement-reader/scripts/setup-dev-wif.sh -o setup-dev-wif.sh
+   less setup-dev-wif.sh  # review it (q to quit)
+   bash setup-dev-wif.sh
+   ```
+   Paste the development key when asked. It is not shown, not logged and not saved to a file.
 
 Then the **Deploy to dev** workflow:
 - deploys rules, indexes and functions to pioneer-2001-dev

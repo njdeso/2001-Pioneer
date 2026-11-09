@@ -10,7 +10,10 @@
 // Synthetic data only: fictional carrier, insureds and policy numbers. Nothing is read from or
 // written to production. Prints no API keys (the AI key never leaves Secret Manager).
 //
-// Needs: GOOGLE_APPLICATION_CREDENTIALS = service-account key for pioneer-2001-dev.
+// Credentials: Application Default Credentials for the pioneer-2001-dev deployer service account
+// (in GitHub Actions, a short-lived Workload Identity Federation credential; no key file).
+// SMOKE_SERVICE_ACCOUNT = that service account's email (used to sign the test user's custom token
+// through the IAM signBlob API, which needs no private key).
 import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { initializeApp, applicationDefault } from 'firebase-admin/app';
@@ -27,13 +30,19 @@ const MODEL = process.env.SMOKE_AI_MODEL || 'claude-sonnet-5-5';
 // ---------------------------------------------------------------- guards
 const rc = JSON.parse(readFileSync('.firebaserc', 'utf8'));
 if (rc.projects?.dev !== DEV) throw new Error(`.firebaserc dev alias is ${rc.projects?.dev}, expected ${DEV}`);
+const SA = process.env.SMOKE_SERVICE_ACCOUNT ?? '';
+if (!SA.endsWith(`@${DEV}.iam.gserviceaccount.com`) || SA.includes(PROD)) {
+  throw new Error(`Refusing: SMOKE_SERVICE_ACCOUNT must be a ${DEV} service account (got "${SA || 'nothing'}").`);
+}
 const credPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-if (!credPath || !existsSync(credPath)) throw new Error('GOOGLE_APPLICATION_CREDENTIALS is not set.');
-const credProject = JSON.parse(readFileSync(credPath, 'utf8')).project_id;
-if (credProject !== DEV || credProject === PROD) throw new Error(`Refusing: credentials are for "${credProject}", not ${DEV}.`);
+if (credPath && existsSync(credPath)) {
+  const c = JSON.parse(readFileSync(credPath, 'utf8'));
+  if (c.type === 'service_account') throw new Error('Refusing: a downloaded service-account key was supplied; this test runs only with keyless credentials.');
+  if (c.project_id && c.project_id !== DEV) throw new Error(`Refusing: credentials are for "${c.project_id}", not ${DEV}.`);
+}
 
 const credential = applicationDefault();
-initializeApp({ credential, projectId: DEV });
+initializeApp({ credential, projectId: DEV, serviceAccountId: SA });
 const db = getFirestore();
 
 // ---------------------------------------------------------------- reporting
