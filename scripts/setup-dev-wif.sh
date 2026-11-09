@@ -187,9 +187,20 @@ grant_project "$RUNTIME_SA" roles/cloudbuild.builds.builder
 grant_project "$RUNTIME_SA" roles/logging.logWriter
 
 step "7. Anthropic DEVELOPMENT key → Secret Manager in ${PROJECT_ID}"
+KEY_OK=0
 if gcloud secrets describe "$SECRET_NAME" --project "$PROJECT_ID" >/dev/null 2>&1 && [ "${ROTATE_KEY:-0}" != "1" ]; then
-  ok "secret ${SECRET_NAME} already exists; left unchanged (ROTATE_KEY=1 to add a new version)"
-else
+  # Check the format of the existing value with your own access, without printing it.
+  # Only the first 7 characters are kept in memory.
+  KEY_PREFIX="$(gcloud secrets versions access latest --secret "$SECRET_NAME" --project "$PROJECT_ID" 2>/dev/null | cut -c1-7 | head -n1 || true)"
+  if [ "$KEY_PREFIX" = "sk-ant-" ]; then
+    KEY_OK=1
+    ok "secret ${SECRET_NAME} exists and looks like an Anthropic key; left unchanged (ROTATE_KEY=1 to replace it)"
+  else
+    warn "the existing ${SECRET_NAME} value is not an Anthropic API key (it does not start with sk-ant-); it will be replaced."
+  fi
+  unset KEY_PREFIX
+fi
+if [ "$KEY_OK" != "1" ]; then
   echo "    Paste the separate Anthropic DEVELOPMENT API key. Nothing is shown while you paste. Then press Enter."
   IFS= read -rs -p "    Key: " ANTHROPIC_DEV_KEY; echo
   ANTHROPIC_DEV_KEY="$(printf '%s' "$ANTHROPIC_DEV_KEY" | tr -d '[:space:]')"
