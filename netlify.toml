@@ -6,6 +6,30 @@
 [build.environment]
   NODE_VERSION = "22"
 
+# Pull-request previews and branch deploys must never talk to production (pioneer-285cf).
+# Values here override the Netlify UI, so previews always build against the development project.
+# The Firebase web config is not a secret (it only identifies the project); access is enforced by
+# Auth, security rules and server-side role checks. While the dev API key / app ID below are empty,
+# previews show the "not configured" screen instead of connecting anywhere.
+# The production context is not overridden: it keeps using the values set in the Netlify UI.
+[context.deploy-preview.environment]
+  VITE_FIREBASE_PROJECT_ID = "pioneer-2001-dev"
+  VITE_FIREBASE_AUTH_DOMAIN = "pioneer-2001-dev.firebaseapp.com"
+  VITE_FIREBASE_STORAGE_BUCKET = "pioneer-2001-dev.firebasestorage.app"
+  VITE_FIREBASE_API_KEY = ""
+  VITE_FIREBASE_APP_ID = ""
+  VITE_FUNCTIONS_REGION = "us-east4"
+  VITE_USE_EMULATORS = "false"
+
+[context.branch-deploy.environment]
+  VITE_FIREBASE_PROJECT_ID = "pioneer-2001-dev"
+  VITE_FIREBASE_AUTH_DOMAIN = "pioneer-2001-dev.firebaseapp.com"
+  VITE_FIREBASE_STORAGE_BUCKET = "pioneer-2001-dev.firebasestorage.app"
+  VITE_FIREBASE_API_KEY = ""
+  VITE_FIREBASE_APP_ID = ""
+  VITE_FUNCTIONS_REGION = "us-east4"
+  VITE_USE_EMULATORS = "false"
+
 # Single-page app routing
 [[redirects]]
   from = "/*"
