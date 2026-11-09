@@ -74,14 +74,20 @@ BILLING="$(gcloud billing projects describe "$PROJECT_ID" --format='value(billin
 [ "$BILLING" = "True" ] && ok "billing enabled (Blaze)" || warn "Could not confirm billing. Cloud Functions needs the Blaze plan on ${PROJECT_ID}."
 
 step "1. Enabling APIs (${PROJECT_ID} only)"
-gcloud services enable --project "$PROJECT_ID" \
-  iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com \
-  serviceusage.googleapis.com cloudbilling.googleapis.com compute.googleapis.com firebase.googleapis.com \
-  firebaserules.googleapis.com firestore.googleapis.com firebasestorage.googleapis.com storage.googleapis.com \
-  identitytoolkit.googleapis.com cloudfunctions.googleapis.com run.googleapis.com cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com eventarc.googleapis.com pubsub.googleapis.com secretmanager.googleapis.com \
+# Google accepts at most 20 services per enable request, so the list is enabled in batches.
+APIS=(
+  iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com cloudresourcemanager.googleapis.com
+  serviceusage.googleapis.com cloudbilling.googleapis.com compute.googleapis.com firebase.googleapis.com
+  firebaserules.googleapis.com firestore.googleapis.com firebasestorage.googleapis.com storage.googleapis.com
+  identitytoolkit.googleapis.com cloudfunctions.googleapis.com run.googleapis.com cloudbuild.googleapis.com
+  artifactregistry.googleapis.com eventarc.googleapis.com pubsub.googleapis.com secretmanager.googleapis.com
   logging.googleapis.com
-ok "APIs enabled"
+)
+API_BATCH=15
+for ((i = 0; i < ${#APIS[@]}; i += API_BATCH)); do
+  gcloud services enable --project "$PROJECT_ID" "${APIS[@]:i:API_BATCH}"
+done
+ok "APIs enabled (${#APIS[@]} services)"
 for i in $(seq 1 24); do
   gcloud iam service-accounts describe "$RUNTIME_SA" --project "$PROJECT_ID" >/dev/null 2>&1 && break
   [ "$i" = 24 ] && die "The default compute account ${RUNTIME_SA} does not exist (Compute Engine API just enabled?). Wait a minute and run again."
