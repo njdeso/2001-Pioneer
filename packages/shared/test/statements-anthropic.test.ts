@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractWithClaude, maxTokensLimitFrom, type AiInput } from '../src/statements/ai.ts';
+import { buildAiRequest, extractWithClaude, maxTokensLimitFrom, STATEMENT_SCHEMA, type AiInput } from '../src/statements/ai.ts';
 import { cleanApiKey, classifyApiError, readApiError } from '../src/statements/anthropic.ts';
 import { diagnoseAnthropic } from '../src/statements/diagnose.ts';
 
@@ -116,14 +116,60 @@ test('max_tokens above the model limit: retried once with the limit Anthropic re
   assert.equal(body(calls[1]).max_tokens, 16384);
 });
 
-test('a model that rejects a forced tool choice is retried once with tool_choice auto', async () => {
+test('structured output is the default and a forced tool choice is never sent', async () => {
+  for (const format of ['json_schema', 'tool_auto'] as const) {
+    const body = buildAiRequest('claude-sonnet-5-5', input, 1000, format) as Record<string, unknown>;
+    const tc = body.tool_choice as { type?: string } | undefined;
+    assert.ok(!tc || tc.type === 'auto', `${format}: tool_choice must be absent or auto, got ${JSON.stringify(tc)}`);
+    assert.ok(!JSON.stringify(body).includes('"type":"any"'));
+  }
+  const def = buildAiRequest('claude-sonnet-5-5', input, 1000) as Record<string, unknown>;
+  assert.deepEqual(def.output_config, { format: { type: 'json_schema', schema: STATEMENT_SCHEMA } });
+  const tool = buildAiRequest('claude-sonnet-5-5', input, 1000, 'tool_auto') as { tools: { input_schema: unknown }[]; tool_choice: unknown };
+  assert.equal(tool.tools[0].input_schema, STATEMENT_SCHEMA); // the same schema in both formats
+  assert.deepEqual(tool.tool_choice, { type: 'auto' });
+});
+
+test('the statement schema stays inside what structured output accepts', () => {
+  const bad: string[] = [];
+  const walk = (node: Record<string, unknown>, path: string) => {
+    if (Array.isArray(node.type)) bad.push(`${path}: union type ${JSON.stringify(node.type)}`);
+    for (const k of ['anyOf', 'oneOf', 'allOf', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'pattern', 'maxItems', 'format']) {
+      if (k in node) bad.push(`${path}: ${k}`);
+    }
+    if (node.type === 'object') {
+      const props = (node.properties ?? {}) as Record<string, Record<string, unknown>>;
+      if (node.additionalProperties !== false) bad.push(`${path}: additionalProperties must be false`);
+      const req = new Set((node.required ?? []) as string[]);
+      for (const p of Object.keys(props)) if (!req.has(p)) bad.push(`${path}.${p}: not required`);
+      for (const [p, v] of Object.entries(props)) walk(v, `${path}.${p}`);
+    }
+    if (node.type === 'array') walk(node.items as Record<string, unknown>, `${path}[]`);
+  };
+  walk(STATEMENT_SCHEMA as unknown as Record<string, unknown>, '$');
+  assert.deepEqual(bad, []);
+});
+
+test('Sonnet 5.5 forced-tool 400 cannot happen; if structured output is rejected, retry once with tool_choice auto', async () => {
+  const toolAnswer = { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'record_statement', input: { carrierName: 'X', agencyCode: '', statementMonth: '2026-10', statementDate: '', totals: { commissionPayable: '1.00', monthCommissionPayable: '', paymentReceived: '', premiumForCommission: '', transactionPremium: '', ytdCommissionPayable: '' }, adjustments: [], lines: [{ page: 1, insuredName: 'A', policyNumber: 'P1', paymentReceived: '', paidCommission: '1.00', commissionRate: '', policyTermCommission: '', premiumForCommission: '', transactionPremium: '', effectiveDate: '', transactionCode: '', transactionType: 'new_business' }] } }] };
   const { f, calls } = mock(
-    apiError(400, 'invalid_request_error', 'Thinking may not be enabled when tool_choice forces tool use.'),
-    apiError(401, 'authentication_error', 'stop here'),
+    apiError(400, 'invalid_request_error', 'output_config.format: Extra inputs are not permitted'),
+    ok(toolAnswer),
   );
-  await extractWithClaude({ apiKey: KEY, input, fetchImpl: f, sleep: noSleep });
-  assert.deepEqual(body(calls[0]).tool_choice, { type: 'tool', name: 'record_statement' });
+  const res = await extractWithClaude({ apiKey: KEY, input, fetchImpl: f, sleep: noSleep });
+  assert.equal(calls.length, 2);
+  assert.ok(body(calls[0]).output_config);
+  assert.equal(body(calls[0]).tool_choice, undefined);
+  assert.equal(body(calls[1]).output_config, undefined);
   assert.deepEqual(body(calls[1]).tool_choice, { type: 'auto' });
+  assert.ok(res.ok && res.requestFormat === 'tool_auto');
+});
+
+test('the Sonnet 5.5 tool_choice error is not retried with another forced choice', async () => {
+  const { f, calls } = mock(apiError(400, 'invalid_request_error', 'tool_choice: type "tool" and "any" are not supported for this model.'));
+  const res = await extractWithClaude({ apiKey: KEY, input, fetchImpl: f, sleep: noSleep });
+  assert.equal(calls.length, 1);
+  assert.ok(!res.ok && res.http?.kind === 'invalid_request');
 });
 
 // ---- time budget -------------------------------------------------------------------------
@@ -182,13 +228,44 @@ test('diagnosis: valid key and model but no credit is reported as billing', asyn
   assert.match(d.summary, /billing/);
 });
 
-test('diagnosis: all checks pass with the production request shape and synthetic data only', async () => {
+const syntheticAnswer = {
+  carrierName: 'Synthetic Test Carrier', agencyCode: '', statementMonth: '2026-10', statementDate: '',
+  totals: { commissionPayable: '15.25', monthCommissionPayable: '', paymentReceived: '', premiumForCommission: '', transactionPremium: '', ytdCommissionPayable: '' },
+  adjustments: [],
+  lines: [['TEST INSURED A', 'TST0001', '10.00'], ['TEST INSURED B', 'TST0002', '5.25']].map(([n, p, c]) => ({
+    page: 1, insuredName: n, policyNumber: p, paymentReceived: '', paidCommission: c, commissionRate: '', policyTermCommission: '',
+    premiumForCommission: '', transactionPremium: '', effectiveDate: '', transactionCode: '', transactionType: 'new_business',
+  })),
+};
+
+test('diagnosis: all checks pass using the same extraction code as statement processing', async () => {
   const { f, calls } = mock(modelsList(['claude-sonnet-5-5']), ok({ id: 'claude-sonnet-5-5', display_name: 'Claude Sonnet 5.5' }),
-    ok({ stop_reason: 'max_tokens', content: [{ type: 'tool_use', name: 'record_statement', input: {} }] }));
+    ok({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(syntheticAnswer) }] }));
   const d = await diagnoseAnthropic({ apiKey: KEY, model: 'claude-sonnet-5-5', fetchImpl: f });
-  assert.equal(d.ok, true);
+  assert.equal(d.ok, true, d.summary);
+  assert.equal(d.request.requestFormat, 'json_schema');
+  assert.equal(d.request.lines, 2);
+  assert.equal(d.request.reconciled, true);
   const req = body(calls[2]);
-  assert.equal(req.max_tokens, 64);
-  assert.deepEqual(req.tool_choice, { type: 'tool', name: 'record_statement' });
+  // Identical to what processStatement sends, apart from the synthetic input and token limit.
+  assert.deepEqual({ ...req, messages: undefined, max_tokens: undefined },
+    { ...buildAiRequest('claude-sonnet-5-5', input, 1, 'json_schema'), messages: undefined, max_tokens: undefined });
   assert.match(JSON.stringify(req.messages), /TEST INSURED A/);
+});
+
+test('diagnosis: a Claude answer that does not reconcile fails the connection test', async () => {
+  const wrong = { ...syntheticAnswer, lines: syntheticAnswer.lines.slice(0, 1) };
+  const { f } = mock(modelsList(['claude-sonnet-5-5']), ok({ id: 'claude-sonnet-5-5' }),
+    ok({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(wrong) }] }));
+  const d = await diagnoseAnthropic({ apiKey: KEY, model: 'claude-sonnet-5-5', fetchImpl: f });
+  assert.equal(d.ok, false);
+  assert.equal(d.request.state, 'fail');
+});
+
+test('diagnosis: the Sonnet 5.5 forced-tool 400 is reported, not hidden', async () => {
+  const { f } = mock(modelsList(['claude-sonnet-5-5']), ok({ id: 'claude-sonnet-5-5' }),
+    apiError(400, 'invalid_request_error', 'tool_choice: type "tool" and "any" are not supported for this model.'));
+  const d = await diagnoseAnthropic({ apiKey: KEY, model: 'claude-sonnet-5-5', fetchImpl: f });
+  assert.equal(d.request.state, 'fail');
+  assert.match(d.summary, /tool_choice/);
 });

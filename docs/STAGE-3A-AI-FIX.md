@@ -25,13 +25,17 @@ writes a plain-English explanation. Trims the key; flags quotes, inner spaces, o
 - Model ID format is checked before any request (`bad_model`).
 - Overall time budget (450 s) so the function always finishes and records the failure.
 - Honors `retry-after` on 429.
-- Two automatic request fixes: if Anthropic reports a lower `max_tokens` limit, retry with it; if a model rejects a forced tool choice, retry with `tool_choice: auto` (the output is still schema-validated and reconciled to the cent).
+- **Request format:**
+  - Native structured output (`output_config.format`, JSON Schema) is the default. Claude Sonnet 5.5 rejects any forced tool choice with HTTP 400 *"tool_choice: type 'tool' and 'any' are not supported for this model"*.
+  - If a model or endpoint rejects structured output, the same schema is sent as a `record_statement` tool with `tool_choice: auto`.
+  - Every answer is validated with zod and reconciled to the cent.
+  - If Anthropic reports a lower `max_tokens` limit, the request is retried with that limit.
 
 **`diagnose.ts` (new) + `checkAiConnection` function (new)** — Settings → **Test AI connection**:
 1. key present and well-formed (shows length and last 4 characters so you can confirm Secret Version 3 is live);
 2. `GET /v1/models` — does Anthropic accept the key (free);
 3. `GET /v1/models/{model}` — can **this key** use the configured model; lists the models it can use;
-4. one tiny statement-shaped request with the production schema and synthetic data (`max_tokens` 64; costs a fraction of a cent) — catches billing, permission and request-format 400s.
+4. a real extraction through `extractWithClaude`, the same code statement processing uses, on a 2-row synthetic statement, which must reconcile to the cent. It catches billing, permission and request-format 400s, and answers that don't validate.
 
 **`processStatement`**
 - Stores `httpStatus`, `errorType`, `apiMessage`, `requestId` on the statement and the extraction run.

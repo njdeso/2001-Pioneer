@@ -1,5 +1,6 @@
 import { ANTHROPIC_API_BASE, MODEL_ID_PATTERN, anthropicHeaders, cleanApiKey, explainApiError, readApiError, type ApiErrorInfo } from './anthropic.js';
-import { STATEMENT_TOOL, buildAiRequest } from './ai.js';
+import { extractWithClaude, type AiRequestFormat } from './ai.js';
+import { reconcileStatement } from './reconcile.js';
 
 /**
  * "Test AI connection": answers, in order, the questions behind the 401 / 400 / 404 failures.
@@ -8,10 +9,12 @@ import { STATEMENT_TOOL, buildAiRequest } from './ai.js';
  *  2. Does Anthropic accept the key?            GET /v1/models          (free, no tokens)
  *  3. Which models can THIS key use, and is the configured one of them? GET /v1/models/{id}
  *       – not in the key's list  → wrong/retired ID, or the account has no access to it
- *  4. Does a real statement-shaped request succeed?  POST /v1/messages with the production
- *     tool schema, forced tool choice and a 2-row synthetic table, max_tokens 64.
- *       – catches billing (credit balance), permission, request-format and model-level 400s.
- *     Cost: roughly 2,000 input tokens — a fraction of a cent. No statement data is sent.
+ *  4. Does a real extraction work?  Runs extractWithClaude — the exact code path statement
+ *     processing uses (same request builder, structured-output format and fallback, answer
+ *     parsing and validation) — on a 2-row synthetic statement, and reconciles the result.
+ *       – catches billing (credit balance), permission, request-format and model-level 400s,
+ *         and answers that do not validate.
+ *     Cost: a few thousand tokens — about a cent. No statement data is sent.
  */
 
 export type CheckState = 'pass' | 'fail' | 'warn' | 'skipped';
@@ -24,7 +27,7 @@ export interface AiDiagnosis {
   auth: { state: CheckState; detail: string; error?: ApiErrorInfo };
   models: { state: CheckState; available: string[]; detail: string };
   model_: { state: CheckState; formatValid: boolean; availableToKey: boolean | null; displayName: string | null; detail: string };
-  request: { state: CheckState; detail: string; error?: ApiErrorInfo; stopReason?: string | null; requestId?: string | null };
+  request: { state: CheckState; detail: string; error?: ApiErrorInfo; requestId?: string | null; requestFormat?: AiRequestFormat | null; lines?: number; reconciled?: boolean };
   summary: string;
 }
 
@@ -123,35 +126,43 @@ export async function diagnoseAnthropic(opts: DiagnoseOptions): Promise<AiDiagno
     d.ok = d.auth.state === 'pass' && d.model_.state === 'pass';
     return done(d.ok ? 'Key and model are valid (test request skipped).' : 'See the checks above.');
   }
-  try {
-    const body = buildAiRequest(model, {
+  const res = await extractWithClaude({
+    apiKey: k.key,
+    model,
+    fetchImpl: f,
+    input: {
       kind: 'table',
       fileName: 'connection-test.csv',
-      text: 'NAME OF INSURED\tPOLICY NUMBER\tPAID COMMISSION\nTEST INSURED A\tTST0001\t10.00\nTOTAL\t\t10.00',
-    }, 64);
-    const res = await timed(f, `${ANTHROPIC_API_BASE}/v1/messages`, { method: 'POST', headers, body: JSON.stringify(body) }, 60_000);
-    if (!res.ok) {
-      const e = await readApiError(res);
-      d.request = { state: 'fail', detail: explainApiError(e, model), error: e, requestId: e.requestId };
+      text: 'SYNTHETIC TEST CARRIER - COMMISSION STATEMENT - OCTOBER 2026\nNAME OF INSURED\tPOLICY NUMBER\tPAID COMMISSION\nTEST INSURED A\tTST0001\t10.00\nTEST INSURED B\tTST0002\t5.25\nTOTAL COMMISSION\t\t15.25',
+    },
+    maxTokens: 4096,
+    maxRetries: 0,
+    timeoutMs: 85_000,
+    deadlineMs: 90_000,
+  });
+  if (!res.ok) {
+    const e = res.http;
+    d.request = { state: 'fail', detail: e ? explainApiError(e, model) : res.message, error: e, requestId: e?.requestId ?? null, requestFormat: res.requestFormat ?? null };
+    if (e) {
       const why = e.kind === 'billing' ? 'a billing problem on the Anthropic account (this is a common cause of HTTP 400)'
         : e.kind === 'invalid_request' ? `Anthropic rejected the request format: ${e.apiMessage ?? 'no reason given'}`
         : e.kind;
-      return done(`The key and model are valid, but a test extraction request failed with HTTP ${e.status}: ${why}.`);
+      return done(`The key and model are valid, but a test extraction failed with HTTP ${e.status}: ${why}.`);
     }
-    const j = (await res.json()) as { stop_reason?: string; content?: { type: string; name?: string }[] };
-    const usedTool = (j.content ?? []).some((c) => c.type === 'tool_use' && c.name === STATEMENT_TOOL.name);
-    d.request = {
-      state: 'pass',
-      stopReason: j.stop_reason ?? null,
-      requestId: res.headers.get('request-id'),
-      detail: `Anthropic accepted a statement-format request (stop reason: ${j.stop_reason ?? 'n/a'}${usedTool ? ', structured tool output started' : ''}).`,
-    };
-  } catch (err) {
-    const aborted = (err as { name?: string })?.name === 'AbortError';
-    d.request = { state: 'fail', detail: aborted ? 'The test request timed out.' : 'The test request could not reach Anthropic.' };
-    return done(d.request.detail);
+    return done(`The key and model are valid, but a test extraction failed: ${res.message}`);
   }
+  const rec = reconcileStatement(res.statement);
+  const lines = res.statement.lines.length;
+  d.request = {
+    state: lines === 2 && rec.reconciled ? 'pass' : 'fail',
+    requestId: res.requestId,
+    requestFormat: res.requestFormat,
+    lines,
+    reconciled: rec.reconciled,
+    detail: `Extraction ran (${res.requestFormat === 'json_schema' ? 'structured output' : 'tool, auto choice'}): ${lines} of 2 synthetic rows read; ${rec.reconciled ? 'reconciled to the cent' : 'did not reconcile'}.`,
+  };
+  if (d.request.state !== 'pass') return done(`Claude answered, but the synthetic statement was not read correctly: ${d.request.detail}`);
 
   d.ok = true;
-  return done(`AI connection works: key accepted, ${model} available, and a statement-format request succeeded. Statements can be processed.`);
+  return done(`AI connection works: key accepted, ${model} available, and a test statement was extracted and reconciled to the cent using the same code as statement processing.`);
 }

@@ -49,7 +49,7 @@ one PR per stage; per-policy broker % (default broker %); payment-only rows kept
 - ✅ Deterministic Travelers PL parser; reconciles exactly to $3,631.14 on the real statement (local test) and on the anonymized fixture
 - ✅ Exact-to-the-cent reconciliation: paid commission, month payable (with adjustments), payment received, premiums, fees; per-line rate and sign checks
 - ✅ Payment-only rows, negative adjustments, multiple rows per policy and identical installment rows handled
-- ✅ Claude fallback (PDF and spreadsheets): forced tool + strict schema, amounts as printed, retries/backoff, timeouts, malformed-output handling, monthly limit; key in Secret Manager only
+- ✅ Claude fallback (PDF and spreadsheets): native structured output (JSON schema; tool with auto choice as fallback; never a forced tool, which Sonnet 5.5 rejects) + strict validation, amounts as printed, retries/backoff, timeouts, malformed-output handling, monthly limit; key in Secret Manager only
 - ✅ Carrier resolution by agency code / name; same carrier+agency+month detection; manual carrier choice; discard with reason
 - ✅ Review screen, processing queue, upload page, DEV banner, AI settings, carrier agency codes
 - ✅ pioneer-2001-dev configuration (aliases, guarded scripts, env examples, seed) — instructions only, nothing created
