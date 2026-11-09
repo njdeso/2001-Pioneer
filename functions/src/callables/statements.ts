@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
+import { logger } from 'firebase-functions';
 import { defineSecret } from 'firebase-functions/params';
 import { getStorage } from 'firebase-admin/storage';
 import type { DocumentData, DocumentReference } from 'firebase-admin/firestore';
@@ -19,7 +20,9 @@ import { audit, db, FieldValue, idParam, meta, parse, requireRole, type Actor } 
  *   processStatement (verify file, preserve original, extract, validate, reconcile, store lines)
  */
 
-const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY');
+export const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY');
+/** processStatement runs for at most 540 s; a run older than this is treated as abandoned. */
+const STALE_PROCESSING_MS = 12 * 60 * 1000;
 const MAX_BYTES = 20 * 1024 * 1024;
 const FILE_TYPES = { pdf: 'pdf', xlsx: 'xlsx', xlsm: 'xlsx', csv: 'csv' } as const;
 type FileType = 'pdf' | 'xlsx' | 'csv';
@@ -46,11 +49,27 @@ export const registerStatementUpload = onCall(async (req) => {
   const type = fileTypeOf(input.fileName);
   if (!type) throw new HttpsError('invalid-argument', 'Upload a PDF, Excel (.xlsx) or CSV statement.');
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const keyRef = db.collection('statementKeys').doc(input.sha256);
     const key = await tx.get(keyRef);
     if (key.exists) {
-      return { duplicate: true as const, statementId: key.get('statementId') as string };
+      const existingId = key.get('statementId') as string;
+      const existingRef = db.collection('statements').doc(existingId);
+      const existing = await tx.get(existingRef);
+      // An earlier upload of this exact file was registered but the file never reached
+      // Storage (e.g. the upload was interrupted or blocked by Storage permissions).
+      // Let the same file be uploaded into that same statement record instead of
+      // reporting a duplicate. Nothing else in the record is changed.
+      const neverStored = existing.exists && !existing.get('originalPath')
+        && (existing.get('status') === 'awaiting_upload'
+          || (existing.get('status') === 'extraction_failed' && ['not_uploaded', 'file_mismatch', 'wrong_type'].includes(String(existing.get('failure.code') ?? ''))));
+      if (neverStored) {
+        const uploadPath = `incoming/${actor.uid}/${existingId}/upload.${type}`;
+        tx.update(existingRef, { status: 'awaiting_upload', uploadPath, fileName: safeName(input.fileName), fileType: type, size: input.size, failure: null, ...meta(actor, false) });
+        audit(tx, actor, { action: 'resume_upload', entityType: 'statement', entityId: existingId, summary: 'Resumed an upload that never reached storage' });
+        return { duplicate: false as const, resumed: true as const, statementId: existingId, uploadPath };
+      }
+      return { duplicate: true as const, statementId: existingId };
     }
     const ref = db.collection('statements').doc();
     const uploadPath = `incoming/${actor.uid}/${ref.id}/upload.${type}`;
@@ -69,6 +88,12 @@ export const registerStatementUpload = onCall(async (req) => {
     audit(tx, actor, { action: 'register_upload', entityType: 'statement', entityId: ref.id, summary: `Registered statement upload (${type})` });
     return { duplicate: false as const, statementId: ref.id, uploadPath };
   });
+  // A resumed upload goes to a create-only Storage path; clear any partial object left there
+  // by the interrupted attempt so the browser's upload is not refused as an overwrite.
+  if ('resumed' in result && result.resumed) {
+    await getStorage().bucket().file(result.uploadPath).delete({ ignoreNotFound: true });
+  }
+  return result;
 });
 
 function magicOk(type: FileType, buf: Buffer): boolean {
@@ -84,7 +109,17 @@ interface RunOutcome {
   model: string | null;
   usage: { inputTokens: number; outputTokens: number } | null;
   attempts: number;
-  failure: { code: string; message: string } | null;
+  failure: FailureInfo | null;
+}
+
+/** Stored on the statement and the extraction run so the real cause is visible later. */
+interface FailureInfo {
+  code: string;
+  message: string;
+  httpStatus?: number;
+  errorType?: string | null;
+  apiMessage?: string | null;
+  requestId?: string | null;
 }
 
 async function reserveAiCall(limit: number): Promise<void> {
@@ -147,10 +182,18 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
     return { ...none, failure: { code: 'ai_disabled', message: 'No built-in parser recognizes this layout, and the AI reader is turned off in Settings.' } };
   }
   await reserveAiCall(limit);
-  const res = await extractWithClaude({ apiKey: ANTHROPIC_API_KEY.value(), model, input: aiInput });
+  const res = await extractWithClaude({ apiKey: ANTHROPIC_API_KEY.value(), model, input: aiInput, deadlineMs: 450_000 });
   await recordAiUsage(res.ok ? res.usage : res.usage ?? null);
   if (!res.ok) {
-    return { ...none, method: type === 'pdf' ? 'ai' : 'table-ai', model, attempts: res.attempts, usage: res.usage ?? null, failure: { code: `ai_${res.code}`, message: res.message } };
+    const h = res.http;
+    // Logged for Cloud Logging: status and Anthropic's reason only — never the key or document.
+    logger.warn('Claude extraction failed', { code: res.code, model, attempts: res.attempts, httpStatus: h?.status ?? null, kind: h?.kind ?? null, errorType: h?.errorType ?? null, apiMessage: h?.apiMessage ?? null, requestId: h?.requestId ?? null });
+    const failure: FailureInfo = {
+      code: h ? `ai_${h.kind}` : `ai_${res.code}`,
+      message: res.message,
+      ...(h ? { httpStatus: h.status, errorType: h.errorType, apiMessage: h.apiMessage, requestId: h.requestId } : {}),
+    };
+    return { ...none, method: type === 'pdf' ? 'ai' : 'table-ai', model, attempts: res.attempts, usage: res.usage ?? null, failure };
   }
   return { statement: res.statement, method: type === 'pdf' ? 'ai' : 'table-ai', model, usage: res.usage, attempts: res.attempts, failure: null };
 }
@@ -174,7 +217,9 @@ async function claimForProcessing(id: string, actor: Actor): Promise<DocumentDat
     const snap = await tx.get(ref);
     if (!snap.exists) throw new HttpsError('not-found', 'Statement not found.');
     const status = snap.get('status');
-    if (!['awaiting_upload', 'extraction_failed', 'needs_review', 'discrepancy'].includes(status)) {
+    const updatedMs = (snap.get('updatedAt') as { toMillis?: () => number } | undefined)?.toMillis?.() ?? 0;
+    const abandoned = status === 'processing' && Date.now() - updatedMs > STALE_PROCESSING_MS;
+    if (!abandoned && !['awaiting_upload', 'extraction_failed', 'needs_review', 'discrepancy'].includes(status)) {
       throw new HttpsError('failed-precondition', `This statement is ${status}.`);
     }
     if ((snap.get('postedCents') ?? 0) !== 0) throw new HttpsError('failed-precondition', 'Lines from this statement have been posted.');
@@ -217,13 +262,14 @@ export const processStatement = onCall(
     const ref = db.collection('statements').doc(statementId);
     const started = Date.now();
     const bucket = getStorage().bucket();
-    const fail = async (code: string, message: string, extra: Record<string, unknown> = {}) => {
+    const fail = async (code: string, message: string, extra: Record<string, unknown> = {}, details: Partial<FailureInfo> = {}) => {
+      const failure: FailureInfo = { ...details, code, message };
       const b = db.batch();
-      b.update(ref, { status: 'extraction_failed', failure: { code, message }, ...meta(actor, false) });
-      b.set(db.collection('extractionRuns').doc(), { statementId, ok: false, errorCode: code, durationMs: Date.now() - started, at: FieldValue.serverTimestamp(), by: actor.uid, ...extra });
+      b.update(ref, { status: 'extraction_failed', failure, ...meta(actor, false) });
+      b.set(db.collection('extractionRuns').doc(), { statementId, ok: false, errorCode: code, failure, durationMs: Date.now() - started, at: FieldValue.serverTimestamp(), by: actor.uid, ...extra });
       audit(b, actor, { action: 'extract_failed', entityType: 'statement', entityId: statementId, summary: `Extraction failed: ${code}` });
       await b.commit();
-      return { status: 'extraction_failed', failure: { code, message } };
+      return { status: 'extraction_failed', failure };
     };
 
     try {
@@ -256,7 +302,7 @@ export const processStatement = onCall(
       // ---- Extract ----
       const out = await extract(buf, type, String(doc.fileName), force);
       const runBase = { statementId, method: out.method, model: out.model, promptVersion: out.method === TRAVELERS_PL_PARSER ? null : AI_PROMPT_VERSION, attempts: out.attempts, usage: out.usage };
-      if (out.failure || !out.statement) return await fail(out.failure?.code ?? 'unknown', out.failure?.message ?? 'Extraction failed.', runBase);
+      if (out.failure || !out.statement) return await fail(out.failure?.code ?? 'unknown', out.failure?.message ?? 'Extraction failed.', runBase, out.failure ?? {});
       const s = out.statement;
 
       // ---- Validate and reconcile (exact to the cent) ----
@@ -320,6 +366,7 @@ export const processStatement = onCall(
         await fail(err.code, err.message);
         throw err;
       }
+      logger.error('processStatement stopped unexpectedly', { statementId, name: (err as Error)?.name, message: String((err as Error)?.message ?? err).slice(0, 300) });
       return await fail('internal', 'Processing stopped unexpectedly. Try again.');
     }
   },

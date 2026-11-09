@@ -1,0 +1,126 @@
+# Deploys to the DEVELOPMENT project only (pioneer-2001-dev) and runs the live smoke test.
+#
+# Authentication: Google Cloud Workload Identity Federation. There is no stored Google credential.
+# GitHub issues a short-lived OIDC token for this run; Google exchanges it for a ~1-hour token for the
+# dev deployer service account. The identity provider (scripts/setup-dev-wif.sh) only accepts tokens
+# that satisfy all of these:
+#   - repository ID of njdeso/2001-Pioneer
+#   - branch refs/heads/deploy/dev
+#   - this workflow file
+#   - the "development" environment
+#
+# pioneer-285cf (production) is outside this workflow:
+#   - the service account belongs to pioneer-2001-dev and has roles only there
+#   - the target is checked against the project ID, the .firebaserc alias and the service-account domain
+#   - production is deployed by hand after approval (docs/PRODUCTION-RELEASE.md)
+#
+# The Anthropic development key lives only in pioneer-2001-dev Secret Manager. This workflow never
+# reads its value; it only checks that the secret exists.
+#
+# Trigger: push the commit to test to the "deploy/dev" branch.
+# Until the GCP_WIF_PROVIDER / GCP_DEV_SERVICE_ACCOUNT variables exist, it skips with a notice.
+name: Deploy to dev (pioneer-2001-dev)
+
+on:
+  push:
+    branches: [deploy/dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # lets this job request a GitHub OIDC token for Workload Identity Federation
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    # The identity provider accepts only this branch; refuse other refs before trying.
+    if: github.ref == 'refs/heads/deploy/dev'
+    runs-on: ubuntu-latest
+    environment: development
+    timeout-minutes: 45
+    env:
+      DEV_PROJECT_ID: pioneer-2001-dev
+      WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      DEV_SA: ${{ vars.GCP_DEV_SERVICE_ACCOUNT }}
+    steps:
+      - name: Check for Workload Identity configuration
+        id: cfg
+        run: |
+          if [ -z "$WIF_PROVIDER" ] || [ -z "$DEV_SA" ]; then
+            echo "::notice::GCP_WIF_PROVIDER / GCP_DEV_SERVICE_ACCOUNT are not set; skipping the dev deploy. Run scripts/setup-dev-wif.sh in Cloud Shell (docs/DEV-DEPLOY-WIF.md)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$DEV_SA" in
+            *@"$DEV_PROJECT_ID".iam.gserviceaccount.com) ;;
+            *) echo "::error::GCP_DEV_SERVICE_ACCOUNT must be a service account of $DEV_PROJECT_ID."; exit 1 ;;
+          esac
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - if: steps.cfg.outputs.ready == 'true'
+        uses: actions/checkout@v4
+
+      - if: steps.cfg.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: npm install
+        if: steps.cfg.outputs.ready == 'true'
+        run: npm install --no-audit --no-fund
+
+      - name: Guard — target must be pioneer-2001-dev
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          node scripts/assert-dev-target.mjs dev
+          test "$(node -p "JSON.parse(require('fs').readFileSync('.firebaserc', 'utf8')).projects.dev")" = "$DEV_PROJECT_ID"
+
+      - name: Unit tests
+        if: steps.cfg.outputs.ready == 'true'
+        run: npm run test
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation, no key)
+        if: steps.cfg.outputs.ready == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEV_SERVICE_ACCOUNT }}
+          project_id: pioneer-2001-dev
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Owner email for dev
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          DEV_OWNER_EMAILS: ${{ vars.DEV_OWNER_EMAILS }}
+        run: printf 'OWNER_EMAILS=%s\n' "${DEV_OWNER_EMAILS:-owner@example.invalid}" > "functions/.env.$DEV_PROJECT_ID"
+
+      - name: Anthropic dev key exists in dev Secret Manager (value not read)
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          if npx firebase functions:secrets:get ANTHROPIC_API_KEY --project dev --non-interactive > /dev/null 2>&1; then
+            echo "ANTHROPIC_API_KEY exists in $DEV_PROJECT_ID."
+          else
+            echo "::error::ANTHROPIC_API_KEY is missing in $DEV_PROJECT_ID (or the deployer cannot see it). Re-run scripts/setup-dev-wif.sh."
+            exit 1
+          fi
+
+      - name: Deploy rules, indexes and functions to pioneer-2001-dev
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          deploy() { npx firebase deploy --project dev --only firestore,storage,functions --non-interactive --force; }
+          # First deploys sometimes fail while service agents and IAM changes propagate; retry once.
+          deploy || { echo "Deploy failed; retrying in 90 s (permission propagation)."; sleep 90; deploy; }
+
+      - name: Seed dev reference data (synthetic)
+        if: steps.cfg.outputs.ready == 'true'
+        run: node scripts/seed-dev.mjs dev
+
+      - name: Live smoke test (AI connection, PDF read, interrupted-upload recovery)
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          SMOKE_SERVICE_ACCOUNT: ${{ vars.GCP_DEV_SERVICE_ACCOUNT }}
+        run: node scripts/smoke-dev.mjs

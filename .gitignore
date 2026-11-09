@@ -6,9 +6,8 @@ functions/lib/
 .env.*
 !.env.example
 !**/.env.*.example
-!.firebaserc.example
 .firebase/
-.firebaserc
+# .firebaserc is committed: it holds only project IDs (no default project, explicit aliases).
 firebase-debug.log*
 firestore-debug.log*
 ui-debug.log*

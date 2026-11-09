@@ -10,7 +10,7 @@ import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 const alias = process.argv[2] ?? 'dev';
 const rc = existsSync('.firebaserc') ? JSON.parse(readFileSync('.firebaserc', 'utf8')) : {};
 const projectId = rc.projects?.[alias] ?? alias;
-if (!(/-dev$/.test(projectId) || /^demo-/.test(projectId)) || projectId === 'pioneer-285cf') {
+if (!(projectId === 'pioneer-2001-dev' || /^demo-/.test(projectId)) || projectId === 'pioneer-285cf') {
   console.error(`Refusing to seed "${projectId}": not a development project.`);
   process.exit(1);
 }

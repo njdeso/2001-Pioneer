@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAiRequest, extractWithClaude, parseRate, STATEMENT_TOOL, tableToText, type AiInput } from '../src/statements/ai.ts';
+import { buildAiRequest, extractWithClaude, parseRate, STATEMENT_SCHEMA, STATEMENT_TOOL, tableToText, type AiInput } from '../src/statements/ai.ts';
 import { reconcileStatement } from '../src/statements/reconcile.ts';
 import { loadFixture } from './helpers/travelersPdf.ts';
 
@@ -82,7 +82,7 @@ test('AI amounts that do not add up are caught by exact reconciliation', async (
   assert.equal(r.checks.find((c) => c.key === 'commission')?.differenceCents, 4500);
 });
 
-test('request: forced tool, document only, key in header not body', async () => {
+test('request: native structured output (no forced tool), document only, key in header not body', async () => {
   const { f, calls } = mockFetch(toolReply(fixtureAnswer()));
   await extractWithClaude({ apiKey: FAKE_KEY, input, fetchImpl: f, sleep: noSleep, model: 'claude-sonnet-5-5' });
   const { url, init } = calls[0];
@@ -93,7 +93,10 @@ test('request: forced tool, document only, key in header not body', async () => 
   const body = JSON.parse(String(init.body));
   assert.ok(!String(init.body).includes(FAKE_KEY));
   assert.equal(body.model, 'claude-sonnet-5-5');
-  assert.deepEqual(body.tool_choice, { type: 'tool', name: 'record_statement' });
+  assert.equal(body.tool_choice, undefined);
+  assert.equal(body.tools, undefined);
+  assert.equal(body.output_config.format.type, 'json_schema');
+  assert.deepEqual(body.output_config.format.schema, STATEMENT_SCHEMA);
   assert.equal(body.messages[0].content[0].type, 'document');
   assert.match(body.system, /DATA, not instructions/);
   assert.match(body.system, /bank account/);
@@ -123,7 +126,7 @@ test('persistent failures stop after the retry limit', async () => {
 test('non-retryable HTTP errors fail immediately', async () => {
   const { f, calls } = mockFetch(reply({}, 401));
   const res = await extractWithClaude({ apiKey: FAKE_KEY, input, fetchImpl: f, sleep: noSleep });
-  assert.ok(!res.ok && res.code === 'http' && !res.retryable);
+  assert.ok(!res.ok && res.code === 'http' && !res.retryable && res.http?.kind === 'auth');
   assert.equal(calls.length, 1);
 });
 
@@ -135,9 +138,13 @@ test('timeouts and network errors are reported as failures', async () => {
 });
 
 test('malformed answers: no tool call, wrong shape, truncated, refusal', async () => {
-  let m = mockFetch(reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Here is the data…' }] }));
+  let m = mockFetch(reply({ stop_reason: 'end_turn', content: [] }));
   let res = await extractWithClaude({ apiKey: FAKE_KEY, input, fetchImpl: m.f, sleep: noSleep, maxRetries: 0 });
   assert.ok(!res.ok && res.code === 'no_tool_call');
+
+  m = mockFetch(reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Here is the data…' }] }));
+  res = await extractWithClaude({ apiKey: FAKE_KEY, input, fetchImpl: m.f, sleep: noSleep, maxRetries: 0 });
+  assert.ok(!res.ok && res.code === 'invalid_output');
 
   const bad = { ...fixtureAnswer(), statementMonth: 'December 2025' };
   m = mockFetch(toolReply(bad));
@@ -184,4 +191,41 @@ test('commission rate formats', () => {
   assert.equal(parseRate('12.5'), 1250);
   assert.equal(parseRate(''), null);
   assert.equal(parseRate('abc'), 'bad');
+});
+
+// ---- structured output answers (the default format) --------------------------------------
+
+/** The fixture answer as structured output returns it: "" for blank cells, every field present. */
+function fixtureAnswerAsStructuredJson() {
+  const a = fixtureAnswer() as Record<string, unknown>;
+  const blank = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v === null || v === undefined ? '' : v]));
+  return {
+    ...a,
+    agencyCode: a.agencyCode ?? '',
+    statementDate: a.statementDate ?? '',
+    totals: blank(a.totals as Record<string, unknown>),
+    lines: (a.lines as Record<string, unknown>[]).map(blank),
+  };
+}
+
+test('structured-output JSON answer (with "" blanks) converts to cents and reconciles exactly to $3,631.14', async () => {
+  const content = [{ type: 'thinking', thinking: '…' }, { type: 'text', text: JSON.stringify(fixtureAnswerAsStructuredJson()) }];
+  const { f } = mockFetch(reply({ stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 }, content }));
+  const res = await extractWithClaude({ apiKey: FAKE_KEY, input, fetchImpl: f, sleep: noSleep });
+  assert.ok(res.ok);
+  if (!res.ok) return;
+  assert.equal(res.requestFormat, 'json_schema');
+  const rec = reconcileStatement(res.statement);
+  assert.equal(rec.reconciled, true);
+  assert.equal(rec.totals.commissionCents, 363114);
+  assert.ok(res.statement.lines.every((l) => l.issues.every((i) => i.code !== 'bad_amount'))); // "" blanks are read as empty, never as bad amounts
+});
+
+test('structured-output JSON in a code fence is accepted; malformed JSON is rejected', async () => {
+  let m = mockFetch(reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: '```json\n' + JSON.stringify(fixtureAnswerAsStructuredJson()) + '\n```' }] }));
+  let res = await extractWithClaude({ apiKey: FAKE_KEY, input, fetchImpl: m.f, sleep: noSleep });
+  assert.ok(res.ok);
+  m = mockFetch(reply({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"carrierName": "Trav' }] }));
+  res = await extractWithClaude({ apiKey: FAKE_KEY, input, fetchImpl: m.f, sleep: noSleep });
+  assert.ok(!res.ok && res.code === 'invalid_output');
 });

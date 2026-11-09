@@ -1,6 +1,6 @@
 # Verification only: install, typecheck, unit tests, build, and security-rules tests on the
 # Firebase emulator (demo project, no credentials). This workflow has no secrets and no deploy step,
-# and never contacts pioneer-285cf or pioneer-dev.
+# and never contacts pioneer-285cf or pioneer-2001-dev. Dev deploys: deploy-dev.yml.
 name: CI
 
 on:
@@ -38,6 +38,9 @@ jobs:
       - name: npm install
         run: npm install --no-audit --no-fund
 
+      - name: Dev deploy configuration agrees (workflow, setup script, .firebaserc)
+        run: node scripts/check-dev-wif-config.mjs
+
       - name: npm run typecheck
         run: npm run typecheck
 
@@ -46,6 +49,9 @@ jobs:
 
       - name: npm run build
         run: npm run build
+
+      - name: Function endpoints match the app and smoke test (region, callable, options)
+        run: node scripts/check-functions-endpoints.mjs
 
       - name: npm run test:rules (Firebase emulator, demo project)
         run: npm run test:rules

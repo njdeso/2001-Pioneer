@@ -40,7 +40,7 @@ Legend: ✅ done & tested here · 🟡 written, must be verified on your machine
 ## Phase 3 — Commission statements (plan approved; stages 3A–3F)
 
 Decisions: match on carrier + normalized policy number (stored numbers untouched; multiple candidates → manual review);
-separate `pioneer-dev` project; broker statement month = carrier statement month; two-step payment approval;
+separate `pioneer-2001-dev` project; broker statement month = carrier statement month; two-step payment approval;
 one PR per stage; per-policy broker % (default broker %); payment-only rows kept as reference; Lancer = Stage 3F.
 
 ### Stage 3A — Upload, extraction, reconciliation (PR open, branch `feature/phase-3a-statement-extraction`)
@@ -49,11 +49,11 @@ one PR per stage; per-policy broker % (default broker %); payment-only rows kept
 - ✅ Deterministic Travelers PL parser; reconciles exactly to $3,631.14 on the real statement (local test) and on the anonymized fixture
 - ✅ Exact-to-the-cent reconciliation: paid commission, month payable (with adjustments), payment received, premiums, fees; per-line rate and sign checks
 - ✅ Payment-only rows, negative adjustments, multiple rows per policy and identical installment rows handled
-- ✅ Claude fallback (PDF and spreadsheets): forced tool + strict schema, amounts as printed, retries/backoff, timeouts, malformed-output handling, monthly limit; key in Secret Manager only
+- ✅ Claude fallback (PDF and spreadsheets): native structured output (JSON schema; tool with auto choice as fallback; never a forced tool, which Sonnet 5.5 rejects) + strict validation, amounts as printed, retries/backoff, timeouts, malformed-output handling, monthly limit; key in Secret Manager only
 - ✅ Carrier resolution by agency code / name; same carrier+agency+month detection; manual carrier choice; discard with reason
 - ✅ Review screen, processing queue, upload page, DEV banner, AI settings, carrier agency codes
-- ✅ pioneer-dev configuration (aliases, guarded scripts, env examples, seed) — instructions only, nothing created
-- 🟡 Run `npm test`, `npm run test:rules`, `npm run typecheck`, `npm run build` in Cloud Shell; manual test in pioneer-dev (docs/STAGE-3A-TESTING.md)
+- ✅ pioneer-2001-dev configuration (aliases, guarded scripts, env examples, seed) — instructions only, nothing created
+- 🟡 Run `npm test`, `npm run test:rules`, `npm run typecheck`, `npm run build` in Cloud Shell; manual test in pioneer-2001-dev (docs/STAGE-3A-TESTING.md)
 - ⏳ Stage 3A review and approval
 
 ### Stages 3B–3F ⏳ (matching · approval & posting · broker statements & payments · corrections & revisions · Lancer)
