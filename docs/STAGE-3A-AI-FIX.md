@@ -47,25 +47,15 @@ is uploaded into **that same record** instead of being called a duplicate. Nothi
 **App** — Settings has the Test AI connection panel and a model picker filled from the key's model list. A failed statement
 shows the error code, HTTP status, Anthropic error type and request ID, and links to the test.
 
-No Firestore/Storage rules changes, no data migration, no schema changes.
+No data migration or schema changes. The only rules change, refusing an upload to an occupied path, is in PR #1.
 
 ## Tests
 
-`npm test` (shared): **89 passed, 3 skipped** (the skipped tests need the real Travelers PDF, which is not in the repo).
+`npm test` (shared): **91 passed, 1 skipped** in CI (the skipped test needs the real Travelers PDF, which is not in the repo).
 New file `test/statements-anthropic.test.ts` covers 401/400‑billing/400‑other/404 classification, key trimming, invalid model,
 `max_tokens` and tool-choice fallbacks, the time budget, `retry-after`, and every diagnosis outcome — all with mocked network.
-Functions bundle builds (`checkAiConnection` exported). The admin app bundles. A full `tsc` type check and the rules emulator
-tests could not run in this sandbox (missing type packages / no emulator); run `npm run typecheck` and `npm run test:all` locally.
+CI (`.github/workflows/ci.yml`) runs `npm install`, `typecheck`, `test`, `build` and `test:rules` (Firebase emulator) on every pull request.
 
-## Deploy and verify (when you approve)
+## Deploy and verify
 
-1. **Dev first:** `npm run deploy:dev`. In the dev app: Settings → Test AI connection → all four checks ✓.
-2. **Production** (only after approval): `firebase deploy --project prod --only functions` — rules are unchanged, so only functions need to deploy.
-   Secrets are bound at deploy time; this deploy also picks up the latest `ANTHROPIC_API_KEY` version.
-3. Settings → set **Model** to `claude-sonnet-5-5` (production may still say `claude-sonnet-4-5-20250929`) → **Test AI connection**.
-   - ✗ Authentication → replace the key (`firebase functions:secrets:set ANTHROPIC_API_KEY`), redeploy functions.
-   - ✗ Model → pick one of the listed models.
-   - ✗ Test request, billing → add credits under Plans & Billing in the Anthropic Console.
-   - All ✓ → continue.
-4. **October 2026:** open it → **Retry with AI**. The file is already stored; no re-upload.
-5. **April 2026:** upload the same PDF again. It goes into the existing April record (no duplicate warning) and processes.
+See [PRODUCTION-RELEASE.md](PRODUCTION-RELEASE.md): automated dev deploy and live smoke test, then the production steps and rollback.

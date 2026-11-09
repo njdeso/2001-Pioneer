@@ -1,0 +1,113 @@
+# Deploys to the DEVELOPMENT project only (pioneer-2001-dev) and runs the live smoke test.
+#
+# Hard-wired to pioneer-2001-dev three ways: the project ID below, the guarded "dev" alias in
+# .firebaserc, and the service-account key, which belongs to pioneer-2001-dev and has no access to
+# production. There is no production deploy in GitHub Actions; production is deployed by hand
+# after approval (docs/PRODUCTION-RELEASE.md).
+#
+# Runs on a push to the "deploy/dev" branch (point it at the commit to test) or manually.
+# Until the FIREBASE_DEV_SERVICE_ACCOUNT secret exists it skips with a notice instead of failing.
+name: Deploy to dev (pioneer-2001-dev)
+
+on:
+  push:
+    branches: [deploy/dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    environment: development
+    timeout-minutes: 45
+    env:
+      DEV_PROJECT_ID: pioneer-2001-dev
+    steps:
+      - name: Check for dev credentials
+        id: creds
+        env:
+          SA: ${{ secrets.FIREBASE_DEV_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$SA" ]; then
+            echo "::notice::FIREBASE_DEV_SERVICE_ACCOUNT is not set; skipping the dev deploy. See docs/PRODUCTION-RELEASE.md, step 0."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.creds.outputs.ready == 'true'
+        uses: actions/checkout@v4
+
+      - if: steps.creds.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: npm install
+        if: steps.creds.outputs.ready == 'true'
+        run: npm install --no-audit --no-fund
+
+      - name: Guard — target must be pioneer-2001-dev
+        if: steps.creds.outputs.ready == 'true'
+        run: |
+          node scripts/assert-dev-target.mjs dev
+          test "$(node -p "require('./.firebaserc').projects.dev")" = "$DEV_PROJECT_ID"
+
+      - name: Authenticate to Google Cloud (dev service account)
+        if: steps.creds.outputs.ready == 'true'
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_DEV_SERVICE_ACCOUNT }}
+
+      - name: Guard — credentials must belong to pioneer-2001-dev
+        if: steps.creds.outputs.ready == 'true'
+        run: |
+          P=$(node -p "require(process.env.GOOGLE_APPLICATION_CREDENTIALS).project_id")
+          if [ "$P" != "$DEV_PROJECT_ID" ]; then echo "::error::The service-account key is for '$P', not $DEV_PROJECT_ID. Refusing."; exit 1; fi
+          echo "Credentials are for $P."
+
+      - name: Unit tests
+        if: steps.creds.outputs.ready == 'true'
+        run: npm run test
+
+      - name: Owner email for dev
+        if: steps.creds.outputs.ready == 'true'
+        env:
+          DEV_OWNER_EMAILS: ${{ vars.DEV_OWNER_EMAILS }}
+        run: printf 'OWNER_EMAILS=%s\n' "${DEV_OWNER_EMAILS:-owner@example.invalid}" > "functions/.env.$DEV_PROJECT_ID"
+
+      - name: Anthropic key in dev Secret Manager
+        if: steps.creds.outputs.ready == 'true'
+        env:
+          ANTHROPIC_API_KEY_DEV: ${{ secrets.ANTHROPIC_API_KEY_DEV }}
+        run: |
+          if npx firebase functions:secrets:get ANTHROPIC_API_KEY --project dev --non-interactive > /dev/null 2>&1; then
+            echo "ANTHROPIC_API_KEY already exists in $DEV_PROJECT_ID; leaving it unchanged."
+          elif [ -n "$ANTHROPIC_API_KEY_DEV" ]; then
+            printf '%s' "$ANTHROPIC_API_KEY_DEV" | npx firebase functions:secrets:set ANTHROPIC_API_KEY --project dev --data-file=/dev/stdin --non-interactive > /dev/null
+            echo "Created ANTHROPIC_API_KEY in $DEV_PROJECT_ID from the ANTHROPIC_API_KEY_DEV GitHub secret."
+          else
+            echo "::error::ANTHROPIC_API_KEY does not exist in $DEV_PROJECT_ID and the ANTHROPIC_API_KEY_DEV GitHub secret is not set."
+            exit 1
+          fi
+
+      - name: Deploy rules, indexes and functions to pioneer-2001-dev
+        if: steps.creds.outputs.ready == 'true'
+        run: |
+          deploy() { npx firebase deploy --project dev --only firestore,storage,functions --non-interactive --force; }
+          # First deploys to a project sometimes fail while Google enables APIs and service agents; retry once.
+          deploy || { echo "Deploy failed; retrying in 90 s (first-deploy API/permission propagation)."; sleep 90; deploy; }
+
+      - name: Seed dev reference data (synthetic)
+        if: steps.creds.outputs.ready == 'true'
+        run: node scripts/seed-dev.mjs dev
+
+      - name: Live smoke test (AI connection, PDF read, interrupted-upload recovery)
+        if: steps.creds.outputs.ready == 'true'
+        run: node scripts/smoke-dev.mjs
