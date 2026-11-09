@@ -85,7 +85,7 @@ npm run dev
 
 ## Development environment
 
-Phase 3 onward is developed and tested in `pioneer-dev`. See [DEV-ENVIRONMENT.md](DEV-ENVIRONMENT.md).
+Phase 3 onward is developed and tested in `pioneer-2001-dev`. See [DEV-ENVIRONMENT.md](DEV-ENVIRONMENT.md).
 
 ## Testing
 

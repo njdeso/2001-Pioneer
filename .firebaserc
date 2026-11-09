@@ -1,6 +1,6 @@
 {
   "projects": {
-    "dev": "pioneer-dev",
+    "dev": "pioneer-2001-dev",
     "prod": "pioneer-285cf"
   }
 }

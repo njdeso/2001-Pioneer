@@ -8,7 +8,7 @@
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "dev:pioneer-dev": "vite --mode dev"
+    "dev:pioneer-2001-dev": "vite --mode dev"
   },
   "dependencies": {
     "@asm/shared": "*",

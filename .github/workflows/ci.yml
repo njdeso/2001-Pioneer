@@ -1,6 +1,6 @@
 # Verification only: install, typecheck, unit tests, build, and security-rules tests on the
 # Firebase emulator (demo project, no credentials). This workflow has no secrets and no deploy step,
-# and never contacts pioneer-285cf or pioneer-dev.
+# and never contacts pioneer-285cf or pioneer-2001-dev.
 name: CI
 
 on:

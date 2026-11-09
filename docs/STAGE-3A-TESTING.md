@@ -31,7 +31,7 @@ The real-file test asserts that the statement reconciles exactly:
 | Transaction premium | $24,592.00 |
 | Lines | 102 |
 
-## 2. In `pioneer-dev` (after docs/DEV-ENVIRONMENT.md)
+## 2. In `pioneer-2001-dev` (after docs/DEV-ENVIRONMENT.md)
 
 1. **Settings:** leave the AI reader **off**.
 2. **Carriers:** confirm *Travelers* exists (seeded), and add your Travelers agency code under *Your agency codes on its statements*. Statements are also recognized by carrier name.

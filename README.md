@@ -10,7 +10,7 @@ Independent of Broker Desk: separate repository, Firebase project, Netlify site 
 ## Status
 
 Phase 3, Stage 3A (statement upload, extraction, reconciliation) — see [docs/CHECKLIST.md](docs/CHECKLIST.md).
-Development happens in `pioneer-dev`: [docs/DEV-ENVIRONMENT.md](docs/DEV-ENVIRONMENT.md).
+Development happens in `pioneer-2001-dev`: [docs/DEV-ENVIRONMENT.md](docs/DEV-ENVIRONMENT.md).
 
 ## Stack
 
