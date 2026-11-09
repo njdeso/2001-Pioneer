@@ -50,5 +50,8 @@ jobs:
       - name: npm run build
         run: npm run build
 
+      - name: Function endpoints match the app and smoke test (region, callable, options)
+        run: node scripts/check-functions-endpoints.mjs
+
       - name: npm run test:rules (Firebase emulator, demo project)
         run: npm run test:rules

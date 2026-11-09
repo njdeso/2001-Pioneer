@@ -24,7 +24,7 @@ import { PDFDocument, StandardFonts } from 'pdf-lib';
 
 const DEV = 'pioneer-2001-dev';
 const PROD = 'pioneer-285cf';
-const REGION = 'us-east4';
+const REGION = 'us-central1'; // must equal FUNCTIONS_REGION in functions/src/options.ts (checked in CI)
 const MODEL = process.env.SMOKE_AI_MODEL || 'claude-sonnet-5-5';
 
 // ---------------------------------------------------------------- guards
@@ -73,16 +73,42 @@ async function adminIdToken(apiKey) {
   return j.idToken;
 }
 
+/**
+ * Deployed functions as Google reports them: name → { region, url }. The smoke test calls the URL
+ * Google returns instead of guessing it, and checks the region matches the one the app is built for.
+ */
+async function deployedFunctions() {
+  const h = { authorization: `Bearer ${await googleToken()}` };
+  const out = new Map();
+  let pageToken = '';
+  do {
+    const r = await fetch(`https://cloudfunctions.googleapis.com/v2/projects/${DEV}/locations/-/functions?pageSize=200${pageToken ? `&pageToken=${pageToken}` : ''}`, { headers: h });
+    const j = await r.json();
+    if (!r.ok) throw new Error(`Listing deployed functions failed: HTTP ${r.status} ${j.error?.message ?? ''}`);
+    for (const f of j.functions ?? []) {
+      const [, , , region, , name] = f.name.split('/'); // projects/P/locations/REGION/functions/NAME
+      out.set(name, { region, url: f.url ?? f.serviceConfig?.uri, state: f.state });
+    }
+    pageToken = j.nextPageToken ?? '';
+  } while (pageToken);
+  return out;
+}
+
 let ID_TOKEN = '';
+let FUNCTIONS = new Map();
+/** Firebase callable protocol: POST JSON {"data": …} with the user's Firebase ID token as Bearer. */
 async function call(name, data) {
-  const r = await fetch(`https://${REGION}-${DEV}.cloudfunctions.net/${name}`, {
+  const fn = FUNCTIONS.get(name);
+  if (!fn) throw new Error(`${name} is not deployed in ${DEV}.`);
+  if (fn.region !== REGION) throw new Error(`${name} is deployed in ${fn.region}, but the app calls ${REGION}.`);
+  const r = await fetch(fn.url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${ID_TOKEN}` },
     body: JSON.stringify({ data }),
     signal: AbortSignal.timeout(560_000),
   });
   const text = await r.text();
-  let j; try { j = JSON.parse(text); } catch { throw new Error(`${name}: HTTP ${r.status} ${text.slice(0, 200)}`); }
+  let j; try { j = JSON.parse(text); } catch { throw new Error(`${name}: HTTP ${r.status}, not a callable JSON response (${text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)})`); }
   if (j.error) throw new Error(`${name}: ${j.error.status ?? r.status} ${j.error.message}`);
   return j.result;
 }
@@ -127,6 +153,10 @@ summary('|---|---|---|');
 try {
   const cfg = await devWebConfig();
   record('Dev web app found', true, `appId ${cfg.appId}, bucket ${cfg.storageBucket}`);
+  FUNCTIONS = await deployedFunctions();
+  const needed = ['checkAiConnection', 'registerStatementUpload', 'processStatement'];
+  const where = needed.map((n) => `${n}: ${FUNCTIONS.get(n)?.region ?? 'MISSING'}`).join(', ');
+  record(`Functions deployed in ${REGION}`, needed.every((n) => FUNCTIONS.get(n)?.region === REGION && FUNCTIONS.get(n)?.state === 'ACTIVE'), where);
   ID_TOKEN = await adminIdToken(cfg.apiKey);
   record('Signed in as synthetic admin', true, 'ci-smoke-admin (role admin, dev only)');
 

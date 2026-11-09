@@ -20,7 +20,7 @@ export const configMissing = !config.apiKey || !config.projectId;
 export const app = initializeApp(configMissing ? { apiKey: 'missing', projectId: 'demo-asm' } : config);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-export const functions = getFunctions(app, env.VITE_FUNCTIONS_REGION || 'us-east4');
+export const functions = getFunctions(app, env.VITE_FUNCTIONS_REGION || 'us-central1');
 export const storage = getStorage(app);
 
 /** The production project. Anything else (dev project, emulator) shows a DEV banner. */

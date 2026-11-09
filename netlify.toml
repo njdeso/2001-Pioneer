@@ -18,7 +18,7 @@
   VITE_FIREBASE_STORAGE_BUCKET = "pioneer-2001-dev.firebasestorage.app"
   VITE_FIREBASE_API_KEY = ""
   VITE_FIREBASE_APP_ID = ""
-  VITE_FUNCTIONS_REGION = "us-east4"
+  VITE_FUNCTIONS_REGION = "us-central1"
   VITE_USE_EMULATORS = "false"
 
 [context.branch-deploy.environment]
@@ -27,7 +27,7 @@
   VITE_FIREBASE_STORAGE_BUCKET = "pioneer-2001-dev.firebasestorage.app"
   VITE_FIREBASE_API_KEY = ""
   VITE_FIREBASE_APP_ID = ""
-  VITE_FUNCTIONS_REGION = "us-east4"
+  VITE_FUNCTIONS_REGION = "us-central1"
   VITE_USE_EMULATORS = "false"
 
 # Single-page app routing

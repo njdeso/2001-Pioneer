@@ -160,6 +160,16 @@ grant_project "$SA_EMAIL" roles/serviceusage.serviceUsageConsumer # use the enab
 gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" --project "$PROJECT_ID" \
   --member="serviceAccount:${SA_EMAIL}" --role=roles/iam.serviceAccountUser --quiet >/dev/null \
   && ok "iam.serviceAccountUser on ${RUNTIME_SA} only (deploy functions that run as it)"
+# firebase deploy checks actAs on the App Engine default account before deploying functions, even
+# though 2nd-gen functions run as the compute account. Granted on that one account only.
+APPENGINE_SA="${PROJECT_ID}@appspot.gserviceaccount.com"
+if gcloud iam service-accounts describe "$APPENGINE_SA" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud iam service-accounts add-iam-policy-binding "$APPENGINE_SA" --project "$PROJECT_ID" \
+    --member="serviceAccount:${SA_EMAIL}" --role=roles/iam.serviceAccountUser --quiet >/dev/null \
+    && ok "iam.serviceAccountUser on ${APPENGINE_SA} only (required by the firebase deploy pre-check)"
+else
+  warn "${APPENGINE_SA} does not exist; skipping (the firebase deploy pre-check will say if it needs it)."
+fi
 gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" --project "$PROJECT_ID" \
   --member="serviceAccount:${SA_EMAIL}" --role=roles/iam.serviceAccountTokenCreator --quiet >/dev/null \
   && ok "iam.serviceAccountTokenCreator on itself only (sign the smoke-test sign-in token; no private key)"

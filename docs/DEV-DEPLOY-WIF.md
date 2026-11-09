@@ -84,6 +84,7 @@ All roles are granted in **pioneer-2001-dev** only.
 | `firebase.viewer` | project | Read-only: project, web-app config, billing status |
 | `serviceusage.serviceUsageConsumer` | project | Call the enabled APIs. It cannot enable or disable APIs; the setup script does that. |
 | `iam.serviceAccountUser` | the functions runtime account only | Deploy functions that run as it |
+| `iam.serviceAccountUser` | the App Engine default account (`pioneer-2001-dev@appspot.gserviceaccount.com`) only | `firebase deploy` checks this before deploying functions |
 | `iam.serviceAccountTokenCreator` | itself only | Sign the smoke-test user's sign-in token through IAM (no private key) |
 | `storage.objectCreator` | the dev Storage bucket only | Upload synthetic test PDFs. It cannot read or delete files. |
 | `secretmanager.viewer` | the `ANTHROPIC_API_KEY` secret only | Confirm the secret exists. It **cannot read the key**. |

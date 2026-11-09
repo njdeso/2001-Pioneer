@@ -108,6 +108,11 @@ Older code ignores them. Never restore a backup over production to roll back cod
 | Anthropic key | Not changed by this release. |
 
 ## Notes
+- **Functions region.**
+  - All functions are, and stay, in **us-central1**. The code said `us-east4`, but that setting was never applied: `setGlobalOptions` ran after the functions were defined.
+  - The production deploy therefore updates the functions in place, with no URL change.
+  - The instance cap of **5 per function** now takes effect; until now it was never applied.
+  - The web app calls the region in `VITE_FUNCTIONS_REGION`, or us-central1 by default. Moving to another region would be a separate, planned migration.
 - **Netlify previews:**
   - PR previews and branch deploys now build against **pioneer-2001-dev** (see `netlify.toml`), so an open pull request can never act on production data.
   - Until the dev web config is filled in, previews show "Firebase is not configured".
