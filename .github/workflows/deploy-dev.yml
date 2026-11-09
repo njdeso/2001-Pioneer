@@ -76,7 +76,7 @@ jobs:
         if: steps.cfg.outputs.ready == 'true'
         run: |
           node scripts/assert-dev-target.mjs dev
-          test "$(node -p "require('./.firebaserc').projects.dev")" = "$DEV_PROJECT_ID"
+          test "$(node -p "JSON.parse(require('fs').readFileSync('.firebaserc', 'utf8')).projects.dev")" = "$DEV_PROJECT_ID"
 
       - name: Unit tests
         if: steps.cfg.outputs.ready == 'true'

@@ -2,6 +2,7 @@
 // CI check: the dev deploy workflow, the Workload Identity setup script and .firebaserc must agree.
 // Fails the build if any of these values drift apart, or if production appears where it must not.
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 
 const wf = readFileSync('.github/workflows/deploy-dev.yml', 'utf8');
 const sh = readFileSync('scripts/setup-dev-wif.sh', 'utf8');
@@ -51,6 +52,19 @@ need(wf.includes('*@"$DEV_PROJECT_ID".iam.gserviceaccount.com'), 'workflow must 
 // Secret: name agrees with the functions code; the workflow never reads its value
 need(shVar('SECRET_NAME') === 'ANTHROPIC_API_KEY', 'setup script secret name must be ANTHROPIC_API_KEY');
 need(!/secrets:access|versions access/.test(wf), 'workflow must never read the secret value');
+
+// .firebaserc is JSON without a .json extension: require() would parse it as JavaScript and crash.
+for (const [file, text] of [['deploy-dev.yml', wf], ['setup-dev-wif.sh', sh], ['smoke-dev.mjs', smoke]]) {
+  need(!/require\(\s*['"][^'"]*\.firebaserc['"]\s*\)/.test(text), `${file} loads .firebaserc with require(); read it with JSON.parse(readFileSync(...))`);
+}
+// Regression: actually run the workflow's guard step (local files only, no credentials).
+const guard = /- name: Guard — target must be pioneer-2001-dev\n(?:.*\n)*?\s+run: \|\n((?:\s{10}.*\n)+)/.exec(wf);
+need(Boolean(guard), 'could not find the workflow guard step');
+if (guard) {
+  const script = guard[1].replace(/^ {10}/gm, '');
+  const r = spawnSync('bash', ['-euo', 'pipefail', '-c', script], { env: { ...process.env, DEV_PROJECT_ID: DEV }, encoding: 'utf8' });
+  need(r.status === 0, `the workflow guard step fails when run: ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' | ')}`);
+}
 
 if (errors.length) {
   console.error('Dev deploy configuration check FAILED:\n - ' + errors.join('\n - '));
