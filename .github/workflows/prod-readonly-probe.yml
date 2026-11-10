@@ -1,0 +1,73 @@
+# READ-ONLY, CREDENTIAL-FREE probe of what production (pioneer-285cf / 2001-pioneer.netlify.app) is serving.
+# - No Google, Firebase or Netlify credentials; no repository secrets; empty GitHub token permissions.
+# - Only public HTTP GETs of the production web app's pages and scripts, and CORS preflight (OPTIONS)
+#   requests to the function URLs. A preflight is answered by Google's front end and runs NO function code,
+#   reads nothing and writes nothing.
+# Runs only on a push to the probe/prod-readonly branch.
+name: Production read-only probe
+on:
+  push:
+    branches: [probe/prod-readonly]
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Web app — which release the published production bundle contains
+        run: |
+          set -u
+          base="https://2001-pioneer.netlify.app"
+          {
+          echo "### Production web app ($base) — public GET only"
+          echo '```'
+          code=$(curl -s -o /tmp/index.html -D /tmp/h.txt -w '%{http_code}' "$base/")
+          echo "HTTP $code"
+          grep -iE '^(last-modified|age|etag|x-nf-request-id|server):' /tmp/h.txt | tr -d '\r'
+          : > /tmp/all.js
+          for js in $(grep -oE '/assets/[A-Za-z0-9._-]+\.js' /tmp/index.html | sort -u); do
+            echo "script $js"; curl -s "$base$js" >> /tmp/all.js
+            for chunk in $(grep -oE 'assets/[A-Za-z0-9._-]+\.js' /tmp/all.js | sort -u); do curl -s "$base/$chunk" >> /tmp/all.js; done
+          done
+          echo "bundle bytes: $(wc -c < /tmp/all.js)   sha256: $(sha256sum /tmp/all.js | cut -c1-16)"
+          echo "firebase projectId in bundle: $(grep -oE 'projectId:"[^"]*"' /tmp/all.js | sort -u | tr '\n' ' ')"
+          echo
+          echo "Release markers (count of occurrences in the published bundle):"
+          check() { printf '  %-58s %s\n' "$1" "$(grep -oF "$2" /tmp/all.js | wc -l)"; }
+          check "3A   AI statement reader (checkAiConnection)"           "checkAiConnection"
+          check "3B   matching (Re-run automatic matching)"              "Re-run automatic matching"
+          check "3C   posting (Reverse posting)"                         "Reverse posting"
+          check "3C   due-diligence exports (No gaps found)"             "No gaps found"
+          check "3C+  callable diagnostics (Web app build)"              "Web app build"
+          check "main 535f22f saved vs unsaved period (It takes effect only after)" "It takes effect only after"
+          check "PR6  coverage terms (Coverage terms)"                   "Coverage terms"
+          check "PR6  past-policy attribution (Past policy)"             "Past policy"
+          check "PR6  broker buyout (Create settlement snapshot)"        "Create settlement snapshot"
+          check "PR6  policy-number search (Search customer or policy)"  "Search customer or policy"
+          echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Functions — which callables production has (CORS preflight only, no function code runs)
+        run: |
+          set -u
+          git show origin/main:functions/src/index.ts > /tmp/main-index.ts
+          main=$(node -e "import('./scripts/lib/callables.mjs').then(m=>console.log(m.exportedCallables('/tmp/main-index.ts').join(' ')))")
+          pr6=$(node scripts/lib/callables.mjs | tr '\n' ' ')
+          extra=$(comm -13 <(tr ' ' '\n' <<<"$main" | sort) <(tr ' ' '\n' <<<"$pr6" | sort) | tr '\n' ' ')
+          probe() {
+            curl -s -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://2001-pioneer.netlify.app' \
+              -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' \
+              "https://us-central1-pioneer-285cf.cloudfunctions.net/$1"
+          }
+          {
+          echo "### Production functions (us-central1-pioneer-285cf) — OPTIONS only"
+          echo "204 = deployed and callable from the web app · 403 = deployed, not browser-callable · 404 = not deployed"
+          echo '```'
+          n=0; ok=0
+          echo "On main ($(wc -w <<<"$main")):"
+          for f in $main; do c=$(probe "$f"); n=$((n+1)); [ "$c" = 204 ] && ok=$((ok+1)); printf '  %-28s %s\n' "$f" "$c"; done
+          echo "  => $ok of $n answer 204"
+          echo "Added by PR #6 ($(wc -w <<<"$extra")):"
+          for f in $extra; do printf '  %-28s %s\n' "$f" "$(probe "$f")"; done
+          echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
