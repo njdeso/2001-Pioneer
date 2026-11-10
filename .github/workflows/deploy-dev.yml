@@ -166,6 +166,24 @@ jobs:
               printf '%-26s %s %s\n' "$f" "$code" "$(head -c 110 /tmp/b | tr '\n' ' ')"
             done
             echo '```'
+            echo "### Isolation from production (read-only, dev-side evidence only; no request is made to any other project)"
+            echo '```'
+            echo "Functions: the Firebase project and bucket each deployed function is bound to (FIREBASE_CONFIG):"
+            for f in $(gcloud functions list --project "$P" --regions us-central1 --format='value(name.basename())' 2>/dev/null); do
+              svc=$(echo "$f" | tr 'A-Z' 'a-z')
+              cfg=$(gcloud run services describe "$svc" --project "$P" --region us-central1 --format=json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const env=j.spec.template.spec.containers[0].env||[];const fc=env.find(e=>e.name==="FIREBASE_CONFIG");const gp=env.find(e=>e.name==="GCLOUD_PROJECT");const c=fc?JSON.parse(fc.value):{};console.log(`project=${c.projectId??"?"} bucket=${c.storageBucket??"?"} GCLOUD_PROJECT=${gp?gp.value:"?"}`)}catch(e){console.log("unreadable")}})')
+              printf '  %-26s %s\n' "$f" "$cfg"
+            done
+            echo "Web app registered in $P (keys not printed):"
+            npx firebase apps:sdkconfig WEB --project dev 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const m=s.match(/\{[\s\S]*\}/);if(!m){console.log("  not available");return}const c=JSON.parse(m[0]);for(const k of ["projectId","authDomain","storageBucket","messagingSenderId"])console.log(`  ${k}: ${c[k]}`)})'
+            echo "Firestore database:"
+            gcloud firestore databases describe --database='(default)' --project "$P" --format='value(name,locationId,type)' 2>&1 | sed 's/^/  /'
+            echo "Authentication (Identity Platform config: authorized sign-in domains):"
+            TOKEN=$(gcloud auth print-access-token)
+            curl -s -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $P" "https://identitytoolkit.googleapis.com/admin/v2/projects/$P/config" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);console.log(`  config name: ${j.name}`);console.log(`  authorizedDomains: ${(j.authorizedDomains||[]).join(", ")}`)}catch{console.log("  not available")}})'
+            echo "Roles held by the deploy service account in $P:"
+            gcloud projects get-iam-policy "$P" --flatten=bindings --filter="bindings.members:serviceAccount:$DEV_SA" --format='value(bindings.role)' 2>&1 | sed 's/^/  /'
+            echo '```'
             echo "### Browser-style check of EVERY deployed function: CORS preflight from the dev site, then POST"
             echo '```'
             ORIGIN=https://deploy-dev--2001-pioneer.netlify.app
