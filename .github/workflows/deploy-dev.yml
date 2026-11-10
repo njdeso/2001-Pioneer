@@ -202,6 +202,13 @@ jobs:
             gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"savesettings\" AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
               --format='table(timestamp, severity, httpRequest.requestMethod, httpRequest.status, httpRequest.requestSize, httpRequest.responseSize, textPayload, jsonPayload.message)' 2>&1 | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | head -60
             echo '```'
+            echo "### Function errors (severity ERROR or worse) in the last 3 hours"
+            echo '```'
+            SINCE3=$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)
+            gcloud logging read "resource.type=\"cloud_run_revision\" AND severity>=ERROR AND timestamp>=\"$SINCE3\"" --project "$P" --limit 15 \
+              --format='value(timestamp, resource.labels.service_name, textPayload, jsonPayload.message, jsonPayload.error.message)' 2>&1 \
+              | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | cut -c1-900 | head -40
+            echo '```'
             echo "### HTTP 404 responses since $SINCE"
             echo '```'
             gcloud logging read "httpRequest.status=404 AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
