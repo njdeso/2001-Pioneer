@@ -1,17 +1,17 @@
-# Production release: Stage 3B/3C + coverage terms + broker buyout (PR #6)
+# Production release: coverage terms, policy-number search and broker buyout (PR #6)
 
 | | |
 |---|---|
 | Production | Firebase `pioneer-285cf` (functions us-central1) · web app https://2001-pioneer.netlify.app |
-| Currently in production | Web app `b4b6a29` (Stage 3A). Stage 3B/3C (PRs #3–#5) is merged to `main` but **not yet deployed** |
-| This release deploys `main` after PR #6 is merged | Stage 3B matching, 3C posting + ledger + ledger report, due-diligence exports, coverage terms, policy-number search, broker advances and buyout settlements |
+| Production baseline (verified 2026-11-10, read-only probe) | Stage 3C is live: all **25** callables on `main` (`48d725f`) answer from production; none of PR #6's 13 new callables exist. Netlify production commit: confirm in the Netlify UI (the site is password-protected to automated checks) |
+| This release adds (PR #6) | Coverage terms, past-policy attribution on unmatched lines, person-name matching evidence, policy-number search, broker advance records, buyout settlements and statements. **13 new callables**, 4 existing ones updated (runStatementMatching, setLineMatch, savePolicy message, posting plan fields only when used) |
 | Who runs production commands | You, in Google Cloud Shell. Claude has no production credentials (by design) |
 
 ## What changes in production, and what never changes
 
 | Area | Change | Existing records |
 |---|---|---|
-| Cloud Functions | Existing functions updated in place; new callables added (matching, posting, terms, advances, buyout). Same region, so no URL change | Not touched |
+| Cloud Functions | The 25 existing functions are redeployed in place (same names and region, so no URL change), plus 13 new callables (terms, advances, buyout) | Not touched |
 | Firestore rules | Additive: read rules for terms, ledger, advances and buyout collections. **No browser can write anything**, as before | Rules are not data |
 | Indexes / Storage rules | No change required by this release | — |
 | Data migrations | **None.** No record is rewritten, recalculated or deleted on deploy | — |
@@ -21,6 +21,7 @@
 | Dev test data | **Never copied.** Production only gets code; Karen Cross / synthetic records exist only in `pioneer-2001-dev` | — |
 
 ## Step 1. Preflight (read-only) and verified backup — then send the output to Claude
+**Do not use the production app (no matching, posting or edits) from Step 1 until Step 4 has passed**; the after-check requires every record to be identical.
 
 ```bash
 git clone https://github.com/njdeso/2001-Pioneer.git pioneer-release && cd pioneer-release
