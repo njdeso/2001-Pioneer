@@ -183,7 +183,7 @@ jobs:
                 echo "  projectId values: $(grep -oE 'projectId:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
                 echo "  authDomain:       $(grep -oE 'authDomain:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
                 echo "  deploy context:   $(grep -oE '"(deploy-preview|branch-deploy|production)"' /tmp/b.js | sort -u | tr '\n' ' ')"
-                for k in pioneer-2001-dev pioneer-285cf us-central1 cloudfunctions.net approveStatement postStatement runStatementMatching 'Due Diligence Package' 'Ties to the Dashboard'; do
+                for k in pioneer-2001-dev us-central1 cloudfunctions.net approveStatement postStatement runStatementMatching 'Due Diligence Package' 'Ties to the Dashboard'; do
                   printf '  %-24s %s\n' "$k" "$(grep -oF "$k" /tmp/b.js | wc -l)"
                 done
               fi

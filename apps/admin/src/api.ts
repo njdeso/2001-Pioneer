@@ -1,5 +1,6 @@
 import type { AiDiagnosis, LineMatch, MatchSummary, PostingPlan } from '@asm/shared';
 import { httpsCallable } from 'firebase/functions';
+import { classifyProbe, describeCallableError, PROBE_SAFE_FUNCTIONS, type ProbeResult } from '@asm/shared';
 import type {
   BrokerInput, CarrierInput, ClientInput, ImportOptionsInput, ImportPlanSummary, ImportRecordInput, Message, PolicyInput, SettingsInput,
 } from '@asm/shared';
@@ -21,7 +22,7 @@ export interface UndoResult {
   policiesDeleted: number; policiesRestored: number; clientsDeleted: number; clientsRestored: number;
   skipped: { id: string; type: 'policy' | 'client'; reason: string }[];
 }
-import { functions } from './firebase';
+import { functions, buildRef, functionsRegion, projectId } from './firebase';
 
 /** Error carrying per-field messages from the server for forms. */
 export class ApiError extends Error {
@@ -37,9 +38,29 @@ async function call<Req, Res>(name: string, data: Req, timeoutMs?: number): Prom
     const res = await httpsCallable<Req, Res>(functions, name, timeoutMs ? { timeout: timeoutMs } : undefined)(data);
     return res.data;
   } catch (err: unknown) {
-    const e = err as { message?: string; details?: { fieldErrors?: Record<string, string> } };
-    throw new ApiError(e.message?.replace(/^.*?:\s*/, '') || 'Request failed', e.details?.fieldErrors ?? {});
+    const e = err as { code?: string; message?: string; details?: { fieldErrors?: Record<string, string> } };
+    // Server refusals keep their own message; "the request never reached a function" (e.g. a bare
+    // "not-found [404]") becomes a message naming the function, its URL and this build.
+    throw new ApiError(describeCallableError(e, { name, projectId, region: functionsRegion, build: buildRef }), e.details?.fieldErrors ?? {});
   }
+}
+
+/**
+ * Check from this browser that each statement function is deployed and reachable. Each one is called
+ * with deliberately invalid input ({ probe: true }); every probed function checks the sign-in and then
+ * rejects the input before reading or writing anything, so nothing changes.
+ */
+export async function probeStatementFunctions(): Promise<{ name: string; result: ProbeResult; detail: string; url: string }[]> {
+  return Promise.all(PROBE_SAFE_FUNCTIONS.map(async (name) => {
+    const url = `https://${functionsRegion}-${projectId}.cloudfunctions.net/${name}`;
+    try {
+      await httpsCallable(functions, name, { timeout: 30_000 })({ probe: true });
+      return { name, result: 'reachable' as ProbeResult, detail: 'answered', url };
+    } catch (err) {
+      const e = err as { code?: string; message?: string };
+      return { name, result: classifyProbe(e), detail: `${e.code ?? ''} ${e.message ?? ''}`.trim(), url };
+    }
+  }));
 }
 
 export const api = {

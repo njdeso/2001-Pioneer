@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router';
 import { formatWindow, normalizeName, normalizePolicyNumber } from '@asm/shared';
 import { useAuth } from './auth';
 import { useData } from './data';
-import { isProduction, projectId, usingEmulators } from './firebase';
+import { buildRef, isProduction, projectId, usingEmulators } from './firebase';
 import { cx } from './ui';
 
 export const NAV = [
@@ -132,7 +132,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         </header>
         {!isProduction && (
           <div className="bg-amber-400 px-6 py-1.5 text-center text-xs font-semibold tracking-wide text-amber-950">
-            DEVELOPMENT ENVIRONMENT · {usingEmulators ? 'local emulators' : `project ${projectId}`} · not production data
+            DEVELOPMENT ENVIRONMENT · {usingEmulators ? 'local emulators' : `project ${projectId}`} · not production data{buildRef ? ` · build ${buildRef}` : ''}
           </div>
         )}
         {error && <div className="bg-red-50 px-6 py-2 text-sm text-red-700">Data error: {error}</div>}
