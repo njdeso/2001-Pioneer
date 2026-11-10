@@ -92,6 +92,10 @@ jobs:
           create_credentials_file: true
           export_environment_variables: true
 
+      - name: Guard — Google confirms project ID and number before deploying
+        if: steps.cfg.outputs.ready == 'true'
+        run: node scripts/assert-dev-project.mjs
+
       - name: Owner email for dev
         if: steps.cfg.outputs.ready == 'true'
         env:

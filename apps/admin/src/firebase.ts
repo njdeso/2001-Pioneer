@@ -15,7 +15,12 @@ const config = {
   appId: env.VITE_FIREBASE_APP_ID,
 };
 
-export const configMissing = !config.apiKey || !config.projectId;
+/** Netlify previews and branch deploys must use the development project (scripts/netlify-dev-build.mjs). */
+export const DEV_PROJECT_ID = 'pioneer-2001-dev';
+const deployContext = env.VITE_DEPLOY_CONTEXT ?? '';
+export const previewTargetsWrongProject = (deployContext === 'deploy-preview' || deployContext === 'branch-deploy') && config.projectId !== DEV_PROJECT_ID;
+
+export const configMissing = !config.apiKey || !config.projectId || previewTargetsWrongProject;
 
 export const app = initializeApp(configMissing ? { apiKey: 'missing', projectId: 'demo-asm' } : config);
 export const auth = getAuth(app);

@@ -114,6 +114,7 @@ function PolicyDetail({ policy, onClose, onEdit }: { policy: Policy; onClose: ()
     ['Line', policy.line === 'personal' ? 'Personal' : 'Commercial'],
     ['Named insured', policy.namedInsured || '—'],
     ['Broker', brokerById.get(policy.brokerId)?.name ?? '—'],
+    ['Broker share', policy.brokerShareBps != null ? `${formatBps(policy.brokerShareBps)} (this policy)` : `${formatBps(brokerById.get(policy.brokerId)?.shareBps ?? 0)} (broker standard)`],
     ['Term', policy.effectiveDate ? `${policy.effectiveDate} → ${policy.expirationDate ?? '?'}` : '—'],
     ['Premium', <Money key="p" cents={policy.premiumCents} />],
     ['Commission rate', rate != null ? `${formatBps(rate)}${policy.commissionRateBps == null ? ' (carrier standard)' : ''}` : '—'],

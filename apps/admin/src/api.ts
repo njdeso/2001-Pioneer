@@ -1,4 +1,4 @@
-import type { AiDiagnosis } from '@asm/shared';
+import type { AiDiagnosis, LineMatch, MatchSummary } from '@asm/shared';
 import { httpsCallable } from 'firebase/functions';
 import type {
   BrokerInput, CarrierInput, ClientInput, ImportOptionsInput, ImportPlanSummary, ImportRecordInput, Message, PolicyInput, SettingsInput,
@@ -72,6 +72,10 @@ export const api = {
     call<{ statementId: string; reason: string }, { ok: true }>('discardStatement', { statementId, reason }),
   checkAiConnection: (model?: string, skipRequest = false) =>
     call<{ model?: string; skipRequest: boolean }, AiDiagnosis>('checkAiConnection', { model, skipRequest }, 120_000),
+  runStatementMatching: (statementId: string, includeManual = false) =>
+    call<{ statementId: string; includeManual: boolean }, MatchSummary & { changed: number; keptManual: number }>('runStatementMatching', { statementId, includeManual }, 300_000),
+  setLineMatch: (input: { action: 'assign'; statementId: string; lineId: string; policyId: string; note?: string } | { action: 'unmatch' | 'auto'; statementId: string; lineId: string; note?: string }) =>
+    call<typeof input, { match: LineMatch; summary: MatchSummary }>('setLineMatch', input),
   getStatementFileUrl: (statementId: string) =>
     call<{ statementId: string }, { url: string; expiresInSeconds: number }>('getStatementFileUrl', { statementId }),
   reassignPolicies: (policyIds: string[], brokerId: string) =>

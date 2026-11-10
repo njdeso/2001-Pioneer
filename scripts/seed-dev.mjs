@@ -1,17 +1,29 @@
 #!/usr/bin/env node
-// Seeds a DEVELOPMENT project (or the emulator) with the minimum reference data for
-// Stage 3A testing. Synthetic/reference data only — no clients, policies or commissions.
-//   npm run seed:dev                      (dev project, uses Application Default Credentials)
+// Seeds the DEVELOPMENT project (or the emulator) with synthetic data only:
+//   - reference data for Stage 3A (Travelers carrier, Unassigned broker, default settings)
+//   - the Stage 3B synthetic book (carriers, brokers, clients, policies tagged synthetic, IDs SYN3B-…)
+//   - one synthetic extracted statement for manual matching tests: SYN3B-MANUAL, created once and then
+//     left as you leave it; set SEED_RESET_3B=1 to reset it
+//
+//   npm run seed:dev                      (dev project; Application Default Credentials)
 //   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 node scripts/seed-dev.mjs demo-asm
-import { readFileSync, existsSync } from 'node:fs';
-import { initializeApp } from 'firebase-admin/app';
+//
+// It can never seed production. It refuses unless the target is pioneer-2001-dev by ID (.firebaserc
+// alias and requested project) AND by project number, as reported by Google for the script's own
+// credentials (scripts/lib/dev-guard.mjs).
+import { initializeApp, applicationDefault } from 'firebase-admin/app';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { assertDevAlias, assertDevProjectNumber, NotDevError } from './lib/dev-guard.mjs';
+import { seedBook, writeStatement } from './lib/synthetic-3b.mjs';
 
 const alias = process.argv[2] ?? 'dev';
-const rc = existsSync('.firebaserc') ? JSON.parse(readFileSync('.firebaserc', 'utf8')) : {};
-const projectId = rc.projects?.[alias] ?? alias;
-if (!(projectId === 'pioneer-2001-dev' || /^demo-/.test(projectId)) || projectId === 'pioneer-285cf') {
-  console.error(`Refusing to seed "${projectId}": not a development project.`);
+let projectId;
+try {
+  projectId = assertDevAlias(alias);
+  const credential = process.env.FIRESTORE_EMULATOR_HOST ? null : applicationDefault();
+  await assertDevProjectNumber(projectId, async () => (await credential.getAccessToken()).access_token);
+} catch (e) {
+  console.error(e instanceof NotDevError ? e.message : `Refusing to seed: ${e.message}`);
   process.exit(1);
 }
 initializeApp({ projectId });
@@ -35,4 +47,8 @@ if (!(await settings.get()).exists) {
   await settings.set({ agencyName: 'Central Insurance Agency (DEV)', snapshotStartMonth: '2025-01', snapshotMonths: 12, revenueBasis: 'statementPeriod',
     defaultBrokerShareBps: 5000, aiEnabled: false, aiModel: 'claude-sonnet-5-5', aiMonthlyCallLimit: 25, createdAt: now, createdBy: by });
 }
-console.log(`Seeded ${projectId}: Travelers carrier, Unassigned broker, default settings.`);
+await seedBook(db, FieldValue);
+const manual = db.collection('statements').doc('SYN3B-MANUAL');
+const reset = process.env.SEED_RESET_3B === '1';
+if (reset || !(await manual.get()).exists) await writeStatement(db, FieldValue, 'SYN3B-MANUAL', 'Stage 3B manual test statement');
+console.log(`Seeded ${projectId}: Travelers carrier, Unassigned broker, default settings; Stage 3B synthetic book; SYN3B-MANUAL ${reset ? 'reset' : 'present'}.`);

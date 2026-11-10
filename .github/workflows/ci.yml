@@ -41,6 +41,12 @@ jobs:
       - name: Dev deploy configuration agrees (workflow, setup script, .firebaserc)
         run: node scripts/check-dev-wif-config.mjs
 
+      - name: Netlify preview build refuses missing or non-dev configuration
+        run: node --test scripts/netlify-dev-build.test.mjs
+
+      - name: Dev-only seeding guard refuses production
+        run: node --test scripts/lib/dev-guard.test.mjs
+
       - name: npm run typecheck
         run: npm run typecheck
 

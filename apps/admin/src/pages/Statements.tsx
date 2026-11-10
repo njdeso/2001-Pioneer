@@ -4,12 +4,13 @@ import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/fir
 import { ref as storageRef, uploadBytesResumable } from 'firebase/storage';
 import {
   formatBps, formatMonth, TRANSACTION_TYPE_LABELS,
-  type Cents, type ExtractedLine, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment,
+  type Cents, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment,
 } from '@asm/shared';
 import { db, storage } from '../firebase';
 import { api } from '../api';
 import { useData } from '../data';
 import { Badge, Button, Card, DataTable, Empty, ErrorNote, Field, Modal, Money, PageHeader, Select, Stat, TextArea, cx, type Column } from '../ui';
+import { BrokerCell, MatchBadge, MatchDialog, MatchedTo, MatchingPanel, lineMatch, matchFilterFn, type MatchFilter, type MatchingInfo, type MatchLine } from './StatementMatching';
 
 // ---------------------------------------------------------------------------
 // Shared
@@ -48,10 +49,11 @@ interface StatementDoc {
   pendingCents?: Cents;
   failure?: { code: string; message: string; httpStatus?: number; errorType?: string | null; requestId?: string | null } | null;
   discardReason?: string;
+  matching?: MatchingInfo | null;
   createdAt?: { toDate?: () => Date };
 }
 
-type LineDoc = ExtractedLine & { id: string; status: 'pending' | 'info' };
+type LineDoc = MatchLine;
 
 const STATUS: Record<StatementDoc['status'], { label: string; tone: 'slate' | 'green' | 'amber' | 'red' | 'blue' }> = {
   awaiting_upload: { label: 'Awaiting upload', tone: 'slate' },
@@ -230,10 +232,13 @@ type LineTab = 'all' | 'commission' | 'payment_only' | 'negative' | 'issues';
 
 export function StatementReviewPage() {
   const { id } = useParams();
-  const { carriers, carrierById } = useData();
+  const { carriers, carrierById, brokers, clientById, policyById } = useData();
   const [stmt, setStmt] = useState<StatementDoc | null | undefined>(undefined);
   const [lines, setLines] = useState<LineDoc[]>([]);
   const [tab, setTab] = useState<LineTab>('all');
+  const [matchFilter, setMatchFilter] = useState<MatchFilter>('any');
+  const [brokerFilter, setBrokerFilter] = useState('');
+  const [matching, setMatching] = useState<LineDoc | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -249,7 +254,10 @@ export function StatementReviewPage() {
     return () => { u1(); u2(); };
   }, [id]);
 
+  const byMatch = useMemo(() => matchFilterFn(matchFilter), [matchFilter]);
   const filtered = useMemo(() => lines.filter((l) => {
+    if (!byMatch(l)) return false;
+    if (brokerFilter && lineMatch(l)?.brokerId !== brokerFilter) return false;
     switch (tab) {
       case 'commission': return l.kind === 'commission';
       case 'payment_only': return l.kind === 'payment_only';
@@ -257,13 +265,18 @@ export function StatementReviewPage() {
       case 'issues': return l.issues?.length > 0;
       default: return true;
     }
-  }), [lines, tab]);
+  }), [lines, tab, byMatch, brokerFilter]);
 
   if (stmt === undefined) return <p className="text-sm text-slate-500">Loading…</p>;
   if (stmt === null) return <Empty title="Statement not found"><Link to="/queue" className="text-ink underline">Back to the queue</Link></Empty>;
 
   const rec = stmt.reconciliation;
   const t = rec?.totals;
+  const canMatch = ['needs_review', 'discrepancy'].includes(stmt.status) && (stmt.postedCents ?? 0) === 0;
+  const matchCounts = {
+    matched: lines.filter(matchFilterFn('matched')).length, ambiguous: lines.filter(matchFilterFn('ambiguous')).length,
+    unmatched: lines.filter(matchFilterFn('unmatched')).length, manual: lines.filter(matchFilterFn('manual')).length, not_run: lines.filter(matchFilterFn('not_run')).length,
+  };
   const issuesCount = lines.filter((l) => l.issues?.length).length;
 
   async function act(fn: () => Promise<unknown>) {
@@ -291,6 +304,15 @@ export function StatementReviewPage() {
     { key: 'term', header: 'Term comm. (ref)', align: 'right', render: (l) => <Money cents={l.termCommissionCents} className="text-slate-500" /> },
     { key: 'prem', header: 'Prem. for comm.', align: 'right', render: (l) => <Money cents={l.premiumForCommissionCents} /> },
     { key: 'txn', header: 'Txn premium', align: 'right', render: (l) => <Money cents={l.transactionPremiumCents} /> },
+    { key: 'match', header: 'Match', render: (l) => <MatchBadge m={lineMatch(l)} />, sort: (l) => lineMatch(l)?.status ?? 'zz' },
+    { key: 'matchedTo', header: 'Matched to', className: 'whitespace-normal min-w-[12rem]', render: (l) => <MatchedTo m={lineMatch(l)} /> },
+    { key: 'broker', header: 'Broker', render: (l) => <BrokerCell m={lineMatch(l)} /> },
+    { key: 'brokerCents', header: 'Broker comm.', align: 'right', render: (l) => { const m = lineMatch(l); return m?.policyId ? <Money cents={m.brokerCents} /> : '—'; } },
+    { key: 'agencyCents', header: 'Agency comm.', align: 'right', render: (l) => { const m = lineMatch(l); return m?.policyId ? <Money cents={m.agencyCents} /> : '—'; } },
+    {
+      key: 'act', header: '',
+      render: (l) => canMatch && stmt.payerId ? <Button size="sm" variant="secondary" onClick={(e) => { e.stopPropagation(); setMatching(l); }}>{lineMatch(l)?.status === 'matched' ? 'Review' : 'Match…'}</Button> : null,
+    },
     {
       key: 'issues', header: 'Checks', className: 'whitespace-normal max-w-xs',
       render: (l) => l.issues?.length
@@ -399,6 +421,10 @@ export function StatementReviewPage() {
         </Card>
       )}
 
+      {['needs_review', 'discrepancy'].includes(stmt.status) && (
+        <MatchingPanel statementId={stmt.id} payerId={stmt.payerId} matching={stmt.matching} lines={lines} canMatch={canMatch} />
+      )}
+
       {lines.length > 0 && (
         <Card title="Extracted transactions">
           <div className="mb-3 flex flex-wrap gap-1">
@@ -407,8 +433,23 @@ export function StatementReviewPage() {
               <Button key={k} size="sm" variant={tab === k ? 'primary' : 'secondary'} onClick={() => setTab(k)}>{l}</Button>
             ))}
           </div>
-          <DataTable rows={filtered} columns={columns} pageSize={50} searchText={(l) => `${l.insuredName} ${l.policyNumberRaw} ${l.policyNumberNormalized}`} />
+          <div className="mb-3 flex flex-wrap items-center gap-1">
+            <span className="mr-1 text-xs font-medium uppercase text-slate-500">Match</span>
+            {([['any', `Any (${lines.length})`], ['matched', `Matched (${matchCounts.matched})`], ['ambiguous', `Ambiguous (${matchCounts.ambiguous})`],
+              ['unmatched', `Unmatched (${matchCounts.unmatched})`], ['manual', `Manual (${matchCounts.manual})`], ['not_run', `Not matched yet (${matchCounts.not_run})`]] as [MatchFilter, string][]).map(([k, l]) => (
+              <Button key={k} size="sm" variant={matchFilter === k ? 'primary' : 'secondary'} onClick={() => setMatchFilter(k)}>{l}</Button>
+            ))}
+            <Select value={brokerFilter} onChange={(e) => setBrokerFilter(e.target.value)} placeholder="All brokers" className="ml-2 w-44"
+              options={brokers.map((b) => ({ value: b.id, label: b.name }))} />
+          </div>
+          <DataTable rows={filtered} columns={columns} pageSize={50}
+            searchText={(l) => { const m = lineMatch(l); return `${l.insuredName} ${l.policyNumberRaw} ${l.policyNumberNormalized} ${m?.clientId ? clientById.get(m.clientId)?.name ?? '' : ''} ${m?.policyId ? policyById.get(m.policyId)?.policyNumber ?? '' : ''}`; }} />
         </Card>
+      )}
+
+      {matching && (
+        <MatchDialog key={matching.id} statementId={stmt.id} payerId={stmt.payerId ?? null}
+          line={lines.find((l) => l.id === matching.id) ?? matching} onClose={() => setMatching(null)} />
       )}
 
       <Modal open={discarding} title="Discard this statement?" onClose={() => setDiscarding(false)} width="max-w-md">

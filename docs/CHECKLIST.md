@@ -56,7 +56,20 @@ one PR per stage; per-policy broker % (default broker %); payment-only rows kept
 - 🟡 Run `npm test`, `npm run test:rules`, `npm run typecheck`, `npm run build` in Cloud Shell; manual test in pioneer-2001-dev (docs/STAGE-3A-TESTING.md)
 - ⏳ Stage 3A review and approval
 
-### Stages 3B–3F ⏳ (matching · approval & posting · broker statements & payments · corrections & revisions · Lancer)
+### Stage 3A ✅ deployed to production (October 2026 extracted and reconciled)
+
+### Stage 3B — Commission matching (PR open, branch `feature/stage-3b-commission-matching`) — docs/STAGE-3B-MATCHING.md
+- ✅ Automatic matching: normalized policy number within the statement's carrier or wholesaler; name as supporting evidence only; alternate numbers
+- ✅ Excel scientific notation expanded only when every digit is present; leading-zero loss needs an agreeing name; no digits ever guessed
+- ✅ Matched / ambiguous / unmatched with reasons and up to 5 candidates; manual matches kept on re-run
+- ✅ Manual assign / unmatch / return to automatic, with client and policy search, split preview and audit before/after
+- ✅ Broker vs agency commission in integer cents (half-even, sums exact); negatives and chargebacks; adjustments agency-only; per-policy broker share (default: broker's share)
+- ✅ Review screen: progress, totals with balance check, per-broker table, match and broker filters, search on matched records
+- ✅ Writes only line match, statement summary and audit log; no clients/policies/ledger writes; posted statements locked; rules test
+- 🟡 Live test in pioneer-2001-dev (not run: Stage 3B was not deployed anywhere)
+- ⏳ Stage 3B review and approval
+
+### Stages 3C–3F ⏳ (approval & posting · broker statements & payments · corrections & revisions · Lancer)
 
 ## Phase 4 — Reports, valuation, lock, due-diligence package ⏳
 ## Phase 5 — Final hardening ⏳
