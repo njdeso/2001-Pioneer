@@ -18,3 +18,4 @@ data/
 exports/
 *.local
 .local-check/
+__pycache__/
