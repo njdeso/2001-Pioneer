@@ -61,14 +61,28 @@ RELEASES="$(curl -fsS --max-time 60 --retry 2 -H "Authorization: Bearer ${TOKEN}
 if echo "$RELEASES" | grep -qE "cloud\.firestore/(${TMP_DB}|bkverify-)"; then fail "a security-rules release targets a bkverify- database; client access is possible."; fi
 echo "  CHECK: OK - no security-rules release for ${TMP_DB}: clients are denied"
 
-echo "== Importing the backup into ${TMP_DB} (waits until done)"
-gcloud firestore import "${BACKUP}/" --database="$TMP_DB" --project "$PROJECT_ID" --format=json > import-op.json
+echo "== Importing the backup into ${TMP_DB}"
+# Start the import, then poll the operation itself for its FINAL status. (Without --async, gcloud waits but
+# prints the operation as it was when it started — done empty, PROCESSING — so that output cannot be judged.)
+gcloud firestore import "${BACKUP}/" --database="$TMP_DB" --project "$PROJECT_ID" --async --format=json > import-start.json
+OP_ID="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("name") or "").rsplit("/",1)[-1])' import-start.json)"
+[[ "$OP_ID" =~ ^[A-Za-z0-9_-]+$ ]] || fail "the import did not return an operation name."
+echo "  operation: ${OP_ID}"
+waited=0
+while :; do
+  gcloud firestore operations describe "$OP_ID" --database="$TMP_DB" --project "$PROJECT_ID" --format=json > import-op.json
+  DONE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("done") is True)' import-op.json)"
+  [ "$DONE" = "True" ] && break
+  [ "$waited" -ge "${TIMEOUT_SECONDS:-3600}" ] && fail "the import did not finish within ${TIMEOUT_SECONDS:-3600} s."
+  echo "  … $(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("metadata") or {}).get("operationState") or "PENDING")' import-op.json) (${waited} s)"
+  sleep "${POLL_SECONDS:-15}"; waited=$((waited + ${POLL_SECONDS:-15}))
+done
 python3 - import-op.json <<'PY' || fail "the import did not finish successfully."
 import json, sys
 d = json.load(open(sys.argv[1]))
 state = (d.get("metadata") or {}).get("operationState")
 print(f"  done: {d.get('done')}   state: {state}   error: {d.get('error') or 'none'}")
-sys.exit(0 if d.get("done") and not d.get("error") and state == "SUCCESSFUL" else 1)
+sys.exit(0 if d.get("done") is True and not d.get("error") and state == "SUCCESSFUL" else 1)
 PY
 
 echo "== Fingerprinting the restored copy (read-only)"

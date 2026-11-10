@@ -21,7 +21,10 @@ case "$*" in
   "storage ls"*) [ "$FAKE_META" = 1 ] || exit 1; echo ok;;
   "firestore databases create"*) [ "$FAKE_CREATE_FAILS" = 1 ] && exit 1; echo created;;
   "auth print-access-token"*) echo TOKEN;;
-  "firestore import"*) echo "$FAKE_IMPORT_JSON";;
+  "firestore import"*) echo '{"name":"projects/pioneer-285cf/databases/bkverify-x/operations/IMP1","done":null,"metadata":{"operationState":"PROCESSING"}}';;
+  "firestore operations describe"*)
+    n=$(cat "$WORK/polls" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$WORK/polls"
+    if [ "$n" -lt 2 ]; then echo '{"done":false,"metadata":{"operationState":"PROCESSING"}}'; else echo "$FAKE_IMPORT_JSON"; fi;;
   "firestore databases delete"*) echo deleted;;
   *) echo "unexpected gcloud $*" >&2; exit 9;;
 esac
@@ -45,7 +48,7 @@ function run(over = {}) {
   writeFileSync(join(work, 'preflight-before.txt'), PREFLIGHT);
   writeFileSync(join(work, 'last-backup.txt'), over.backup ?? BACKUP);
   const env = {
-    ...process.env, WORK: work, PATH: `${bin}:${process.env.PATH}`,
+    ...process.env, WORK: work, POLL_SECONDS: '0', PATH: `${bin}:${process.env.PATH}`,
     FAKE_META: '1', FAKE_RELEASES: '{"releases":[{"name":"projects/pioneer-285cf/releases/cloud.firestore"}]}',
     FAKE_IMPORT_JSON: '{"done":true,"metadata":{"operationState":"SUCCESSFUL"}}', FAKE_AUDIT: '40', FAKE_RESTORED: [...FP, DONE].join('\n'),
     ...over,
@@ -64,7 +67,9 @@ test('identical restored copy: VERIFIED BY RESTORE; imports into and deletes onl
   assert.match(r.out, /BACKUP: VERIFIED BY RESTORE — gs:\/\/pioneer-285cf-firestore-backups-us/);
   const name = tmpName(r.calls);
   assert.ok(name, 'temporary database created');
-  assert.match(r.calls, new RegExp(`firestore import ${BACKUP}/ --database=${name} --project pioneer-285cf`));
+  assert.match(r.calls, new RegExp(`firestore import ${BACKUP}/ --database=${name} --project pioneer-285cf --async`));
+  assert.match(r.calls, new RegExp(`firestore operations describe IMP1 --database=${name} --project pioneer-285cf`), 'polls the import operation in the temporary database');
+  assert.match(r.out, /PROCESSING \(0 s\)[\s\S]*done: True +state: SUCCESSFUL/, 'judges the FINAL status, not the stale start output');
   assert.equal(readFileSync(join(r.work, 'fp-args'), 'utf8'), `pioneer-285cf TOKEN ${name}`, 'fingerprint reads the restored copy');
   assert.deepEqual(deletes(r.calls), [`gcloud firestore databases delete --database=${name} --project pioneer-285cf --quiet`]);
   assert.doesNotMatch(r.calls.replace(/databases describe --database=\(default\)[^\n]*/g, ''), /\(default\)/, '"(default)" is only ever described, never written');
@@ -77,6 +82,8 @@ for (const [name, over, why] of [
   ['audit-log count differs', { FAKE_AUDIT: '39' }, /DIFFERENT auditLog/],
   ['fingerprint of the restored copy fails', { FAKE_FP_EXIT: '2', FAKE_RESTORED: '  FINGERPRINT FAILED: HTTP 503' }, /fingerprint of the restored copy did not complete/],
   ['fingerprint of the restored copy is incomplete', { FAKE_RESTORED: FP.join('\n') }, /fingerprint of the restored copy is incomplete/],
+  ['import never finishes', { FAKE_IMPORT_JSON: '{"done":false,"metadata":{"operationState":"PROCESSING"}}', TIMEOUT_SECONDS: '0' }, /did not finish within/],
+  ['import done but not SUCCESSFUL', { FAKE_IMPORT_JSON: '{"done":true,"metadata":{"operationState":"CANCELLED"}}' }, /import did not finish successfully/],
   ['import failed', { FAKE_IMPORT_JSON: '{"done":true,"error":{"message":"x"},"metadata":{"operationState":"FAILED"}}' }, /import did not finish successfully/],
   ['rules release targets the temp database', { FAKE_RELEASES: '{"releases":[{"name":"projects/pioneer-285cf/releases/cloud.firestore/bkverify-x"}]}' }, /security-rules release/],
 ]) {
