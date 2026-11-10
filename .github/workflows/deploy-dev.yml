@@ -171,6 +171,24 @@ jobs:
             gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"approvestatement\" AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
               --format='table(timestamp, severity, httpRequest.status, textPayload, jsonPayload.message)' 2>&1 | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | head -60
             echo '```'
+            echo "### Web app builds (public pages, read-only GET): Firebase project, region and functions in the bundle"
+            echo '```'
+            for site in deploy-dev--2001-pioneer deploy-preview-4--2001-pioneer deploy-preview-3--2001-pioneer; do
+              base="https://$site.netlify.app"
+              code=$(curl -s -o /tmp/index.html -w '%{http_code}' "$base/")
+              js=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/index.html | head -1)
+              echo "$site  HTTP $code  bundle ${js:-none}  $(curl -sI "$base/" | grep -iE '^(last-modified|age):' | tr -d '\r' | tr '\n' ' ')"
+              if [ -n "$js" ]; then
+                curl -s "$base$js" -o /tmp/b.js
+                echo "  projectId values: $(grep -oE 'projectId:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
+                echo "  authDomain:       $(grep -oE 'authDomain:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
+                echo "  deploy context:   $(grep -oE '"(deploy-preview|branch-deploy|production)"' /tmp/b.js | sort -u | tr '\n' ' ')"
+                for k in pioneer-2001-dev pioneer-285cf us-central1 cloudfunctions.net approveStatement postStatement runStatementMatching 'Due Diligence Package' 'Ties to the Dashboard'; do
+                  printf '  %-24s %s\n' "$k" "$(grep -oF "$k" /tmp/b.js | wc -l)"
+                done
+              fi
+            done
+            echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           npx tsx scripts/diagnose-dev.mts dev
 
