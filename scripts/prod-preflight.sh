@@ -119,18 +119,18 @@ print("  total: {}".format(len(rows)))'
 if [ "$LABEL" = "after" ] && [ -f preflight-before.txt ]; then
   echo; echo "== Comparison with preflight-before.txt (counts must not go down)"
   for k in clients policies statements statementKeys carriers brokers ledger "statement lines"; do
-    b="$(grep -E "^  ${k} +[0-9]+$" preflight-before.txt | awk '{print $NF}')"; a="$(grep -E "^  ${k} +[0-9]+$" preflight-after.txt | awk '{print $NF}')"
+    b="$(grep -E "^  ${k} +[0-9]+$" preflight-before.txt | awk '{print $NF}' || true)"; a="$(grep -E "^  ${k} +[0-9]+$" preflight-after.txt | awk '{print $NF}' || true)"
     flag="OK"; [ -n "$b" ] && [ -n "$a" ] && [ "$a" -lt "$b" ] && flag="DECREASED — stop and investigate"
     printf '  %-16s before %-6s after %-6s %s\n' "$k" "${b:-?}" "${a:-?}" "$flag"
   done
-  b="$(grep -E 'statements/: [0-9]+ objects' preflight-before.txt | grep -oE '[0-9]+ objects' | head -1)"; a="$(grep -E 'statements/: [0-9]+ objects' preflight-after.txt | grep -oE '[0-9]+ objects' | head -1)"
+  b="$(grep -E 'statements/: [0-9]+ objects' preflight-before.txt | grep -oE '[0-9]+ objects' | head -1 || true)"; a="$(grep -E 'statements/: [0-9]+ objects' preflight-after.txt | grep -oE '[0-9]+ objects' | head -1 || true)"
   echo "  stored PDFs      before ${b:-?}  after ${a:-?}"
   echo; echo "== Exact comparison: every record and financial total must be IDENTICAL; new collections must be 0"
   RESULT=OK
   while read -r line; do
     key="$(echo "$line" | awk '{print $1, $2}')"
     [ "$(echo "$line" | awk '{print $1}')" = "NEW" ] && continue
-    other="$(grep -F "  $key " preflight-after.txt | head -1 | sed 's/^ *//')"
+    other="$(grep -F "  $key " preflight-after.txt | head -1 | sed 's/^ *//' || true)"
     if [ "$line" = "$other" ]; then echo "  OK        $line"; else echo "  CHANGED   before: $line"; echo "            after:  ${other:-missing}"; RESULT=STOP; fi
   done < <(grep -E '^  (FP|TOTAL) ' preflight-before.txt | sed 's/^ *//')
   while read -r line; do

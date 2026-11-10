@@ -7,13 +7,16 @@ If any customer, policy, statement, statement line (including its matching decis
 setting is added, changed or deleted, its hash changes. Also prints ledger financial totals and the
 counts of the new collections this release adds (all must be 0 right after the deploy).
 
-Usage: python3 scripts/prod-fingerprint.py <project-id> <access-token>
+Usage: python3 scripts/prod-fingerprint.py <project-id> <access-token> [database-id]
+       database-id defaults to "(default)" (the app's database); the backup restore test passes its
+       temporary database so a restored copy can be compared with the live one.
 Prints lines of the form "  FP <name> <count> <sha256>" and "  TOTAL <name> <cents>". Changes nothing.
 """
 import hashlib, json, sys, urllib.parse, urllib.request
 
 project, token = sys.argv[1], sys.argv[2]
-BASE = f"https://firestore.googleapis.com/v1/projects/{project}/databases/(default)/documents"
+database = sys.argv[3] if len(sys.argv) > 3 else "(default)"
+BASE = f"https://firestore.googleapis.com/v1/projects/{project}/databases/{database}/documents"
 HEAD = {"Authorization": f"Bearer {token}", "x-goog-user-project": project}
 
 

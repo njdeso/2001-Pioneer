@@ -20,23 +20,37 @@
 | Broker buyout | **Nothing is created automatically.** No settlement, snapshot, advance or config record exists until an owner creates one; nothing is ever paid by the app | — |
 | Dev test data | **Never copied.** Production only gets code; Karen Cross / synthetic records exist only in `pioneer-2001-dev` | — |
 
-## Step 1. Preflight (read-only) and verified backup — then send the output to Claude
-**Do not use the production app (no matching, posting or edits) from Step 1 until Step 4 has passed**; the after-check requires every record to be identical.
+## Step 1. Preflight, backup and restore test — then send the output to Claude
+**Do not use the production app (no matching, posting or edits) from here until Step 4 has passed.** The checks require every record to be identical.
+
+Run each command on its own, in the `pioneer-release` folder:
 
 ```bash
-git clone https://github.com/njdeso/2001-Pioneer.git pioneer-release && cd pioneer-release
-git checkout feature/broker-buyout          # only to get the scripts; they change nothing in Firestore
-bash scripts/prod-preflight.sh before       # read-only snapshot → preflight-before.txt
-bash scripts/prod-backup.sh                 # Firestore export to firestore-backups/, then verified
+bash scripts/prod-preflight.sh before
 ```
+Read-only snapshot, saved to `preflight-before.txt`.
+
+```bash
+bash scripts/prod-backup.sh
+```
+- Exports the database to the dedicated private bucket `gs://pioneer-285cf-firestore-backups`. The first run asks before creating the bucket: location US, uniform bucket-level access, public access prevention enforced, and no Firebase link.
+- Waits for the export, then requires done, no error, `SUCCESSFUL`, the metadata file and the data files.
+- Shows Google's document count as an estimate only.
+- Ends with `EXPORT COMPLETE — NOT YET VERIFIED`.
+
+```bash
+bash scripts/prod-backup-restore-test.sh
+```
+- Restores the backup into a temporary database (`bkverify-…`). The app's database is never written.
+- Compares every collection's fingerprint, the ledger totals and the audit-log count with `preflight-before.txt`, then deletes the temporary database.
+- Must end with **`BACKUP: VERIFIED BY RESTORE`**.
+
 Stop and send the output if any of these is not true:
 - every function is in **us-central1**
-- the counts are what you expect (clients, policies, statements, ledger)
+- the counts are what you expect
 - every **`NEW … 0`** line is 0
-- every existing function shows **204** under *Browser access*; the new functions show **404** (not deployed yet)
-- the backup ends with **`BACKUP: VERIFIED`**
-
-Keep `preflight-before.txt` and the backup path. Netlify: note the published production deploy (the rollback point), and confirm auto publishing is **stopped**.
+- every existing function shows **204**, and the 13 new ones show **404**
+- the restore test ends with **`BACKUP: VERIFIED BY RESTORE`**
 
 ## Step 2. Claude merges PR #6 (after reviewing your Step 1 output)
 Merge commit, no squash. CI must pass on `main`. Netlify builds `main` but, with auto publishing stopped, does not publish it.
