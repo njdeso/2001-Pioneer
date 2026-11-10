@@ -62,7 +62,7 @@ need(!/secrets:access|versions access/.test(wf), 'workflow must never read the s
   const smokeStep = at(/name: Live smoke test/);
   need(audit > 0 && audit < deployStep && audit < seedStep && audit < smokeStep, 'the read-only ledger audit must run before the deploy, seed and smoke-test steps');
   need(/run: npx tsx scripts\/audit-dev-ledger\.mts dev/.test(wf), 'workflow must run scripts/audit-dev-ledger.mts against dev');
-  need(/options: \[deploy, audit-only\]/.test(wf), 'workflow must offer an audit-only mode');
+  need(/options: \[deploy, audit-only(, diagnose)?\]/.test(wf), 'workflow must offer an audit-only mode');
   for (const [name, re] of [['deploy', /name: Deploy rules[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/], ['seed', /name: Seed dev[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/], ['smoke test', /name: Live smoke test[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/]]) {
     need(re.test(wf), `the ${name} step must be skipped in audit-only mode (if: steps.cfg.outputs.deploy == 'true')`);
   }

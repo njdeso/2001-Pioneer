@@ -36,9 +36,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'deploy = audit, deploy, seed, smoke test, audit again. audit-only = read-only ledger audit; nothing is deployed or changed.'
+        description: 'deploy = audit, deploy, seed, smoke test, audit again. audit-only = read-only ledger audit. diagnose = audit + read-only diagnostics (functions, endpoints, request logs, statements). audit-only and diagnose deploy and change nothing.'
         type: choice
-        options: [deploy, audit-only]
+        options: [deploy, audit-only, diagnose]
         default: deploy
       focus:
         description: 'Optional: posting or statement ID prefixes to list in the audit summary (comma-separated). Blank = all postings.'
@@ -64,8 +64,8 @@ jobs:
       DEV_PROJECT_ID: pioneer-2001-dev
       WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
       DEV_SA: ${{ vars.GCP_DEV_SERVICE_ACCOUNT }}
-      # audit-only: chosen in Run workflow, or "[audit-only]" in the pushed commit message.
-      RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (contains(github.event.head_commit.message, '[audit-only]') && 'audit-only' || 'deploy') }}
+      # audit-only / diagnose: chosen in Run workflow, or "[audit-only]" / "[diagnose]" in the pushed commit message.
+      RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (contains(github.event.head_commit.message, '[audit-only]') && 'audit-only' || (contains(github.event.head_commit.message, '[diagnose]') && 'diagnose' || 'deploy')) }}
       AUDIT_FOCUS: ${{ github.event_name == 'workflow_dispatch' && inputs.focus || '' }}
     steps:
       - name: Check for Workload Identity configuration
@@ -80,7 +80,7 @@ jobs:
             *@"$DEV_PROJECT_ID".iam.gserviceaccount.com) ;;
             *) echo "::error::GCP_DEV_SERVICE_ACCOUNT must be a service account of $DEV_PROJECT_ID."; exit 1 ;;
           esac
-          case "$RUN_MODE" in deploy|audit-only) ;; *) echo "::error::Unknown mode $RUN_MODE"; exit 1 ;; esac
+          case "$RUN_MODE" in deploy|audit-only|diagnose) ;; *) echo "::error::Unknown mode $RUN_MODE"; exit 1 ;; esac
           echo "Mode: $RUN_MODE"
           echo "ready=true" >> "$GITHUB_OUTPUT"
           echo "deploy=$([ "$RUN_MODE" = deploy ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -139,9 +139,44 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      - name: Audit-only run — nothing deployed, seeded or changed
+      # Read-only: lists deployed functions, probes each callable endpoint without credentials (an existing
+      # callable answers 401/400 JSON; a missing one 404), reads the last 24 h of request logs, and checks
+      # the synthetic statements and every record they refer to. Nothing is deployed or written.
+      - name: Dev diagnostics (read-only)
+        if: steps.cfg.outputs.ready == 'true' && env.RUN_MODE == 'diagnose'
+        continue-on-error: true
+        run: |
+          set -u
+          P="$DEV_PROJECT_ID"
+          SINCE=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
+          {
+            echo "### Deployed functions in $P (us-central1)"
+            echo '```'
+            gcloud functions list --project "$P" --regions us-central1 --format='table(name.basename(), state, updateTime)' 2>&1 | head -60
+            echo '```'
+            echo "### Callable endpoint probe (no credentials)"
+            echo '```'
+            for f in approveStatement unapproveStatement postStatement reverseStatementPosting recordRetainedCommission reverseLedgerEntry runStatementMatching setLineMatch processStatement doesNotExistProbe; do
+              code=$(curl -s -o /tmp/b -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"data":{}}' "https://us-central1-$P.cloudfunctions.net/$f")
+              printf '%-26s %s %s\n' "$f" "$code" "$(head -c 110 /tmp/b | tr '\n' ' ')"
+            done
+            echo '```'
+            echo "### HTTP 404 responses since $SINCE"
+            echo '```'
+            gcloud logging read "httpRequest.status=404 AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
+              --format='table(timestamp, resource.type, resource.labels.service_name, httpRequest.requestMethod, httpRequest.requestUrl)' 2>&1 | head -60
+            echo '```'
+            echo "### approvestatement requests and errors since $SINCE"
+            echo '```'
+            gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"approvestatement\" AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
+              --format='table(timestamp, severity, httpRequest.status, textPayload, jsonPayload.message)' 2>&1 | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | head -60
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          npx tsx scripts/diagnose-dev.mts dev
+
+      - name: Audit-only or diagnose run — nothing deployed, seeded or changed
         if: steps.cfg.outputs.ready == 'true' && steps.cfg.outputs.deploy != 'true'
-        run: echo "::notice::Audit-only run. Nothing was deployed, seeded or changed in $DEV_PROJECT_ID."
+        run: echo "::notice::$RUN_MODE run. Nothing was deployed, seeded or changed in $DEV_PROJECT_ID."
 
       - name: Owner email for dev
         if: steps.cfg.outputs.deploy == 'true'

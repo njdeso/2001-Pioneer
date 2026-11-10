@@ -13,6 +13,17 @@ const source = readFileSync(SCRIPT, 'utf8');
 // Code only: strip line and block comments so the explanatory header can mention writes.
 const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 
+for (const [file, src] of [['scripts/diagnose-dev.mts', readFileSync('scripts/diagnose-dev.mts', 'utf8')]]) {
+  test(`${file} is read-only too`, () => {
+    const c = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+    for (const re of [/\.(set|update|delete|add|create|commit)\s*\(/, /\b(batch|runTransaction|bulkWriter|recursiveDelete)\s*\(/, /\bFieldValue\b/, /getStorage|getAuth/, /seedBook|writeStatement|child_process/]) {
+      assert.doesNotMatch(c, re, `${file} must not use ${re}`);
+    }
+    assert.match(c, /assertDevAlias\(alias\)/);
+    assert.match(c, /assertDevProjectNumber\(/);
+  });
+}
+
 test('audit script contains no Firestore, Storage or Auth write calls, deploys or seeding', () => {
   const forbidden = [
     [/\.(set|update|delete|add|create|commit)\s*\(/, 'document write method'],
