@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { collection, onSnapshot } from 'firebase/firestore';
-import { checkTerms, termEnd, TERM_STATUSES, TERM_STATUS_LABELS, type PolicyTerm, type TermStatus } from '@asm/shared';
+import { checkTerms, searchBook, termEnd, TERM_STATUSES, TERM_STATUS_LABELS, type PolicyTerm, type TermStatus } from '@asm/shared';
 import { db } from '../firebase';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { CLASSIFICATION_LABELS, LEDGER_CLASSIFICATIONS, formatBps, formatMonth, parseMoneyToCents, type Client, type LedgerClassification, type LedgerEntry, type Policy } from '@asm/shared';
@@ -13,7 +13,9 @@ import { Badge, Button, Card, DataTable, Empty, ErrorNote, Field, Modal, Money, 
 export function ClientsPage() {
   const { clients, policies, brokerById, revenue } = useData();
   const [adding, setAdding] = useState(false);
+  const [query, setQuery] = useState('');
   const navigate = useNavigate();
+  const search = useMemo(() => searchBook(clients, policies, query, (c) => brokerById.get(c.brokerId)?.name ?? ''), [clients, policies, query, brokerById]);
 
   const perClient = useMemo(() => {
     const m = new Map<string, { count: number; t12: number }>();
@@ -34,6 +36,15 @@ export function ClientsPage() {
     { key: 't12', header: 'T12 commission', align: 'right', render: (c) => <Money cents={perClient.get(c.id)?.t12 ?? 0} />, sort: (c) => perClient.get(c.id)?.t12 ?? 0 },
     { key: 'status', header: 'Status', render: (c) => (c.status === 'active' ? <Badge tone="green">Active</Badge> : <Badge>Inactive</Badge>), sort: (c) => c.status },
   ];
+  // Searching by policy number: show which policy matched; clicking opens that policy directly.
+  const policyHits = (id: string) => search.policiesFor(id);
+  if (query && clients.some((c) => policyHits(c.id).length)) {
+    columns.splice(1, 0, { key: 'hit', header: 'Matching policy', render: (c) => <span className="font-mono text-xs">{policyHits(c.id).map((p) => p.policyNumber).join(', ') || '—'}</span> });
+  }
+  const openClient = (c: Client) => {
+    const hits = policyHits(c.id);
+    navigate(hits.length === 1 ? `/clients/${c.id}?policy=${hits[0].id}` : `/clients/${c.id}`);
+  };
 
   return (
     <div>
@@ -43,8 +54,8 @@ export function ClientsPage() {
           <Button onClick={() => setAdding(true)}>Add client</Button>
         </>} />
       <Card>
-        <DataTable rows={clients} columns={columns} onRowClick={(c) => navigate(`/clients/${c.id}`)}
-          searchText={(c) => `${c.name} ${brokerById.get(c.brokerId)?.name ?? ''}`} initialSort={{ key: 'name', dir: 'asc' }}
+        <DataTable rows={clients} columns={columns} onRowClick={openClient}
+          matches={(c) => search.matchesClient(c)} onFilterChange={setQuery} searchPlaceholder="Search customer or policy number…" initialSort={{ key: 'name', dir: 'asc' }}
           empty="No clients yet. Import your client list (Phase 2) or add one by hand." />
       </Card>
       {adding && <ClientForm open onClose={() => setAdding(false)} onSaved={(id) => navigate(`/clients/${id}`)} />}
@@ -94,6 +105,7 @@ export function ClientDetailPage() {
       </div>
 
       <Card title="Policies">
+        {list.length > 0 && <p className="mb-2 text-xs text-slate-500">Click a policy to open its details, coverage terms (renewals, earlier terms, cancellation) and commission history.</p>}
         <DataTable rows={list} columns={columns} onRowClick={(p) => setParams({ policy: p.id })} empty="No policies yet." />
       </Card>
 

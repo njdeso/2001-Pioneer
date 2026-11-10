@@ -248,6 +248,11 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           npx tsx scripts/diagnose-dev.mts dev
+          # Self-test of the production preflight's read-only fingerprint script, against DEV only.
+          echo "### Fingerprint self-test (scripts/prod-fingerprint.py, read-only, ${DEV_PROJECT_ID})" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/prod-fingerprint.py "$DEV_PROJECT_ID" "$(gcloud auth print-access-token)" | tee /tmp/fp1.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/prod-fingerprint.py "$DEV_PROJECT_ID" "$(gcloud auth print-access-token)" > /tmp/fp2.txt
+          if diff -q /tmp/fp1.txt /tmp/fp2.txt >/dev/null; then echo "Fingerprint self-test: two consecutive reads are identical (deterministic)" | tee -a "$GITHUB_STEP_SUMMARY"; else echo "::error::Fingerprint self-test: two reads differ"; diff /tmp/fp1.txt /tmp/fp2.txt; exit 1; fi
 
       - name: Audit-only or diagnose run — nothing deployed, seeded or changed
         if: steps.cfg.outputs.ready == 'true' && steps.cfg.outputs.deploy != 'true'

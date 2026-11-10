@@ -21,6 +21,7 @@ export * from './reports/diligence.js';
 export * from './callableError.js';
 export * from './statements/personName.js';
 export * from './terms.js';
+export * from './bookSearch.js';
 export * from './buyout/advances.js';
 export * from './buyout/engine.js';
 export * from './buyout/snapshot.js';
