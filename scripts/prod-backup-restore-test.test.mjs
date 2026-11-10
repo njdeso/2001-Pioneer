@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const SCRIPT = resolve('scripts/prod-backup-restore-test.sh');
-const BACKUP = 'gs://pioneer-285cf-firestore-backups/firestore-backups/20261110T210000Z';
+const BACKUP = 'gs://pioneer-285cf-firestore-backups-us/firestore-backups/20261110T210000Z';
 const FP = ['  FP clients                   157 aaa', '  FP ledger                    310 bbb', '  TOTAL amountCents          123456', '  NEW policy terms              0'];
 const DONE = '  FP-COMPLETE 11 collections fingerprinted, 30 requests, 12s';
 const PREFLIGHT = ['2001-Pioneer production snapshot (before) — project pioneer-285cf', '  auditLog         40', ...FP, DONE].join('\n');
@@ -61,7 +61,7 @@ const tmpName = (calls) => (calls.match(/databases create --database=(bkverify-\
 test('identical restored copy: VERIFIED BY RESTORE; imports into and deletes only the temporary database', () => {
   const r = run();
   assert.equal(r.code, 0, r.out);
-  assert.match(r.out, /BACKUP: VERIFIED BY RESTORE — gs:\/\/pioneer-285cf-firestore-backups/);
+  assert.match(r.out, /BACKUP: VERIFIED BY RESTORE — gs:\/\/pioneer-285cf-firestore-backups-us/);
   const name = tmpName(r.calls);
   assert.ok(name, 'temporary database created');
   assert.match(r.calls, new RegExp(`firestore import ${BACKUP}/ --database=${name} --project pioneer-285cf`));

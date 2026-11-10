@@ -30,7 +30,7 @@ fail() { echo; echo "BACKUP: NOT VERIFIED — $1"; echo "Do not deploy. Send thi
 [ -f preflight-before.txt ] || fail "preflight-before.txt not found."
 grep -q '^  FP-COMPLETE ' preflight-before.txt || fail "preflight-before.txt is incomplete (no FP-COMPLETE line). Run the preflight again."
 BACKUP="$(cat last-backup.txt)"
-[[ "$BACKUP" =~ ^gs://${PROJECT_ID}-firestore-backups/firestore-backups/[0-9]{8}T[0-9]{6}Z$ ]] || fail "unexpected backup path: ${BACKUP}"
+[[ "$BACKUP" =~ ^gs://${PROJECT_ID}-firestore-backups-us/firestore-backups/[0-9]{8}T[0-9]{6}Z$ ]] || fail "unexpected backup path: ${BACKUP}"
 
 TMP_DB="bkverify-$(date -u +%Y%m%d-%H%M%S)"
 [[ "$TMP_DB" =~ ^bkverify-[0-9]{8}-[0-9]{6}$ ]] || fail "unexpected temporary database name."

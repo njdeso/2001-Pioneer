@@ -54,13 +54,13 @@ function run(over = {}, { preflight = true, input = '', preflightText = PREFLIGH
   if (preflight) writeFileSync(join(work, 'preflight-before.txt'), preflightText);
   const env = { ...process.env, ...good, ...over, WORK: work, PATH: `${bin}:${process.env.PATH}`, POLL_SECONDS: '0', TIMEOUT_SECONDS: over.TIMEOUT_SECONDS ?? '60' };
   // The operation must report the destination the script chose; the fake substitutes it from the export call.
-  env.FAKE_DEST_PREFIX = 'gs://pioneer-285cf-firestore-backups/firestore-backups/STAMP';
+  env.FAKE_DEST_PREFIX = 'gs://pioneer-285cf-firestore-backups-us/firestore-backups/STAMP';
   const r = spawnSync('bash', ['-c', `
     set -e
     # Pin the timestamp so the expected destination is known.
     date() { if [ "$1" = "-u" ] && [ "$2" = "+%Y%m%dT%H%M%SZ" ]; then echo 20261110T210000Z; else command date "$@"; fi; }
     export -f date
-    FAKE_DEST_PREFIX=gs://pioneer-285cf-firestore-backups/firestore-backups/20261110T210000Z bash "${SCRIPT}"
+    FAKE_DEST_PREFIX=gs://pioneer-285cf-firestore-backups-us/firestore-backups/20261110T210000Z bash "${SCRIPT}"
   `], { cwd: work, env, encoding: 'utf8', input });
   const calls = existsSync(join(work, 'calls.log')) ? readFileSync(join(work, 'calls.log'), 'utf8') : '';
   return { code: r.status, out: `${r.stdout}${r.stderr}`, calls, work };
@@ -70,12 +70,12 @@ test('success: waits for the operation, checks error/state/metadata/files, saves
   const r = run();
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /PROCESSING/, 'polled while the export was running');
-  assert.match(r.out, /EXPORT COMPLETE — NOT YET VERIFIED: gs:\/\/pioneer-285cf-firestore-backups\/firestore-backups\/20261110T210000Z/);
+  assert.match(r.out, /EXPORT COMPLETE — NOT YET VERIFIED: gs:\/\/pioneer-285cf-firestore-backups-us\/firestore-backups\/20261110T210000Z/);
   assert.match(r.out, /ESTIMATE, not proof\): 1500/);
   assert.doesNotMatch(r.out, /BACKUP: VERIFIED/);
   assert.match(r.out, /prod-backup-restore-test\.sh/);
-  assert.equal(readFileSync(join(r.work, 'last-backup.txt'), 'utf8').trim(), 'gs://pioneer-285cf-firestore-backups/firestore-backups/20261110T210000Z');
-  assert.match(r.calls, /firestore export gs:\/\/pioneer-285cf-firestore-backups\/firestore-backups\/20261110T210000Z --project pioneer-285cf --database=\(default\) --async/);
+  assert.equal(readFileSync(join(r.work, 'last-backup.txt'), 'utf8').trim(), 'gs://pioneer-285cf-firestore-backups-us/firestore-backups/20261110T210000Z');
+  assert.match(r.calls, /firestore export gs:\/\/pioneer-285cf-firestore-backups-us\/firestore-backups\/20261110T210000Z --project pioneer-285cf --database=\(default\) --async/);
   assert.match(r.out, /LIMITATION: point-in-time recovery is off/);
 });
 
@@ -96,6 +96,7 @@ for (const [name, over, why] of [
   ['never finishes', { FAKE_DONE_AFTER: '999', TIMEOUT_SECONDS: '0' }, /did not finish/],
   ['public bucket member', { FAKE_IAM_JSON: JSON.stringify({ bindings: [{ role: 'roles/storage.objectViewer', members: ['allUsers'] }] }) }, /allUsers or allAuthenticatedUsers/],
   ['public access prevention off', { FAKE_BUCKET_JSON: JSON.stringify({ location: 'US', uniform_bucket_level_access: true, public_access_prevention: 'inherited' }) }, /public access prevention is not enforced/],
+  ['existing bucket in the wrong region (us-east1)', { FAKE_BUCKET_JSON: JSON.stringify({ location: 'US-EAST1', uniform_bucket_level_access: true, public_access_prevention: 'enforced' }) }, /is in location US-EAST1, not US/],
   ['uniform access off', { FAKE_BUCKET_JSON: JSON.stringify({ location: 'US', uniform_bucket_level_access: false, public_access_prevention: 'enforced' }) }, /uniform bucket-level access is not enabled/],
   ['bucket missing and creation not confirmed', { FAKE_BUCKET_EXISTS: '0' }, /bucket not created/],
 ]) {
@@ -131,7 +132,7 @@ test('the bucket accepts the JSON-API (iamConfiguration) format too', () => {
 test('creating the bucket after "yes": US, uniform access, public access prevention — then checked like any other', () => {
   // The fake keeps reporting "missing" on the first describe; after create, describe succeeds.
   const r = run({ FAKE_BUCKET_EXISTS: 'after-create' }, { input: 'yes\n' });
-  assert.match(r.calls, /storage buckets create gs:\/\/pioneer-285cf-firestore-backups --project pioneer-285cf --location=US --uniform-bucket-level-access --public-access-prevention --default-storage-class=STANDARD/);
+  assert.match(r.calls, /storage buckets create gs:\/\/pioneer-285cf-firestore-backups-us --project pioneer-285cf --location=US --uniform-bucket-level-access --public-access-prevention --default-storage-class=STANDARD/);
   assert.equal(r.code, 0, r.out);
 });
 

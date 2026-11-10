@@ -4,7 +4,7 @@
 #   bash scripts/prod-backup.sh
 #
 # What it does (it changes no Firestore records):
-#   1. Backup bucket: uses a DEDICATED private bucket, gs://pioneer-285cf-firestore-backups. If it does not
+#   1. Backup bucket: uses a DEDICATED private bucket, gs://pioneer-285cf-firestore-backups-us. If it does not
 #      exist it asks before creating it (location US = the multi-region that holds nam5, uniform
 #      bucket-level access, public access prevention enforced). It is not a Firebase Storage bucket, so the
 #      web app and its storage rules can never reach it. Existing settings and IAM are checked every run:
@@ -25,7 +25,11 @@
 # The backup path is saved to ./last-backup.txt (Cloud Shell only).
 set -euo pipefail
 PROJECT_ID="pioneer-285cf"
-BUCKET="gs://${PROJECT_ID}-firestore-backups"
+# Location US (multi-region): the nam5 database can only export to "us" or us-central1…6 buckets.
+# (An earlier bucket, gs://pioneer-285cf-firestore-backups, is in us-east1 and cannot be used; it is left
+# untouched — delete it yourself in the console if it is empty and you no longer need it.)
+BUCKET="gs://${PROJECT_ID}-firestore-backups-us"
+REQUIRED_LOCATION="US"
 POLL_SECONDS="${POLL_SECONDS:-15}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-3600}"
 export CLOUDSDK_CORE_PROJECT="$PROJECT_ID"
@@ -53,6 +57,7 @@ UBLA="$(json bucket.json "d.get('uniform_bucket_level_access', ((d.get('iamConfi
 PAP="$(json bucket.json "d.get('public_access_prevention', (d.get('iamConfiguration') or {}).get('publicAccessPrevention'))")"
 LOC="$(json bucket.json "d.get('location')")"
 echo "  location: ${LOC}   uniform bucket-level access: ${UBLA}   public access prevention: ${PAP}"
+[ "$(echo "$LOC" | tr '[:lower:]' '[:upper:]')" = "$REQUIRED_LOCATION" ] || fail "${BUCKET} is in location ${LOC:-unknown}, not ${REQUIRED_LOCATION}. The nam5 database cannot export there. Nothing was exported."
 [ "$UBLA" = "True" ] || fail "uniform bucket-level access is not enabled on ${BUCKET}."
 [ "$PAP" = "enforced" ] || fail "public access prevention is not enforced on ${BUCKET}."
 gcloud storage buckets get-iam-policy "$BUCKET" --project "$PROJECT_ID" --format=json > bucket-iam.json

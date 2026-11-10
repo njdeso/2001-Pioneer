@@ -33,7 +33,7 @@ Read-only snapshot, saved to `preflight-before.txt`.
 ```bash
 bash scripts/prod-backup.sh
 ```
-- Exports the database to the dedicated private bucket `gs://pioneer-285cf-firestore-backups`. The first run asks before creating the bucket: location US, uniform bucket-level access, public access prevention enforced, and no Firebase link.
+- Exports the database to the dedicated private bucket `gs://pioneer-285cf-firestore-backups-us`. The first run asks before creating the bucket: location US, uniform bucket-level access, public access prevention enforced, and no Firebase link.
 - Waits for the export, then requires done, no error, `SUCCESSFUL`, the metadata file and the data files.
 - Shows Google's document count as an estimate only.
 - Ends with `EXPORT COMPLETE — NOT YET VERIFIED`.
