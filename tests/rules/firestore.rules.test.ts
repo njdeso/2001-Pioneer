@@ -35,6 +35,9 @@ beforeEach(async () => {
     await setDoc(doc(db, 'policyKeys/k__SYN100'), { policyId: 'SYN-P1' });
     await setDoc(doc(db, 'users/admin1'), { role: 'admin' });
     await setDoc(doc(db, 'policies/SYN-P1/terms/2025-07-02'), { effectiveDate: '2025-07-02', scheduledExpirationDate: '2026-07-03', status: 'renewed' });
+    await setDoc(doc(db, 'brokerAdvances/SYN-ADV1'), { policyId: 'SYN-P1', brokerId: 'SYN-B1', amountPaidCents: 50000, status: 'active' });
+    await setDoc(doc(db, 'advanceImports/SYN-IMP1'), { status: 'staged' });
+    await setDoc(doc(db, 'advanceImports/SYN-IMP1/rows/00002'), { ok: true });
   });
 });
 
@@ -156,6 +159,30 @@ describe('policy coverage terms', () => {
     await assertFails(setDoc(doc(admin(), 'policies/SYN-P1/terms/2025-07-02'), { status: 'cancelled' }, { merge: true }));
     await assertFails(deleteDoc(doc(admin(), 'policies/SYN-P1/terms/2025-07-02')));
     await assertFails(setDoc(doc(staff(), 'policies/SYN-P1/terms/2026-07-03'), { effectiveDate: '2026-07-03' }));
+  });
+});
+
+describe('broker buyout data (owner only)', () => {
+  it('only admin can read advance payments and advance imports', async () => {
+    await assertSucceeds(getDoc(doc(admin(), 'brokerAdvances/SYN-ADV1')));
+    await assertSucceeds(getDocs(collection(admin(), 'advanceImports/SYN-IMP1/rows')));
+    for (const ctx of [staff, buyerLike, noRole, anon]) {
+      await assertFails(getDoc(doc(ctx(), 'brokerAdvances/SYN-ADV1')));
+      await assertFails(getDocs(collection(ctx(), 'brokerAdvances')));
+      await assertFails(getDoc(doc(ctx(), 'advanceImports/SYN-IMP1')));
+      await assertFails(getDoc(doc(ctx(), 'advanceImports/SYN-IMP1/rows/00002')));
+    }
+  });
+  it('no browser can create, change or delete advance records, even an admin', async () => {
+    await assertFails(setDoc(doc(admin(), 'brokerAdvances/SYN-ADV2'), { amountPaidCents: 1 }));
+    await assertFails(setDoc(doc(admin(), 'brokerAdvances/SYN-ADV1'), { amountPaidCents: 1 }, { merge: true }));
+    await assertFails(deleteDoc(doc(admin(), 'brokerAdvances/SYN-ADV1')));
+    await assertFails(setDoc(doc(admin(), 'advanceImports/SYN-IMP1'), { status: 'committed' }, { merge: true }));
+  });
+  it('coverage terms can be read across policies (collection group) by staff, not by other roles', async () => {
+    const { collectionGroup } = await import('firebase/firestore');
+    await assertSucceeds(getDocs(collectionGroup(staff(), 'terms')));
+    await assertFails(getDocs(collectionGroup(buyerLike(), 'terms')));
   });
 });
 

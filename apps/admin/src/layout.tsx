@@ -19,6 +19,7 @@ export const NAV = [
   { to: '/reports', label: 'Reports & Analytics', icon: '▤', phase: 5 },
   { to: '/valuation', label: 'Book Valuation', icon: '$', phase: 5 },
   { to: '/package', label: 'Due Diligence Package', icon: '⎙' },
+  { to: '/buyout', label: 'Broker Buyout', icon: '⇄', adminOnly: true },
   { to: '/settings', label: 'Administration & Settings', icon: '⚙' },
 ] as const;
 
@@ -86,7 +87,7 @@ function GlobalSearch() {
 }
 
 export function AppLayout({ children }: { children: ReactNode }) {
-  const { user, logout } = useAuth();
+  const { user, logout, role } = useAuth();
   const { settings, error } = useData();
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -101,7 +102,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
           <div className="text-xs text-gold">{settings?.agencyName ?? ''}</div>
         </div>
         <nav className="space-y-0.5 px-2 py-3">
-          {NAV.map((n) => (
+          {NAV.filter((n) => !('adminOnly' in n) || role === 'admin').map((n) => (
             <NavLink key={n.to} to={n.to} end={n.to === '/'} onClick={() => setMenuOpen(false)}
               className={({ isActive }) => cx(
                 'flex items-center gap-2.5 rounded-md px-3 py-2 text-sm',

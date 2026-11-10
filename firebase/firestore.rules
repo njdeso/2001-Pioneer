@@ -48,6 +48,15 @@ service cloud.firestore {
     // Audit trail: admin only, append-only from the server.
     match /auditLog/{id}           { allow read: if isAdmin(); allow write: if false; }
 
+    // Broker buyout (owner only): advance payments actually paid to brokers, and staged advance imports.
+    // Never readable by staff or any buyer/diligence role; written only by functions.
+    match /brokerAdvances/{id}     { allow read: if isAdmin(); allow write: if false; }
+    match /advanceImports/{id}     { allow read: if isAdmin(); allow write: if false;
+      match /rows/{rowId}          { allow read: if isAdmin(); allow write: if false; }
+    }
+    // Collection-group reads of coverage terms (the advance review lists every policy's terms).
+    match /{path=**}/terms/{termId} { allow read: if isStaff(); allow write: if false; }
+
     // A user can read their own profile.
     match /users/{uid}             { allow read: if signedIn() && request.auth.uid == uid; allow write: if false; }
 

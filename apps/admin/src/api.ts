@@ -1,6 +1,8 @@
 import type { AiDiagnosis, LineMatch, MatchSummary, PostingPlan } from '@asm/shared';
 import { httpsCallable } from 'firebase/functions';
-import { classifyProbe, describeCallableError, PROBE_SAFE_FUNCTIONS, type ProbeResult } from '@asm/shared';
+import { classifyProbe, describeCallableError, PROBE_SAFE_FUNCTIONS, type ProbeResult, type BrokerAdvanceInput, type ParsedAdvanceRow } from '@asm/shared';
+
+export type AdvanceForm = BrokerAdvanceInput;
 import type {
   BrokerInput, CarrierInput, ClientInput, ImportOptionsInput, ImportPlanSummary, ImportRecordInput, Message, PolicyInput, SettingsInput,
 } from '@asm/shared';
@@ -73,6 +75,13 @@ export const api = {
   saveClient: (data: ClientInput, id?: string, applyBrokerToPolicies = false) =>
     call<{ id?: string; data: ClientInput; applyBrokerToPolicies: boolean }, { id: string; policiesMoved: number }>(
       'saveClient', { id, data, applyBrokerToPolicies }),
+  recordBrokerAdvance: (input: { advance: AdvanceForm; note: string }) => call<typeof input, { id: string }>('recordBrokerAdvance', input),
+  correctBrokerAdvance: (input: { advanceId: string; advance: AdvanceForm; note: string }) => call<typeof input, { id: string; voided: string }>('correctBrokerAdvance', input),
+  voidBrokerAdvance: (input: { advanceId: string; note: string }) => call<typeof input, { voided: string }>('voidBrokerAdvance', input),
+  stageAdvanceImport: (input: { fileName: string; fileHash: string; headers: string[]; rows: string[][] }) =>
+    call<typeof input, { importId: string; counts: { rows: number; ok: number; errors: number; warnings: number }; totalOkCents: number; rows: ParsedAdvanceRow[] }>('stageAdvanceImport', input),
+  commitAdvanceImport: (input: { importId: string; note: string }) => call<typeof input, { created: number; already: boolean }>('commitAdvanceImport', input),
+  discardAdvanceImport: (input: { importId: string }) => call<typeof input, { discarded: string }>('discardAdvanceImport', input),
   savePolicyTerm: (input: { policyId: string; originalTermId: string | null; term: { effectiveDate: string; scheduledExpirationDate: string; cancellationDate: string | null; status: string; note: string }; note: string }) =>
     call<typeof input, { termId: string; warnings: { message: string }[] }>('savePolicyTerm', input),
   removePolicyTerm: (input: { policyId: string; termId: string; note: string }) => call<typeof input, { removed: string }>('removePolicyTerm', input),
