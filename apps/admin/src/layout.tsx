@@ -18,7 +18,7 @@ export const NAV = [
   { to: '/reconciliation', label: 'Reconciliation', icon: '⚖', phase: 4 },
   { to: '/reports', label: 'Reports & Analytics', icon: '▤', phase: 5 },
   { to: '/valuation', label: 'Book Valuation', icon: '$', phase: 5 },
-  { to: '/package', label: 'Due Diligence Package', icon: '⎙', phase: 5 },
+  { to: '/package', label: 'Due Diligence Package', icon: '⎙' },
   { to: '/settings', label: 'Administration & Settings', icon: '⚙' },
 ] as const;
 

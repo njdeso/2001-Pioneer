@@ -11,6 +11,8 @@
 //   - broker + agency = gross on every entry; amounts are whole cents
 //   - each statement's status, postedCents, posting and reversal records agree with the ledger
 //   - the snapshot-window totals from ledgerTotals() equal the aggregate used by the Dashboard charts
+//   - the due-diligence exports (commission summary; clients & policies) pass their reconciliation checks
+//     and contain no broker identifier, broker name or email address
 //
 // It NEVER writes to Firestore, Storage or Auth, never deploys and never seeds. All database access
 // goes through the read-only `reader` below (get() calls only); scripts/audit-dev-ledger.test.mjs
@@ -26,8 +28,8 @@ import { join } from 'node:path';
 import { initializeApp, applicationDefault } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import {
-  auditLedger, formatCents, groupPostings, inRange, ledgerCsv, postingsCsv, totalInWindow, windowRange,
-  type AuditStatement, type LegacyBrokerFn, type PostingGroup, type ReportEntry,
+  auditLedger, buildDiligenceSummary, clientPolicyExport, diligenceSummaryCsv, formatCents, groupPostings, inRange, ledgerCsv, postingsCsv, totalInWindow, windowRange,
+  type AuditStatement, type DiligenceCarrier, type DiligenceClient, type DiligencePolicy, type LegacyBrokerFn, type PostingGroup, type ReportEntry,
 } from '@asm/shared';
 import { assertDevAlias, assertDevProjectNumber, NotDevError } from './lib/dev-guard.mjs';
 
@@ -69,12 +71,14 @@ const read = reader(getFirestore());
 type Ts = { toDate?: () => Date } | null | undefined;
 const iso = (t: Ts) => (t && typeof t.toDate === 'function' ? t.toDate().toISOString() : null);
 
-const [rawLedger, rawStatements, brokers, policies, settings] = await Promise.all([
+const [rawLedger, rawStatements, brokers, policies, settings, clients, carriers] = await Promise.all([
   read.all<Record<string, unknown> & { postedAt?: Ts }>('ledger'),
   read.all<Record<string, unknown>>('statements'),
-  read.all<{ shareBps: number }>('brokers'),
-  read.all<{ brokerId?: string }>('policies'),
-  read.one<{ snapshotStartMonth?: string; snapshotMonths?: number }>('settings/app'),
+  read.all<{ shareBps: number; name?: string; code?: string }>('brokers'),
+  read.all<{ brokerId?: string } & Record<string, unknown>>('policies'),
+  read.one<{ snapshotStartMonth?: string; snapshotMonths?: number; agencyName?: string }>('settings/app'),
+  read.all<Record<string, unknown>>('clients'),
+  read.all<Record<string, unknown>>('carriers'),
 ]);
 
 const entries: ReportEntry[] = rawLedger.map((e) => ({ ...(e as unknown as ReportEntry), postedAtIso: iso(e.postedAt) }));
@@ -99,6 +103,29 @@ if (window && settings?.snapshotStartMonth) {
     result.findings.push({ severity: 'error', code: 'window_total_mismatch', message: `Window total ${result.window!.totals.grossCents} (ledgerTotals) ≠ ${agg} (totalInWindow).`, ids: [] });
     result.errors++; result.ok = false;
   }
+}
+
+// Due-diligence exports, built from the same data with the same code as the app's Due Diligence page.
+// Their checks must pass, and neither file may contain any broker identifier, broker name or email.
+const dd = buildDiligenceSummary({
+  entries, start: settings?.snapshotStartMonth, months: settings?.snapshotMonths ?? 12,
+  carriers: carriers as unknown as DiligenceCarrier[], policies: policies as unknown as DiligencePolicy[],
+  statements: rawStatements.map((x) => ({ id: x.id, status: String(x.status ?? ''), statementMonth: (x.statementMonth as string) ?? null, payerId: (x.payerId as string) ?? null })),
+});
+const ddCp = clientPolicyExport({
+  clients: clients as unknown as DiligenceClient[], policies: policies as unknown as DiligencePolicy[], carriers: carriers as unknown as DiligenceCarrier[],
+  entries, start: settings?.snapshotStartMonth, months: settings?.snapshotMonths ?? 12, policyAttributedCents: dd.policyAttributedCents,
+});
+const ddSummaryCsv = diligenceSummaryCsv(dd, { agencyName: settings?.agencyName ?? 'Agency', preparedAtIso: new Date().toISOString() });
+const brokerMarkers = brokers.flatMap((b) => [b.id, b.name, b.code]).filter((x): x is string => !!x && x !== 'UNASSIGNED' && x !== 'Unassigned' && x.length >= 3);
+for (const [label, csv] of [['commission summary', ddSummaryCsv], ['clients & policies', ddCp.csv]] as const) {
+  // Whole-cell match, so a broker named "Jim" does not match the wholesaler "Jimcor".
+  const cells = new Set(csv.replace(/^\uFEFF/, '').split(/\r\n/).flatMap((l) => l.split(',')).map((c) => c.replace(/^"|"$/g, '').trim()));
+  const leaks = [...brokerMarkers.filter((m) => cells.has(m)), ...(csv.includes('@') ? ['an email address'] : [])];
+  if (leaks.length) { result.findings.push({ severity: 'error', code: 'diligence_export_leak', message: `The ${label} export contains broker or staff information: ${leaks.slice(0, 5).join(', ')}.`, ids: [] }); result.errors++; result.ok = false; }
+}
+for (const c of [...(dd.status === 'NO_PERIOD' ? [] : dd.checks), ...ddCp.checks]) {
+  if (!c.pass) { result.findings.push({ severity: 'error', code: 'diligence_check_failed', message: `Due-diligence check failed: ${c.name} (${c.detail}).`, ids: [] }); result.errors++; result.ok = false; }
 }
 
 // ---------------------------------------------------------------- output (local files only)
@@ -135,6 +162,19 @@ for (const g of shown) {
 }
 if (!shown.length) md('| (none) | | | | |');
 md();
+md('#### Due-diligence exports (same code as the app)');
+md();
+md(`Commission summary: **${dd.statusLabel}**. ${dd.statusText}`);
+md();
+md(`Period ${dd.from} – ${dd.to}: total ${$(dd.total.total)} (matched ${$(dd.total.commission)}, unmatched ${$(dd.total.unmatched)}, adjustments ${$(dd.total.adjustment)}, retained ${$(dd.total.retained)}, manual ${$(dd.total.manual)}); months with posted statements ${dd.byMonth.filter((m) => m.hasPostedStatement).length} of ${dd.months.length}.`);
+md();
+md(`Clients & policies: ${ddCp.policyRows} policies, ${ddCp.clientsWithoutPolicies} clients without policies, ${ddCp.rows} rows.`);
+md();
+md('| Check | Result |');
+md('|---|---|');
+for (const c of [...dd.checks, ...ddCp.checks]) md(`| ${c.name} | ${c.pass ? '✅' : '❌'} ${c.detail.replace(/\|/g, '/')} |`);
+md(`| No broker identifiers, broker names or email addresses in either export | ${result.findings.some((f) => f.code === 'diligence_export_leak') ? '❌' : '✅'} |`);
+md();
 if (result.findings.length) {
   md('#### Findings');
   md();
@@ -152,6 +192,8 @@ writeFileSync(join(OUT, 'ledger-audit.json'), JSON.stringify({
 }, null, 2));
 writeFileSync(join(OUT, 'ledger-transactions-accounting.csv'), ledgerCsv(noEmail, 'accounting', {}, legacyBroker));
 writeFileSync(join(OUT, 'ledger-postings-accounting.csv'), postingsCsv(groupPostings(noEmail, legacyBroker), 'accounting'));
+writeFileSync(join(OUT, 'due-diligence-commission-summary.csv'), ddSummaryCsv);
+writeFileSync(join(OUT, 'due-diligence-clients-and-policies.csv'), ddCp.csv);
 
 const text = lines.join('\n');
 console.log(text);

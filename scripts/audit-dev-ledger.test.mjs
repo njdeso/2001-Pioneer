@@ -58,7 +58,13 @@ test('balanced ledger (three reversed postings): exit 0, every posting nets to z
   assert.deepEqual([report.window.totals.grossCents, report.window.totals.brokerCents, report.window.totals.agencyCents], [0, 0, 0]);
   assert.ok(existsSync(join(r.out, 'ledger-transactions-accounting.csv')));
   assert.ok(existsSync(join(r.out, 'ledger-postings-accounting.csv')));
-  for (const f of ['ledger-audit.json', 'ledger-transactions-accounting.csv', 'ledger-postings-accounting.csv']) {
+  const summary = readFileSync(join(r.out, 'due-diligence-commission-summary.csv'), 'utf8');
+  assert.match(summary, /Status,PRELIMINARY — INCOMPLETE/, 'a period without posted statements is never presented as complete');
+  const clientsCsv = readFileSync(join(r.out, 'due-diligence-clients-and-policies.csv'), 'utf8');
+  for (const leak of ['Synthetic Broker Fifty', 'B50', 'client@example.test']) {
+    assert.ok(!summary.split(/[,\r\n]/).includes(leak) && !clientsCsv.split(/[,\r\n]/).includes(leak) && !clientsCsv.includes('@'), `due-diligence exports must not contain ${leak}`);
+  }
+  for (const f of ['ledger-audit.json', 'ledger-transactions-accounting.csv', 'ledger-postings-accounting.csv', 'due-diligence-commission-summary.csv', 'due-diligence-clients-and-policies.csv']) {
     assert.doesNotMatch(readFileSync(join(r.out, f), 'utf8'), /@/, `${f} must not contain email addresses (artifacts of a public repository)`);
   }
 });

@@ -17,16 +17,16 @@ const SECTIONS: Record<string, { planned: string; availableNow?: ReactNode }> = 
     ),
   },
   '/reports': {
-    planned: 'Formatted financial reports (by carrier, broker, line of business and month, year-over-year) with PDF and Excel export.',
+    planned: 'Formatted financial reports (by carrier, line of business and month, year-over-year) with PDF and Excel export.',
     availableNow: (
       <>
         Financial reporting from the posted ledger is available now. The <A to="/">Dashboard</A> shows the trailing-12-month commission, broker share, agency net and monthly totals.
         The <A to="/ledger">Ledger</A> lists every posted transaction and reversal, with filters, net totals and CSV export for accounting and due diligence.
+        Buyer-ready CSV exports (commission summary; clients and policies) are on the <A to="/package">Due Diligence Package</A> page.
       </>
     ),
   },
   '/valuation': { planned: 'Book valuation on T12 commission with adjustable multiples and saved scenarios.' },
-  '/package': { planned: 'Lock the snapshot and export the due-diligence package (PDF + Excel + statement copies). Broker information is never included.' },
 };
 
 export function ComingSoonPage() {

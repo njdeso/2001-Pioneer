@@ -18,7 +18,9 @@
 - **Rules and indexes:** no changes in 3B or 3C. Rules tests were added only.
 - **Web app:** matching, approval and posting panels; retained commission and ledger history on policies; Dashboard
   broker share from stored allocations; an optional broker-share field on the policy form; the read-only **Ledger**
-  report (filters, posting history, net totals, CSV export); corrected Reports & Analytics and Reconciliation text.
+  report (filters, posting history, net totals, CSV export); the **Due Diligence Package** page with the buyer
+  commission summary and client & policy CSVs (`docs/DUE-DILIGENCE-EXPORTS.md`); corrected Reports & Analytics and
+  Reconciliation text.
 - **Re-extraction guard:** `processStatement` also refuses to re-read a statement that has posting history (posted,
   even if since reversed), so the lines its ledger entries came from are never replaced.
 - **Data:** **no migration.** New fields are added only when you act: `lines.match`, `statements.matching`,

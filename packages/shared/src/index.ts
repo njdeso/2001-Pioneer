@@ -17,3 +17,4 @@ export * from './statements/diagnose.js';
 export * from './statements/match.js';
 export * from './statements/posting.js';
 export * from './reports/ledger.js';
+export * from './reports/diligence.js';

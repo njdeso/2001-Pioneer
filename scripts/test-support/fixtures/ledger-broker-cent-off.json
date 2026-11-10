@@ -4,10 +4,36 @@
    "shareBps": 4000
   },
   "B50": {
+   "name": "Synthetic Broker Fifty",
    "shareBps": 5000
   },
   "UNASSIGNED": {
    "shareBps": 0
+  }
+ },
+ "carriers": {
+  "MUT": {
+   "commissionMethod": "statement",
+   "kind": "carrier",
+   "name": "Mutual (synthetic)",
+   "status": "active"
+  }
+ },
+ "clients": {
+  "C1": {
+   "brokerId": "B50",
+   "classification": "commercial",
+   "contact": {
+    "email": "client@example.test"
+   },
+   "name": "Alpha (synthetic)",
+   "status": "active"
+  },
+  "C3": {
+   "brokerId": "B50",
+   "classification": "commercial",
+   "name": "Zeta (synthetic)",
+   "status": "active"
   }
  },
  "ledger": {
@@ -434,10 +460,19 @@
  },
  "policies": {
   "P1": {
-   "brokerId": "B50"
+   "brokerId": "B50",
+   "carrierId": "MUT",
+   "clientId": "C1",
+   "policyNumber": "A-1",
+   "status": "active"
   },
   "P3": {
-   "brokerId": "B50"
+   "brokerId": "B50",
+   "brokerShareBps": 3000,
+   "carrierId": "MUT",
+   "clientId": "C3",
+   "policyNumber": "Z-3",
+   "status": "active"
   }
  },
  "settings": {
