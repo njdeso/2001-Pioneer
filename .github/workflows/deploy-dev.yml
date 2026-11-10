@@ -19,12 +19,31 @@
 #
 # Trigger: push the commit to test to the "deploy/dev" branch.
 # Until the GCP_WIF_PROVIDER / GCP_DEV_SERVICE_ACCOUNT variables exist, it skips with a notice.
+#
+# Every run starts with a READ-ONLY ledger audit of the existing dev data (scripts/audit-dev-ledger.mts),
+# before anything is deployed, seeded or smoke-tested. If the audit finds an error, the run stops there
+# and nothing in dev changes, so the evidence is preserved.
+# Audit only (no deploy, no seed, no smoke test, no writes):
+#   - Actions → "Deploy to dev" → Run workflow → branch deploy/dev, mode "audit-only"; or
+#   - push to deploy/dev with "[audit-only]" in the head commit message.
+# Audit artifacts (JSON + CSV of the synthetic dev ledger) leave out staff email addresses: this
+# repository is public.
 name: Deploy to dev (pioneer-2001-dev)
 
 on:
   push:
     branches: [deploy/dev]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'deploy = audit, deploy, seed, smoke test, audit again. audit-only = read-only ledger audit; nothing is deployed or changed.'
+        type: choice
+        options: [deploy, audit-only]
+        default: deploy
+      focus:
+        description: 'Optional: posting or statement ID prefixes to list in the audit summary (comma-separated). Blank = all postings.'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -45,6 +64,9 @@ jobs:
       DEV_PROJECT_ID: pioneer-2001-dev
       WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
       DEV_SA: ${{ vars.GCP_DEV_SERVICE_ACCOUNT }}
+      # audit-only: chosen in Run workflow, or "[audit-only]" in the pushed commit message.
+      RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (contains(github.event.head_commit.message, '[audit-only]') && 'audit-only' || 'deploy') }}
+      AUDIT_FOCUS: ${{ github.event_name == 'workflow_dispatch' && inputs.focus || '' }}
     steps:
       - name: Check for Workload Identity configuration
         id: cfg
@@ -58,7 +80,10 @@ jobs:
             *@"$DEV_PROJECT_ID".iam.gserviceaccount.com) ;;
             *) echo "::error::GCP_DEV_SERVICE_ACCOUNT must be a service account of $DEV_PROJECT_ID."; exit 1 ;;
           esac
+          case "$RUN_MODE" in deploy|audit-only) ;; *) echo "::error::Unknown mode $RUN_MODE"; exit 1 ;; esac
+          echo "Mode: $RUN_MODE"
           echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "deploy=$([ "$RUN_MODE" = deploy ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - if: steps.cfg.outputs.ready == 'true'
         uses: actions/checkout@v4
@@ -79,7 +104,7 @@ jobs:
           test "$(node -p "JSON.parse(require('fs').readFileSync('.firebaserc', 'utf8')).projects.dev")" = "$DEV_PROJECT_ID"
 
       - name: Unit tests
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         run: npm run test
 
       - name: Authenticate to Google Cloud (Workload Identity Federation, no key)
@@ -96,14 +121,36 @@ jobs:
         if: steps.cfg.outputs.ready == 'true'
         run: node scripts/assert-dev-project.mjs
 
-      - name: Owner email for dev
+      # Read-only. Runs against the EXISTING dev ledger before any deploy, seed or smoke test.
+      # A failure here stops the run, so no later step can change the data being examined.
+      - name: Ledger audit BEFORE any change (read-only)
         if: steps.cfg.outputs.ready == 'true'
+        env:
+          AUDIT_LABEL: Ledger audit before any change (read-only)
+          AUDIT_OUT_DIR: audit-out/before
+        run: npx tsx scripts/audit-dev-ledger.mts dev
+
+      - name: Upload pre-change audit (JSON, CSV; no email addresses)
+        if: always() && steps.cfg.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-audit-before-${{ github.run_id }}
+          path: audit-out/before
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Audit-only run — nothing deployed, seeded or changed
+        if: steps.cfg.outputs.ready == 'true' && steps.cfg.outputs.deploy != 'true'
+        run: echo "::notice::Audit-only run. Nothing was deployed, seeded or changed in $DEV_PROJECT_ID."
+
+      - name: Owner email for dev
+        if: steps.cfg.outputs.deploy == 'true'
         env:
           DEV_OWNER_EMAILS: ${{ vars.DEV_OWNER_EMAILS }}
         run: printf 'OWNER_EMAILS=%s\n' "${DEV_OWNER_EMAILS:-owner@example.invalid}" > "functions/.env.$DEV_PROJECT_ID"
 
       - name: Anthropic dev key exists in dev Secret Manager (value not read)
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         run: |
           if npx firebase functions:secrets:get ANTHROPIC_API_KEY --project dev --non-interactive > /dev/null 2>&1; then
             echo "ANTHROPIC_API_KEY exists in $DEV_PROJECT_ID."
@@ -113,18 +160,34 @@ jobs:
           fi
 
       - name: Deploy rules, indexes and functions to pioneer-2001-dev
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         run: |
           deploy() { npx firebase deploy --project dev --only firestore,storage,functions --non-interactive --force; }
           # First deploys sometimes fail while service agents and IAM changes propagate; retry once.
           deploy || { echo "Deploy failed; retrying in 90 s (permission propagation)."; sleep 90; deploy; }
 
       - name: Seed dev reference data (synthetic)
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         run: node scripts/seed-dev.mjs dev
 
       - name: Live smoke test (AI connection, PDF read, interrupted-upload recovery)
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         env:
           SMOKE_SERVICE_ACCOUNT: ${{ vars.GCP_DEV_SERVICE_ACCOUNT }}
         run: node scripts/smoke-dev.mjs
+
+      - name: Ledger audit AFTER the smoke test (read-only)
+        if: always() && steps.cfg.outputs.deploy == 'true'
+        env:
+          AUDIT_LABEL: Ledger audit after deploy and smoke test (read-only)
+          AUDIT_OUT_DIR: audit-out/after
+        run: npx tsx scripts/audit-dev-ledger.mts dev
+
+      - name: Upload post-run audit (JSON, CSV; no email addresses)
+        if: always() && steps.cfg.outputs.deploy == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-audit-after-${{ github.run_id }}
+          path: audit-out/after
+          retention-days: 14
+          if-no-files-found: ignore

@@ -36,6 +36,7 @@ export function DashboardPage() {
       <PageHeader
         title="Dashboard"
         subtitle={settings ? `Snapshot window ${formatWindow(settings.snapshotStartMonth, settings.snapshotMonths)} · revenue month = statement period` : 'Set the snapshot window in Settings'}
+        actions={<Link to="/ledger" className="text-sm text-ink hover:underline">Ledger detail &amp; export →</Link>}
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -91,7 +92,7 @@ export function DashboardPage() {
           <Progress done={carriers.length > 0} label="Carriers and wholesalers set up" to="/carriers" />
           <Progress done={brokers.length > 1} label="Brokers set up" to="/brokers" />
           <Progress done={clients.length > 0} label="Client list loaded (Phase 2 import)" to="/clients" />
-          <Progress done={posted > 0} label="Commission statements posted (Phases 3–4)" />
+          <Progress done={posted > 0} label="Commission statements posted" to="/ledger" />
         </ul>
       </Card>
     </div>

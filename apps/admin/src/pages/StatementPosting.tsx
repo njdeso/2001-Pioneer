@@ -1,3 +1,4 @@
+import { Link } from 'react-router';
 import { useMemo, useState } from 'react';
 import { buildPostingPlan, formatMonth, postingReadiness, type PostingLine, type PostingStatement } from '@asm/shared';
 import { api } from '../api';
@@ -86,7 +87,7 @@ export function PostingPanel({ statementId, stmt, lines }: { statementId: string
       {posted && stmt.posting && <p className="mt-3 text-xs text-slate-600">Posting {stmt.posting.postingId} by {stmt.posting.email}. These entries are in the rolling-12-month reports for {stmt.statementMonth ? formatMonth(stmt.statementMonth) : 'the statement month'}.</p>}
       {approved && stmt.approval && <p className="mt-3 text-xs text-slate-600">Approved by {stmt.approval.email}{stmt.approval.note ? ` — ${stmt.approval.note}` : ''}. Matching is locked until it is posted or returned to review.</p>}
       {(stmt.reversals ?? []).length > 0 && (
-        <div className="mt-3 text-xs text-slate-600">Earlier postings reversed: {(stmt.reversals ?? []).map((r) => `${r.postingId} (${(r.amountCents / 100).toFixed(2)}, ${r.reason})`).join('; ')}</div>
+        <div className="mt-3 text-xs text-slate-600">Earlier postings reversed: {(stmt.reversals ?? []).map((r) => `${r.postingId} (${(r.amountCents / 100).toFixed(2)}, ${r.reason})`).join('; ')}. Each nets to $0.00; the broker and agency split of every posting and reversal is in the <Link to="/ledger" className="text-ink underline">Ledger</Link>.</div>
       )}
 
       {isAdmin && (

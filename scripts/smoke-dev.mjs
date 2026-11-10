@@ -187,18 +187,10 @@ async function stage3b() {
   summary('\n#### Stage 3B — commission matching (synthetic data)\n');
   summary('| | Check | Result |');
   summary('|---|---|---|');
-  // Clean up earlier automated runs (synthetic, dev only, after the project-number guard): their ledger
-  // entries (statement SYN3B-AUTO-… and retained entries on the synthetic policy) and statements.
-  const oldLedger = [
-    ...(await db.collection('ledger').where('statementId', '>=', 'SYN3B-AUTO-').where('statementId', '<', 'SYN3B-AUTO.').get()).docs,
-    ...(await db.collection('ledger').where('policyId', '==', 'SYN3B-P-ZETA').get()).docs.filter((d) => d.get('sourceType') === 'retained' && String(d.id).startsWith('retained__syn3b-smoke-')),
-  ];
-  for (let i = 0; i < oldLedger.length; i += 400) { const b = db.batch(); oldLedger.slice(i, i + 400).forEach((d) => b.delete(d.ref)); await b.commit(); }
-  const old = await db.collection('statements').where('synthetic', '==', true).get();
-  for (const d of old.docs.filter((x) => x.id.startsWith('SYN3B-AUTO-'))) {
-    for (const l of await d.ref.collection('lines').listDocuments()) await l.delete();
-    await d.ref.delete();
-  }
+  // Nothing from earlier runs is deleted. The ledger is append-only, also in dev: every run posts to a
+  // NEW statement (SYN3B-AUTO-<timestamp>) and reverses everything it posts, so earlier postings,
+  // their reversals and manual tests on these statements stay intact and dev totals still net to zero.
+  // The read-only ledger audit (scripts/audit-dev-ledger.mts) runs before and after this test.
   await seedBook(db, FieldValue);
   const sid = `SYN3B-AUTO-${Date.now()}`;
   const ref = await writeStatement(db, FieldValue, sid, 'Stage 3B automated test');

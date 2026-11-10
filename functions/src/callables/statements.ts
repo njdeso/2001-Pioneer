@@ -223,6 +223,11 @@ async function claimForProcessing(id: string, actor: Actor): Promise<DocumentDat
       throw new HttpsError('failed-precondition', `This statement is ${status}.`);
     }
     if ((snap.get('postedCents') ?? 0) !== 0) throw new HttpsError('failed-precondition', 'Lines from this statement have been posted.');
+    // A statement that was ever posted (even if since reversed) keeps its extracted lines: they are the
+    // source of ledger entries in the audit trail, and re-reading would delete and rewrite them.
+    if ((snap.get('postingSeq') ?? 0) > 0 || ((snap.get('reversals') as unknown[] | undefined) ?? []).length > 0) {
+      throw new HttpsError('failed-precondition', 'This statement has posting history, so its extracted lines are kept as the source of those ledger entries. To read the file again, discard this statement and upload the file as a new statement.');
+    }
     tx.update(ref, { status: 'processing', ...meta(actor, false) });
     return snap.data()!;
   });

@@ -12,12 +12,15 @@
 ## What changes in production
 - **Functions:** 8 new: `runStatementMatching`, `setLineMatch`, `approveStatement`, `unapproveStatement`,
   `postStatement`, `reverseStatementPosting`, `recordRetainedCommission`, `reverseLedgerEntry`.
-  - Two are updated: `processStatement` (resets matching on re-extraction) and `setStatementPayer` (flags matching
-    stale). `discardStatement` now refuses approved and posted statements.
+  - Two are updated: `processStatement` (resets matching on re-extraction; refuses statements with posting history)
+    and `setStatementPayer` (flags matching stale). `discardStatement` now refuses approved and posted statements.
   - Everything stays in us-central1 with the same URLs.
 - **Rules and indexes:** no changes in 3B or 3C. Rules tests were added only.
 - **Web app:** matching, approval and posting panels; retained commission and ledger history on policies; Dashboard
-  broker share from stored allocations; an optional broker-share field on the policy form.
+  broker share from stored allocations; an optional broker-share field on the policy form; the read-only **Ledger**
+  report (filters, posting history, net totals, CSV export); corrected Reports & Analytics and Reconciliation text.
+- **Re-extraction guard:** `processStatement` also refuses to re-read a statement that has posting history (posted,
+  even if since reversed), so the lines its ledger entries came from are never replaced.
 - **Data:** **no migration.** New fields are added only when you act: `lines.match`, `statements.matching`,
   `approval` and `posting`, ledger entries and audit entries. Existing clients, policies, statements and PDFs are not
   touched by the deploy.

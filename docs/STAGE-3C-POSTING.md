@@ -70,6 +70,13 @@ extracted lines and source PDFs are never changed.
   your rules. See "Open decisions".
 
 ## Reports
+- **Ledger** (left menu): every posted transaction and reversal, read-only, with filters, posting history, net
+  gross / broker / agency totals and CSV export for accounting and due diligence. See `docs/LEDGER-REPORT-AND-AUDIT.md`.
+  Reports & Analytics (formatted PDF/Excel reports) is still a later phase; its page now points to the Dashboard and
+  the Ledger.
+- **One calculation:** the Dashboard's trailing-12-month commission, broker share and agency net, the Ledger report
+  and the dev ledger audit all use `ledgerTotals()` in `packages/shared/src/reports/ledger.ts` over the same posted
+  entries. With the snapshot window selected, the Ledger page shows a tie-out line confirming it equals the Dashboard.
 - **Dashboard, Carriers, Brokers and the policy history** read posted ledger entries in the **snapshot window**
   (Settings). Posted and reversed entries both count, and a reversal is its own negative entry, so the reports always
   tie to the ledger.

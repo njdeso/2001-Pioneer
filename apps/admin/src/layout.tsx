@@ -14,6 +14,7 @@ export const NAV = [
   { to: '/import', label: 'Import Clients', icon: '⇪' },
   { to: '/statements', label: 'Upload Commission Statements', icon: '⇧' },
   { to: '/queue', label: 'AI Processing Queue', icon: '⟳' },
+  { to: '/ledger', label: 'Ledger', icon: '≡' },
   { to: '/reconciliation', label: 'Reconciliation', icon: '⚖', phase: 4 },
   { to: '/reports', label: 'Reports & Analytics', icon: '▤', phase: 5 },
   { to: '/valuation', label: 'Book Valuation', icon: '$', phase: 5 },
