@@ -41,10 +41,19 @@ Check:
 - the ledger count, which should be 0
 - **the snapshot window.** If it says October 2026 is OUTSIDE the window, plan to adjust Settings → Snapshot window
   after the deploy, or the October posting will not show on the Dashboard.
+- **Browser access:** every EXISTING function must answer **204**; the 8 new Stage 3B/3C functions answer **404** (not
+  deployed yet). A **403** on an existing function is a blocker to resolve first (see step 6 below).
+- **Backup readiness (read-only):**
+  `gcloud firestore databases describe --database='(default)' --project pioneer-285cf --format='value(pointInTimeRecoveryEnablement,versionRetentionPeriod)'`
+  shows whether point-in-time recovery is on. Optional export before the release (this one command WRITES a backup
+  copy to Storage; run it only if you want it): `gcloud firestore export gs://BUCKET/backups/$(date +%F) --project pioneer-285cf`.
 
 ## Release steps (after your approval)
+0. **Netlify (2001-pioneer) → Deploys:** note the published production deploy (the web-app rollback point), then
+   **Stop auto publishing**. Production keeps serving the current app (which never calls the new functions) until
+   step 7, so nobody sees buttons whose functions are not deployed yet.
 1. **Merge PR #3** ("Create a merge commit"), and delete its branch so #4 retargets to `main`.
-2. **Merge PR #4** ("Create a merge commit"). Wait for CI on `main` and for Netlify to publish production.
+2. **Merge PR #4** ("Create a merge commit"). Wait for CI on `main` to pass. Netlify builds `main` but does not publish it.
 3. **Deploy functions** (Cloud Shell, on `main`):
    ```bash
    git checkout main && git pull --ff-only && npm install
@@ -55,7 +64,8 @@ Check:
    - New functions can take **1–3 minutes** before they accept calls ("permission denied" or 401 meanwhile).
 4. **Snapshot again:** run `bash scripts/prod-preflight.sh after`. Every count must be the same, and the ledger must
    still be 0.
-5. **Browser access:** the snapshot's *Browser access* section must show **204** for every function. A **403** means
+5. **Browser access:** the snapshot's *Browser access* section must show **204** for every function (wait 3 minutes
+   after the deploy for new functions). A **403** means
    that function does not accept calls from the browser (it was created without public invocation; a deploy only
    grants it when it creates a function). This happened in dev to `saveSettings` and nine others: the web app shows
    "Could not reach the server function …". Do not fix production without authorizing it; the fix for one function is
@@ -64,6 +74,12 @@ Check:
    applies it to every callable on every run).
    Run the *before* snapshot too: if existing production functions already show 403, decide on the fix before the
    release.
+6. *(only if step 5 shows 403, and only with your authorization)* grant public invocation to those functions with the
+   command above, then repeat step 5.
+7. **Netlify → Deploys → publish** the `main` deploy and **start auto publishing** again.
+8. **Open the production app:** Settings shows the saved reporting period; Settings → Server connection shows project
+   `pioneer-285cf`, region `us-central1`. *Check statement functions* is optional: it calls each function with
+   deliberately invalid input, which every one refuses before reading or changing anything.
 
 ## First production use (October 2026)
 1. **Statements → October 2026 → Run automatic matching.**
