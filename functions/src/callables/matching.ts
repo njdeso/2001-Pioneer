@@ -2,7 +2,8 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import type { DocumentData, DocumentSnapshot, QueryDocumentSnapshot } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import {
-  autoMatchLine, matchToPolicy, noMatch, prepareMatchContext, summarizeMatches, policyNumberKey, MATCH_ENGINE_VERSION,
+  autoMatchLine, matchToPolicy, noMatch, prepareMatchContext, summarizeMatches, policyNumberKey, policyKey, normalizePolicyNumber, MATCH_ENGINE_VERSION,
+  HISTORICAL_POLICY_STATUSES, UNASSIGNED_BROKER_ID, withTerm, type HistoricalAttribution, type PolicyTerm,
   type LineMatch, type MatchBroker, type MatchClient, type MatchPolicy, type PreparedContext, type StatementAdjustment,
 } from '@asm/shared';
 import { audit, db, FieldValue, parse, requireRole, type Actor } from '../lib/core.js';
@@ -21,6 +22,19 @@ import { audit, db, FieldValue, parse, requireRole, type Actor } from '../lib/co
 
 const MATCHABLE = ['needs_review', 'discrepancy'];
 const idRe = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Coverage-term history of every policy (policies/{id}/terms), keyed by policy ID. */
+async function loadTerms(): Promise<Map<string, PolicyTerm[]>> {
+  const snap = await db.collectionGroup('terms').get();
+  const out = new Map<string, PolicyTerm[]>();
+  for (const d of snap.docs) {
+    const policyId = d.ref.parent.parent?.id;
+    if (!policyId || d.ref.parent.parent?.parent.id !== 'policies') continue;
+    const t = { ...(d.data() as Omit<PolicyTerm, 'id' | 'policyId'>), id: d.id, policyId };
+    out.set(policyId, [...(out.get(policyId) ?? []), t]);
+  }
+  return out;
+}
 
 async function loadContext(payerId: string | null): Promise<PreparedContext> {
   const [policies, clients, brokers] = await Promise.all([
@@ -57,6 +71,7 @@ const lineInput = (d: DocumentData) => ({
   policyNumberRaw: String(d.policyNumberRaw ?? ''),
   insuredName: String(d.insuredName ?? ''),
   paidCommissionCents: typeof d.paidCommissionCents === 'number' ? d.paidCommissionCents : null,
+  effectiveDate: typeof d.effectiveDate === 'string' ? d.effectiveDate : null,
 });
 
 const isMatch = (m: unknown): m is LineMatch => !!m && typeof m === 'object' && ['matched', 'ambiguous', 'unmatched'].includes((m as LineMatch).status);
@@ -86,7 +101,7 @@ export const runStatementMatching = onCall({ memory: '512MiB', timeoutSeconds: 3
   const { statementId, includeManual } = parse(runInput, req.data);
   const ref = db.collection('statements').doc(statementId);
   const stmt = assertMatchable(await ref.get());
-  const ctx = await loadContext(stmt.payerId);
+  const [ctx, terms] = await Promise.all([loadContext(stmt.payerId), loadTerms()]);
   const lines = await ref.collection('lines').get();
 
   let changed = 0, keptManual = 0;
@@ -94,7 +109,10 @@ export const runStatementMatching = onCall({ memory: '512MiB', timeoutSeconds: 3
   for (const d of lines.docs) {
     const current = d.get('match');
     if (!includeManual && isMatch(current) && current.method === 'manual') { keptManual++; continue; }
-    const next = autoMatchLine(lineInput(d.data()), ctx);
+    const li = lineInput(d.data());
+    const auto = autoMatchLine(li, ctx);
+    // The coverage term is added only to matched lines, from the line's effective date and the policy's terms.
+    const next = withTerm(auto, li.effectiveDate, auto.policyId ? terms.get(auto.policyId) : undefined);
     writes.push({ doc: d, match: next });
     if (!isMatch(current) || current.status !== next.status || current.policyId !== next.policyId) changed++;
   }
@@ -120,6 +138,17 @@ const manualInput = z.discriminatedUnion('action', [
   z.object({ action: z.literal('assign'), statementId: z.string().regex(idRe), lineId: z.string().regex(idRe), policyId: z.string().regex(idRe), note: z.string().trim().max(500).optional().default('') }),
   z.object({ action: z.literal('unmatch'), statementId: z.string().regex(idRe), lineId: z.string().regex(idRe), note: z.string().trim().max(500).optional().default('') }),
   z.object({ action: z.literal('auto'), statementId: z.string().regex(idRe), lineId: z.string().regex(idRe), note: z.string().trim().max(500).optional().default('') }),
+  // A past (cancelled/expired) policy that is not in the book: record what is known about it.
+  z.object({
+    action: z.literal('historical'), statementId: z.string().regex(idRe), lineId: z.string().regex(idRe),
+    clientId: z.string().regex(idRe).nullable().default(null),
+    insuredName: z.string().trim().min(1, 'Insured name is required').max(200),
+    policyNumber: z.string().trim().min(1, 'Policy number is required').max(60),
+    carrierId: z.string().regex(idRe).nullable().default(null),
+    policyStatus: z.enum(HISTORICAL_POLICY_STATUSES),
+    attributedBrokerId: z.string().regex(idRe).nullable().default(null),
+    note: z.string().trim().min(3, 'A note is required: how the policy was identified').max(500),
+  }),
 ]);
 
 const brief = (m: unknown) => (isMatch(m) ? { status: m.status, method: m.method, policyId: m.policyId, clientId: m.clientId, brokerId: m.brokerId, brokerShareBps: m.brokerShareBps, brokerCents: m.brokerCents, agencyCents: m.agencyCents } : null);
@@ -156,11 +185,36 @@ export const setLineMatch = onCall(async (req) => {
         clients: cSnap.exists ? [{ id: cSnap.id, name: cSnap.get('name') ?? '' }] : [],
         brokers: bSnap.exists ? [{ id: bSnap.id, shareBps: Number(bSnap.get('shareBps') ?? 0) }] : [],
       });
-      next = matchToPolicy(line, ctx.policyById.get(pSnap.id)!, ctx, 'manual');
+      const termSnap = await tx.get(db.collection('policies').doc(pSnap.id).collection('terms'));
+      const policyTerms = termSnap.docs.map((t) => ({ ...(t.data() as Omit<PolicyTerm, 'id' | 'policyId'>), id: t.id, policyId: pSnap.id }));
+      next = withTerm(matchToPolicy(line, ctx.policyById.get(pSnap.id)!, ctx, 'manual'), line.effectiveDate, policyTerms);
+    } else if (input.action === 'historical') {
+      const carrierId = input.carrierId ?? String(stmt.payerId);
+      const [cSnap, carSnap, bSnap] = await Promise.all([
+        input.clientId ? tx.get(db.collection('clients').doc(input.clientId)) : Promise.resolve(null),
+        tx.get(db.collection('carriers').doc(carrierId)),
+        input.attributedBrokerId ? tx.get(db.collection('brokers').doc(input.attributedBrokerId)) : Promise.resolve(null),
+      ]);
+      if (cSnap && !cSnap.exists) throw new HttpsError('not-found', 'Customer not found.');
+      if (!carSnap.exists) throw new HttpsError('not-found', 'Carrier not found.');
+      if (bSnap && !bSnap.exists) throw new HttpsError('not-found', 'Broker not found.');
+      if (input.attributedBrokerId === UNASSIGNED_BROKER_ID) throw new HttpsError('invalid-argument', 'Leave the broker empty instead of choosing Unassigned.');
+      // A policy that IS in the book must be matched to that policy, not recorded as historical.
+      if (normalizePolicyNumber(input.policyNumber)) {
+        const keySnap = await tx.get(db.collection('policyKeys').doc(policyKey(carrierId, input.policyNumber)));
+        if (keySnap.exists) throw new HttpsError('failed-precondition', `Policy ${input.policyNumber} at this carrier is in the book (policy ${String(keySnap.get('policyId') ?? '')}). Match the line to that policy instead.`);
+      }
+      const historical: HistoricalAttribution = {
+        clientId: input.clientId, insuredName: input.insuredName, policyNumber: input.policyNumber, carrierId,
+        policyStatus: input.policyStatus, attributedBrokerId: input.attributedBrokerId, buyoutEligible: false, note: input.note,
+      };
+      next = { ...noMatch(line, 'unmatched', 'manual', ['historical_policy'], [], policyNumberKey(line.policyNumberRaw).key), historical };
     } else if (input.action === 'unmatch') {
       next = noMatch(line, 'unmatched', 'manual', ['manually_unmatched'], isMatch(before) ? before.candidates : [], policyNumberKey(line.policyNumberRaw).key);
     } else {
-      next = autoMatchLine(line, await loadContext(stmt.payerId));
+      const [actx, terms] = await Promise.all([loadContext(stmt.payerId), loadTerms()]);
+      const auto = autoMatchLine(line, actx);
+      next = withTerm(auto, line.effectiveDate, auto.policyId ? terms.get(auto.policyId) : undefined);
     }
 
     tx.update(lineRef, {
@@ -173,18 +227,20 @@ export const setLineMatch = onCall(async (req) => {
         previous: brief(before),
       },
     });
-    const label = { assign: 'match_manual_assign', unmatch: 'match_manual_unmatch', auto: 'match_revert_auto' }[input.action];
+    const label = { assign: 'match_manual_assign', unmatch: 'match_manual_unmatch', auto: 'match_revert_auto', historical: 'match_manual_historical' }[input.action];
     audit(tx, actor, {
       action: label,
       entityType: 'statementLine',
       entityId: `${input.statementId}/${input.lineId}`,
-      summary: `Line ${lineSnap.get('lineNo')}: ${input.action === 'assign' ? `matched to policy ${next.policyId}` : input.action === 'unmatch' ? 'marked unmatched' : `returned to automatic matching (${next.status})`}${input.note ? ` — ${input.note}` : ''}`,
+      summary: `Line ${lineSnap.get('lineNo')}: ${input.action === 'assign' ? `matched to policy ${next.policyId}` : input.action === 'unmatch' ? 'marked unmatched' : input.action === 'historical' ? `identified as past policy ${input.policyNumber} (${input.policyStatus})${input.clientId ? ` of customer ${input.clientId}` : ''}${input.attributedBrokerId ? `, attributed to broker ${input.attributedBrokerId} for reporting only` : ''}` : `returned to automatic matching (${next.status})`}${input.note ? ` — ${input.note}` : ''}`,
       changes: {
         status: { before: isMatch(before) ? before.status : null, after: next.status },
         method: { before: isMatch(before) ? before.method : null, after: next.method },
         policyId: { before: isMatch(before) ? before.policyId : null, after: next.policyId },
         brokerId: { before: isMatch(before) ? before.brokerId : null, after: next.brokerId },
         brokerCents: { before: isMatch(before) ? before.brokerCents : null, after: next.brokerCents },
+        historical: { before: isMatch(before) ? (before as LineMatch).historical ?? null : null, after: next.historical ?? null },
+        termId: { before: isMatch(before) ? (before as LineMatch).term?.termId ?? null : null, after: next.term?.termId ?? null },
       },
     });
     return { match: next, adjustments: (stmt.adjustments ?? []) as StatementAdjustment[] };

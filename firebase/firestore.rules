@@ -25,7 +25,10 @@ service cloud.firestore {
     match /carriers/{id}           { allow read: if isStaff(); allow write: if false; }
     match /brokers/{id}            { allow read: if isStaff(); allow write: if false; }
     match /clients/{id}            { allow read: if isStaff(); allow write: if false; }
-    match /policies/{id}           { allow read: if isStaff(); allow write: if false; }
+    match /policies/{id}           { allow read: if isStaff(); allow write: if false;
+      // Coverage-term history (one policy record, several consecutive terms). Written only by functions.
+      match /terms/{termId}        { allow read: if isStaff(); allow write: if false; }
+    }
     match /settings/{id}           { allow read: if isStaff(); allow write: if false; }
     match /ledger/{id}             { allow read: if isStaff(); allow write: if false; }
     match /statements/{id}         { allow read: if isStaff(); allow write: if false;

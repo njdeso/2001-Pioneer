@@ -87,6 +87,10 @@ export interface LedgerEntry {
   postedByEmail?: string;
   reversalId?: string;
   reversalReason?: string;
+  /** Suspense entries only: the person's record of the past policy behind the line (information only; never buyout eligibility). */
+  historical?: import('./statements/match.js').HistoricalAttribution;
+  /** Policy-level entries: the coverage term (policies/{policyId}/terms/{termId}) when it was determined. */
+  termId?: string;
 }
 
 export interface AuditEvent {

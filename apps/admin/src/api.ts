@@ -73,6 +73,9 @@ export const api = {
   saveClient: (data: ClientInput, id?: string, applyBrokerToPolicies = false) =>
     call<{ id?: string; data: ClientInput; applyBrokerToPolicies: boolean }, { id: string; policiesMoved: number }>(
       'saveClient', { id, data, applyBrokerToPolicies }),
+  savePolicyTerm: (input: { policyId: string; originalTermId: string | null; term: { effectiveDate: string; scheduledExpirationDate: string; cancellationDate: string | null; status: string; note: string }; note: string }) =>
+    call<typeof input, { termId: string; warnings: { message: string }[] }>('savePolicyTerm', input),
+  removePolicyTerm: (input: { policyId: string; termId: string; note: string }) => call<typeof input, { removed: string }>('removePolicyTerm', input),
   savePolicy: (data: PolicyInput, id?: string) =>
     call<{ id?: string; data: PolicyInput }, { id: string }>('savePolicy', { id, data }),
   stageImport: (fileName: string, fileHash: string, options: ImportOptionsInput, records: ImportRecordInput[]) =>
@@ -95,7 +98,8 @@ export const api = {
     call<{ model?: string; skipRequest: boolean }, AiDiagnosis>('checkAiConnection', { model, skipRequest }, 120_000),
   runStatementMatching: (statementId: string, includeManual = false) =>
     call<{ statementId: string; includeManual: boolean }, MatchSummary & { changed: number; keptManual: number }>('runStatementMatching', { statementId, includeManual }, 300_000),
-  setLineMatch: (input: { action: 'assign'; statementId: string; lineId: string; policyId: string; note?: string } | { action: 'unmatch' | 'auto'; statementId: string; lineId: string; note?: string }) =>
+  setLineMatch: (input: { action: 'assign'; statementId: string; lineId: string; policyId: string; note?: string } | { action: 'unmatch' | 'auto'; statementId: string; lineId: string; note?: string }
+    | { action: 'historical'; statementId: string; lineId: string; clientId: string | null; insuredName: string; policyNumber: string; carrierId: string | null; policyStatus: 'cancelled' | 'expired' | 'unknown'; attributedBrokerId: string | null; note: string }) =>
     call<typeof input, { match: LineMatch; summary: MatchSummary }>('setLineMatch', input),
   approveStatement: (statementId: string, confirmNotDuplicate = false, note = '') =>
     call<{ statementId: string; confirmNotDuplicate: boolean; note: string }, { status: string; totals: PostingPlan['totals'] }>('approveStatement', { statementId, confirmNotDuplicate, note }),

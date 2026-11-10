@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import {
-  formatBps, matchToPolicy, MATCH_REASON_TEXT, nameEvidence, prepareMatchContext, TRANSACTION_TYPE_LABELS, UNASSIGNED_BROKER_ID,
+  formatBps, matchToPolicy, MATCH_REASON_TEXT, TERM_RESOLUTION_TEXT, nameEvidence, prepareMatchContext, TRANSACTION_TYPE_LABELS, UNASSIGNED_BROKER_ID,
   type Cents, type ExtractedLine, type LineMatch, type MatchCandidate, type MatchSummary, type NameEvidence, type Policy,
 } from '@asm/shared';
 import { api } from '../api';
@@ -40,6 +40,7 @@ const NUMBER_TEXT: Record<MatchCandidate['numberEvidence'], string> = { exact: '
 
 export function MatchBadge({ m }: { m: StoredMatch | null }) {
   if (!m) return <Badge>Not matched yet</Badge>;
+  if (m.historical) return <Badge tone="amber">Past policy (not in book)</Badge>;
   const tone = m.status === 'matched' ? 'green' : m.status === 'ambiguous' ? 'amber' : 'red';
   const label = m.status === 'matched' ? (m.method === 'manual' ? 'Matched (manual)' : m.confidence === 'high' ? 'Matched' : 'Matched — check') : m.status === 'ambiguous' ? 'Ambiguous' : m.method === 'manual' ? 'Unmatched (manual)' : 'Unmatched';
   return <Badge tone={tone}>{label}</Badge>;
@@ -48,12 +49,24 @@ export function MatchBadge({ m }: { m: StoredMatch | null }) {
 /** "Matched to" cell: client, policy, carrier. */
 export function MatchedTo({ m }: { m: StoredMatch | null }) {
   const { clientById, policyById, carrierById } = useData();
+  if (m?.historical) {
+    const h = m.historical;
+    return (
+      <div className="text-xs leading-tight">
+        <div className="font-medium text-ink">{h.clientId ? clientById.get(h.clientId)?.name ?? h.clientId : h.insuredName}</div>
+        <div className="font-mono text-slate-600">{h.policyNumber} <span className="font-sans text-amber-700">({h.policyStatus})</span></div>
+        <div className="text-slate-500">{carrierById.get(h.carrierId ?? '')?.name ?? h.carrierId} · suspense, not in book</div>
+      </div>
+    );
+  }
   if (!m?.policyId) return <span className="text-xs text-slate-400">{m ? MATCH_REASON_TEXT[m.reasons.find((r) => r !== 'number_and_carrier') ?? m.reasons[0]] ?? '' : ''}</span>;
   const p = policyById.get(m.policyId);
   return (
     <div className="text-xs leading-tight">
       <div className="font-medium text-ink">{clientById.get(m.clientId ?? '')?.name ?? m.clientId}</div>
       <div className="font-mono text-slate-600">{p?.policyNumber ?? m.policyId}</div>
+      {m.term ? <div className="text-slate-500">Term {m.term.effectiveDate} → {m.term.endDate} ({m.term.status})</div>
+        : m.termResolution && m.termResolution !== 'no_terms' ? <div className="text-amber-700">{TERM_RESOLUTION_TEXT[m.termResolution]}</div> : null}
       <div className="text-slate-500">{carrierById.get(m.carrierId ?? '')?.name ?? m.carrierId}</div>
     </div>
   );
@@ -161,6 +174,7 @@ export function MatchDialog({ statementId, payerId, line, onClose }: { statement
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [past, setPast] = useState(false);
 
   const m = line ? lineMatch(line) : null;
   const results = useMemo(() => {
@@ -270,6 +284,16 @@ export function MatchDialog({ statementId, payerId, line, onClose }: { statement
               {preview.reasons.filter((r) => r !== 'manual').map((r) => <p key={r} className="mt-1 text-amber-800">{MATCH_REASON_TEXT[r]}</p>)}
             </div>
           )}
+          {past ? (
+            <PastPolicyForm statementId={statementId} payerId={payerId} line={line} existing={m?.historical ?? null} busy={busy}
+              onCancel={() => setPast(false)} onSave={(input) => void save(input)} />
+          ) : (
+            <p className="mt-3 text-xs text-slate-500">
+              Commission on a cancelled or expired policy that was never imported?{' '}
+              <button type="button" className="text-ink underline" onClick={() => setPast(true)}>Record it as a past policy…</button>{' '}
+              It posts to suspense (no change to totals), linked to the customer if you choose one; the policy is not added to the book.
+            </p>
+          )}
           <Field label="Note (kept in the audit log)" className="mt-3"><TextArea value={note} onChange={(e) => setNote(e.target.value)} rows={2} /></Field>
           <ErrorNote message={error} />
           <div className="mt-3 flex flex-wrap justify-end gap-2">
@@ -284,3 +308,68 @@ export function MatchDialog({ statementId, payerId, line, onClose }: { statement
 }
 
 export const centsOrZero = (c: Cents | null | undefined) => c ?? 0;
+
+/**
+ * Record a line as commission on a past policy that is not in the book (e.g. a cancelled Travelers
+ * policy of a customer who still has other active policies). Information only: the line posts to
+ * suspense like any unmatched line; the broker attribution is for internal reporting and never makes
+ * the policy eligible for a broker buyout. Nothing is ever chosen automatically.
+ */
+function PastPolicyForm({ statementId, payerId, line, existing, busy, onCancel, onSave }: {
+  statementId: string; payerId: string | null; line: MatchLine; existing: StoredMatch['historical'] | null; busy: boolean;
+  onCancel: () => void; onSave: (input: Parameters<typeof api.setLineMatch>[0]) => void;
+}) {
+  const { clients, carriers, brokers } = useData();
+  const [q, setQ] = useState('');
+  const [clientId, setClientId] = useState<string | null>(existing?.clientId ?? null);
+  const [insuredName, setInsuredName] = useState(existing?.insuredName ?? line.insuredName ?? '');
+  const [policyNumber, setPolicyNumber] = useState(existing?.policyNumber ?? line.policyNumberRaw ?? '');
+  const [carrierId, setCarrierId] = useState<string>(existing?.carrierId ?? payerId ?? '');
+  const [policyStatus, setPolicyStatus] = useState<'cancelled' | 'expired' | 'unknown'>(existing?.policyStatus ?? 'cancelled');
+  const [brokerId, setBrokerId] = useState<string>(existing?.attributedBrokerId ?? '');
+  const [note, setNote] = useState(existing?.note ?? '');
+  const found = useMemo(() => {
+    const t = q.trim().toLowerCase();
+    return t.length < 2 ? [] : clients.filter((c) => c.name.toLowerCase().includes(t) || (c.externalId ?? '').toLowerCase().includes(t)).slice(0, 12);
+  }, [q, clients]);
+  const chosen = clientId ? clients.find((c) => c.id === clientId) : null;
+  return (
+    <div className="mt-3 space-y-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs">
+      <div className="font-semibold text-amber-900">Past policy (not in the book)</div>
+      <Field label="Existing customer (optional)">
+        {chosen ? (
+          <div className="flex items-center justify-between"><span className="font-medium">{chosen.name}</span><button type="button" className="text-ink underline" onClick={() => setClientId(null)}>change</button></div>
+        ) : (
+          <>
+            <TextInput value={q} placeholder="Search customers by name or ID" onChange={(e) => setQ(e.target.value)} />
+            <div className="mt-1 max-h-32 space-y-0.5 overflow-y-auto">{found.map((c) => (
+              <button key={c.id} type="button" className="block w-full rounded px-2 py-1 text-left hover:bg-white" onClick={() => { setClientId(c.id); setQ(''); }}>{c.name}{c.externalId ? <span className="text-slate-500"> · {c.externalId}</span> : null}</button>
+            ))}</div>
+          </>
+        )}
+      </Field>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Insured name on the policy"><TextInput value={insuredName} onChange={(e) => setInsuredName(e.target.value)} /></Field>
+        <Field label="Policy number"><TextInput value={policyNumber} onChange={(e) => setPolicyNumber(e.target.value)} /></Field>
+        <Field label="Insurance carrier">
+          <Select value={carrierId} onChange={(e) => setCarrierId(e.target.value)} options={[...carriers].sort((a, b) => a.name.localeCompare(b.name)).map((c) => ({ value: c.id, label: c.name }))} />
+        </Field>
+        <Field label="Policy status">
+          <Select value={policyStatus} onChange={(e) => setPolicyStatus(e.target.value as typeof policyStatus)} options={[{ value: 'cancelled', label: 'Cancelled' }, { value: 'expired', label: 'Expired' }, { value: 'unknown', label: 'Not known' }]} />
+        </Field>
+      </div>
+      <Field label="Broker (internal reporting only; never creates broker-buyout eligibility)">
+        <Select value={brokerId} onChange={(e) => setBrokerId(e.target.value)} placeholder="Not attributed"
+          options={brokers.filter((b) => b.id !== 'UNASSIGNED').sort((a, b) => a.name.localeCompare(b.name)).map((b) => ({ value: b.id, label: b.name }))} />
+      </Field>
+      <Field label="How was it identified? (required; kept in the audit log)"><TextArea rows={2} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <div className="flex justify-end gap-2">
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>Cancel</Button>
+        <Button size="sm" disabled={busy || note.trim().length < 3 || !insuredName.trim() || !policyNumber.trim()} onClick={() => onSave({
+          action: 'historical', statementId, lineId: line.id, clientId, insuredName: insuredName.trim(), policyNumber: policyNumber.trim(),
+          carrierId: carrierId || null, policyStatus, attributedBrokerId: brokerId || null, note: note.trim(),
+        })}>{busy ? 'Saving…' : 'Save as past policy'}</Button>
+      </div>
+    </div>
+  );
+}

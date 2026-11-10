@@ -34,6 +34,7 @@ beforeEach(async () => {
     await setDoc(doc(db, 'auditLog/SYN-A1'), { action: 'create' });
     await setDoc(doc(db, 'policyKeys/k__SYN100'), { policyId: 'SYN-P1' });
     await setDoc(doc(db, 'users/admin1'), { role: 'admin' });
+    await setDoc(doc(db, 'policies/SYN-P1/terms/2025-07-02'), { effectiveDate: '2025-07-02', scheduledExpirationDate: '2026-07-03', status: 'renewed' });
   });
 });
 
@@ -139,6 +140,22 @@ describe('statements (Firestore)', () => {
     await assertSucceeds(getDoc(doc(admin(), 'aiUsage/2026-11')));
     await assertFails(setDoc(doc(admin(), 'aiUsage/2026-11'), { calls: 0 }));
     await assertFails(getDoc(doc(admin(), 'statementKeys/abc')));
+  });
+});
+
+describe('policy coverage terms', () => {
+  it('admin and staff can read term history; other roles and signed-out users cannot', async () => {
+    await assertSucceeds(getDocs(collection(staff(), 'policies/SYN-P1/terms')));
+    await assertSucceeds(getDoc(doc(admin(), 'policies/SYN-P1/terms/2025-07-02')));
+    await assertFails(getDoc(doc(buyerLike(), 'policies/SYN-P1/terms/2025-07-02')));
+    await assertFails(getDoc(doc(noRole(), 'policies/SYN-P1/terms/2025-07-02')));
+    await assertFails(getDoc(doc(anon(), 'policies/SYN-P1/terms/2025-07-02')));
+  });
+  it('terms are written only by server functions (validated, audited), never from the browser', async () => {
+    await assertFails(setDoc(doc(admin(), 'policies/SYN-P1/terms/2026-07-03'), { effectiveDate: '2026-07-03', status: 'active' }));
+    await assertFails(setDoc(doc(admin(), 'policies/SYN-P1/terms/2025-07-02'), { status: 'cancelled' }, { merge: true }));
+    await assertFails(deleteDoc(doc(admin(), 'policies/SYN-P1/terms/2025-07-02')));
+    await assertFails(setDoc(doc(staff(), 'policies/SYN-P1/terms/2026-07-03'), { effectiveDate: '2026-07-03' }));
   });
 });
 

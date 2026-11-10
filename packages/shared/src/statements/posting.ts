@@ -2,7 +2,7 @@ import type { BasisPoints, Cents } from '../money.js';
 import type { LedgerClassification } from '../types.js';
 import { UNASSIGNED_BROKER_ID } from '../schemas.js';
 import type { StatementAdjustment, TransactionType } from './types.js';
-import { brokerForPolicy, commissionSplit, type BrokerShareSource, type LineMatch, type MatchBroker, type MatchPolicy } from './match.js';
+import { brokerForPolicy, commissionSplit, type BrokerShareSource, type HistoricalAttribution, type LineMatch, type MatchBroker, type MatchPolicy } from './match.js';
 
 /**
  * Stage 3C — statement approval and commission posting. Pure functions shared by the server, which
@@ -112,6 +112,8 @@ export function postingReadiness(stmt: PostingStatement, lines: PostingLine[], o
 
   const suspense = nos((l) => hasCommission(l) && asMatch(l.match)?.status === 'unmatched' && asMatch(l.match)?.method === 'manual');
   if (suspense.length) warnings.push({ code: 'suspense', message: `${suspense.length} line(s) will be posted to suspense (no policy, 100 % agency).`, lineNos: suspense });
+  const historical = nos((l) => hasCommission(l) && !!asMatch(l.match)?.historical);
+  if (historical.length) warnings.push({ code: 'historical', message: `${historical.length} of those are identified as past policies not in the book (attribution recorded; no buyout eligibility).`, lineNos: historical });
   const inactive = nos((l) => !!asMatch(l.match)?.reasons.includes('policy_not_active'));
   if (inactive.length) warnings.push({ code: 'policy_not_active', message: `${inactive.length} line(s) are matched to a policy that is not active.`, lineNos: inactive });
   const otherCarrier = nos((l) => !!asMatch(l.match)?.reasons.includes('carrier_differs'));
@@ -122,6 +124,10 @@ export function postingReadiness(stmt: PostingStatement, lines: PostingLine[], o
 
 export interface PlannedEntry {
   id: string;
+  /** Suspense entries only: a person's record of the past policy behind the line (information only). */
+  historical?: HistoricalAttribution;
+  /** Policy-level entries: the coverage term (policies/{policyId}/terms/{termId}) when it was determined. */
+  termId?: string;
   level: 'policy' | 'carrier' | 'suspense';
   payerId: string;
   carrierId: string | null;
@@ -195,9 +201,11 @@ export function buildPostingPlan(stmt: PostingStatement, lines: PostingLine[], o
     if (m.status === 'matched' && m.policyId) {
       // The split reviewed during matching, recomputed from its captured share so it always matches the amount.
       const { brokerCents, agencyCents } = commissionSplit(amount, m.brokerShareBps ?? 0);
-      entries.push({ ...base, level: 'policy', carrierId: m.carrierId, clientId: m.clientId, policyId: m.policyId, brokerId: m.brokerId ?? UNASSIGNED_BROKER_ID, brokerShareBps: m.brokerShareBps ?? 0, brokerShareSource: m.brokerShareSource ?? 'broker', brokerCents, agencyCents });
+      entries.push({ ...base, level: 'policy', carrierId: m.carrierId, clientId: m.clientId, policyId: m.policyId, brokerId: m.brokerId ?? UNASSIGNED_BROKER_ID, brokerShareBps: m.brokerShareBps ?? 0, brokerShareSource: m.brokerShareSource ?? 'broker', brokerCents, agencyCents, ...(m.term ? { termId: m.term.termId } : {}) });
     } else {
-      entries.push({ ...base, level: 'suspense', carrierId: null, clientId: null, policyId: null, brokerId: UNASSIGNED_BROKER_ID, brokerShareBps: 0, brokerShareSource: 'none', brokerCents: 0, agencyCents: amount });
+      // Historical lines keep the person's attribution on the entry for reference only; amounts, level,
+      // carrier, client and broker allocation are exactly those of any other suspense entry.
+      entries.push({ ...base, level: 'suspense', carrierId: null, clientId: null, policyId: null, brokerId: UNASSIGNED_BROKER_ID, brokerShareBps: 0, brokerShareSource: 'none', brokerCents: 0, agencyCents: amount, ...(m.historical ? { historical: { ...m.historical, buyoutEligible: false as const } } : {}) });
     }
   }
   (stmt.adjustments ?? []).forEach((a, i) => {
@@ -232,7 +240,10 @@ export function buildPostingPlan(stmt: PostingStatement, lines: PostingLine[], o
 
 /** Stable fingerprint of a plan, stored at approval. Posting refuses if anything changed since. */
 export function planFingerprint(plan: PostingPlan): string {
-  const parts = plan.entries.map((e) => [e.id, e.level, e.policyId ?? '', e.amountCents, e.brokerId, e.brokerShareBps, e.brokerCents, e.agencyCents, e.classification, e.statementPeriod].join('|'));
+  // Historical attribution is appended only when present, so fingerprints of other plans are unchanged.
+  const parts = plan.entries.map((e) => [e.id, e.level, e.policyId ?? '', e.amountCents, e.brokerId, e.brokerShareBps, e.brokerCents, e.agencyCents, e.classification, e.statementPeriod].join('|')
+    + (e.termId ? `|T:${e.termId}` : '')
+    + (e.historical ? `|H:${e.historical.clientId ?? ''}:${e.historical.attributedBrokerId ?? ''}:${e.historical.policyNumber}:${e.historical.policyStatus}` : ''));
   let h = 0x811c9dc5; // FNV-1a 32-bit over the canonical text (integrity check, not security)
   const text = `${plan.postingId}#${parts.join('\n')}`;
   for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
