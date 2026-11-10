@@ -8,3 +8,4 @@ export { stageImport, commitImport, undoImport, discardImport } from './callable
 export { registerStatementUpload, processStatement, setStatementPayer, discardStatement, getStatementFileUrl } from './callables/statements.js';
 export { checkAiConnection } from './callables/ai.js';
 export { runStatementMatching, setLineMatch } from './callables/matching.js';
+export { approveStatement, unapproveStatement, postStatement, reverseStatementPosting, recordRetainedCommission, reverseLedgerEntry } from './callables/posting.js';

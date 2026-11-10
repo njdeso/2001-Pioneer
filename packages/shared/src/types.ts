@@ -73,6 +73,20 @@ export interface LedgerEntry {
   createdAt?: Stamp;
   approvedAt?: Stamp;
   approvedBy?: string;
+  // Stage 3C allocation and lineage (present on every entry posted by Stage 3C or later)
+  postingId?: string;
+  lineNo?: number | null;
+  brokerId?: string;
+  brokerShareBps?: number;
+  brokerShareSource?: 'policy' | 'broker' | 'unassigned' | 'none';
+  brokerCents?: Cents;
+  agencyCents?: Cents;
+  insuredName?: string;
+  policyNumberRaw?: string;
+  postedBy?: string;
+  postedByEmail?: string;
+  reversalId?: string;
+  reversalReason?: string;
 }
 
 export interface AuditEvent {

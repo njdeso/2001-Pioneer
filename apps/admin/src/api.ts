@@ -1,4 +1,4 @@
-import type { AiDiagnosis, LineMatch, MatchSummary } from '@asm/shared';
+import type { AiDiagnosis, LineMatch, MatchSummary, PostingPlan } from '@asm/shared';
 import { httpsCallable } from 'firebase/functions';
 import type {
   BrokerInput, CarrierInput, ClientInput, ImportOptionsInput, ImportPlanSummary, ImportRecordInput, Message, PolicyInput, SettingsInput,
@@ -76,6 +76,15 @@ export const api = {
     call<{ statementId: string; includeManual: boolean }, MatchSummary & { changed: number; keptManual: number }>('runStatementMatching', { statementId, includeManual }, 300_000),
   setLineMatch: (input: { action: 'assign'; statementId: string; lineId: string; policyId: string; note?: string } | { action: 'unmatch' | 'auto'; statementId: string; lineId: string; note?: string }) =>
     call<typeof input, { match: LineMatch; summary: MatchSummary }>('setLineMatch', input),
+  approveStatement: (statementId: string, confirmNotDuplicate = false, note = '') =>
+    call<{ statementId: string; confirmNotDuplicate: boolean; note: string }, { status: string; totals: PostingPlan['totals'] }>('approveStatement', { statementId, confirmNotDuplicate, note }),
+  unapproveStatement: (statementId: string, reason: string) => call<{ statementId: string; reason: string }, { status: string }>('unapproveStatement', { statementId, reason }),
+  postStatement: (statementId: string) => call<{ statementId: string }, { status: string; postingId: string; totals: PostingPlan['totals'] }>('postStatement', { statementId }, 120_000),
+  reverseStatementPosting: (statementId: string, reason: string) =>
+    call<{ statementId: string; reason: string }, { status: string; reversedEntries: number; reversedCents: number }>('reverseStatementPosting', { statementId, reason }, 120_000),
+  recordRetainedCommission: (input: { requestId: string; policyId: string; statementPeriod: string; amountCents: number; transactionDate: string | null; classification: string; note: string }) =>
+    call<typeof input, { entryId: string; duplicate: boolean }>('recordRetainedCommission', input),
+  reverseLedgerEntry: (entryId: string, reason: string) => call<{ entryId: string; reason: string }, { reversalId: string }>('reverseLedgerEntry', { entryId, reason }),
   getStatementFileUrl: (statementId: string) =>
     call<{ statementId: string }, { url: string; expiresInSeconds: number }>('getStatementFileUrl', { statementId }),
   reassignPolicies: (policyIds: string[], brokerId: string) =>

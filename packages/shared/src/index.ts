@@ -15,3 +15,4 @@ export * from './statements/ai.js';
 export * from './statements/anthropic.js';
 export * from './statements/diagnose.js';
 export * from './statements/match.js';
+export * from './statements/posting.js';

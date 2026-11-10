@@ -41,7 +41,7 @@ export function DashboardPage() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Stat tone="gold" label="Trailing 12-month commission" value={<Money cents={revenue?.total ?? 0} />}
           sub={posted ? `${posted.toLocaleString()} posted ledger entries` : 'No statements posted yet'} />
-        <Stat label="Broker share (internal)" value={<Money cents={revenue?.brokerShare ?? 0} />} sub="Per each broker's share %" />
+        <Stat label="Broker share (internal)" value={<Money cents={revenue?.brokerShare ?? 0} />} sub="As allocated when posted" />
         <Stat label="Agency net (internal)" value={<Money cents={revenue?.agencyNet ?? 0} />} sub="Gross minus broker share" />
         <Stat label="Average month" value={<Money cents={revenue ? Math.trunc(revenue.total / revenue.months) : 0} />} sub="Window total ÷ months (display only)" />
       </div>

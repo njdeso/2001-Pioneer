@@ -10,6 +10,11 @@
 //                            scenario, broker percentages, negative commission, totals; manual assign /
 //                            unmatch / re-run keeps manual / return to automatic; audit entries;
 //                            extracted values and policies unchanged; nothing posted to the ledger)
+//   6. Stage 3C posting     (same statement: approval blocked until ambiguous/unreviewed lines are
+//                            resolved; staff cannot approve or post; approve; matching locked; concurrent
+//                            and repeated posting post exactly once; ledger entries, allocations, suspense,
+//                            adjustment; rolling-12-month report totals; reversal nets to zero; re-post;
+//                            retained commission with idempotent request ID and reversal; audit trail)
 //
 // Synthetic data only: fictional carrier, insureds and policy numbers. Nothing is read from or
 // written to production. Prints no API keys (the AI key never leaves Secret Manager).
@@ -71,8 +76,8 @@ async function devWebConfig() {
   return cfg;
 }
 
-async function adminIdToken(apiKey) {
-  const custom = await getAuth().createCustomToken('ci-smoke-admin', { role: 'admin' });
+async function adminIdToken(apiKey, uid = 'ci-smoke-admin', role = 'admin') {
+  const custom = await getAuth().createCustomToken(uid, { role });
   const r = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: custom, returnSecureToken: true }),
   });
@@ -103,6 +108,8 @@ async function deployedFunctions() {
 }
 
 let ID_TOKEN = '';
+let STAFF_TOKEN = '';
+let WEB_API_KEY = '';
 let FUNCTIONS = new Map();
 /** Does the Cloud Run service behind a function allow public invocation (allUsers → run.invoker)? */
 async function invokerStatus(fn) {
@@ -115,16 +122,16 @@ async function invokerStatus(fn) {
 }
 
 /** Firebase callable protocol: POST JSON {"data": …} with the user's Firebase ID token as Bearer. */
-async function call(name, data, attempt = 1) {
+async function call(name, data, attempt = 1, token = ID_TOKEN) {
   const fn = FUNCTIONS.get(name);
   if (!fn) throw new Error(`${name} is not deployed in ${DEV}.`);
   if (fn.region !== REGION) throw new Error(`${name} is deployed in ${fn.region}, but the app calls ${REGION}.`);
   // A function created moments ago can answer 401/403 from Cloud Run until its public-invoker IAM
   // binding propagates (usually under 2 minutes). Wait for that, up to ~4 minutes, then report the
   // actual IAM policy instead of retrying forever. Callable errors (JSON) are never retried.
-  const r0 = await fetch(fn.url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ID_TOKEN}` }, body: JSON.stringify({ data }), signal: AbortSignal.timeout(560_000) });
+  const r0 = await fetch(fn.url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ data }), signal: AbortSignal.timeout(560_000) });
   if ((r0.status === 401 || r0.status === 403) && !(r0.headers.get('content-type') ?? '').includes('json')) {
-    if (attempt < 9) { await new Promise((res) => setTimeout(res, 30_000)); return call(name, data, attempt + 1); }
+    if (attempt < 9) { await new Promise((res) => setTimeout(res, 30_000)); return call(name, data, attempt + 1, token); }
     throw new Error(`${name}: Cloud Run still answers HTTP ${r0.status} after ${attempt} tries; IAM: ${await invokerStatus(fn)}`);
   }
   if (attempt > 1) summary(`\n_${name} became callable after ${attempt - 1} wait(s) of 30 s (new-function IAM propagation)._\n`);
@@ -180,7 +187,13 @@ async function stage3b() {
   summary('\n#### Stage 3B — commission matching (synthetic data)\n');
   summary('| | Check | Result |');
   summary('|---|---|---|');
-  // Clean up earlier automated statements (synthetic, dev only), then build a fresh one.
+  // Clean up earlier automated runs (synthetic, dev only, after the project-number guard): their ledger
+  // entries (statement SYN3B-AUTO-… and retained entries on the synthetic policy) and statements.
+  const oldLedger = [
+    ...(await db.collection('ledger').where('statementId', '>=', 'SYN3B-AUTO-').where('statementId', '<', 'SYN3B-AUTO.').get()).docs,
+    ...(await db.collection('ledger').where('policyId', '==', 'SYN3B-P-ZETA').get()).docs.filter((d) => d.get('sourceType') === 'retained' && String(d.id).startsWith('retained__syn3b-smoke-')),
+  ];
+  for (let i = 0; i < oldLedger.length; i += 400) { const b = db.batch(); oldLedger.slice(i, i + 400).forEach((d) => b.delete(d.ref)); await b.commit(); }
   const old = await db.collection('statements').where('synthetic', '==', true).get();
   for (const d of old.docs.filter((x) => x.id.startsWith('SYN3B-AUTO-'))) {
     for (const l of await d.ref.collection('lines').listDocuments()) await l.delete();
@@ -261,6 +274,133 @@ async function stage3b() {
   const stmt = (await ref.get()).data();
   record('Nothing posted to financial reports', ledgerAfter === ledgerBefore && ledgerForStmt === 0 && (stmt.postedCents ?? 0) === 0,
     `ledger entries ${ledgerBefore} → ${ledgerAfter}; for this statement ${ledgerForStmt}; posted ${$(stmt.postedCents ?? 0)}`);
+  return { sid, ref, policiesBefore, linesBefore };
+}
+
+// ---------------------------------------------------------------- Stage 3C posting
+const WINDOW = { start: '2025-11', end: '2026-10' }; // rolling 12 months ending with the synthetic statement month
+async function windowTotals() {
+  const docs = (await db.collection('ledger').where('statementPeriod', '>=', WINDOW.start).where('statementPeriod', '<=', WINDOW.end).get()).docs.map((d) => d.data());
+  const counted = docs.filter((e) => e.postingStatus === 'posted' || e.postingStatus === 'reversed');
+  return { amount: counted.reduce((s, e) => s + e.amountCents, 0), broker: counted.reduce((s, e) => s + (e.brokerCents ?? 0), 0), count: counted.length };
+}
+async function expectRejected(promise) {
+  try { await promise; return { rejected: false, message: 'succeeded' }; } catch (e) { return { rejected: true, message: e instanceof Error ? e.message : String(e) }; }
+}
+
+async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
+  summary('\n#### Stage 3C — approval, posting, reversal, retained commission (synthetic data)\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  const ledgerFor = async (q = sid) => (await db.collection('ledger').where('statementId', '==', q).get()).docs.map((d) => ({ id: d.id, ...d.data() }));
+
+  // 1. Approval is blocked while lines are ambiguous or unreviewed
+  const blocked = await expectRejected(call('approveStatement', { statementId: sid }));
+  record('Approval blocked by ambiguous and unreviewed lines', blocked.rejected && /ambiguous/.test(blocked.message) && /not yet reviewed/.test(blocked.message), blocked.message.slice(0, 220));
+
+  // 2. Resolve: line 5 (truncated number) matched by the owner; lines 3 and 9 marked unmatched → suspense
+  await call('setLineMatch', { action: 'assign', statementId: sid, lineId: '00005', policyId: 'SYN3B-P-DELTA', note: 'smoke: truncated number identified' });
+  await call('setLineMatch', { action: 'unmatch', statementId: sid, lineId: '00003', note: 'smoke: other carrier — to suspense' });
+  await call('setLineMatch', { action: 'unmatch', statementId: sid, lineId: '00009', note: 'smoke: unknown policy — to suspense' });
+
+  // 3. Authorization: staff cannot approve
+  const staffApprove = await expectRejected(call('approveStatement', { statementId: sid }, 1, STAFF_TOKEN));
+  record('Staff cannot approve', staffApprove.rejected && /permission/i.test(staffApprove.message), staffApprove.message.slice(0, 160));
+
+  // 4. Approve
+  const before = await windowTotals();
+  const ap = await call('approveStatement', { statementId: sid, note: 'smoke test approval' });
+  const expected = { entries: 10, amountCents: 41000, brokerCents: 14200, agencyCents: 26800, suspenseCents: 8000, adjustmentsCents: -500 };
+  const apErr = Object.entries(expected).filter(([k, v]) => ap.totals[k] !== v).map(([k, v]) => `${k} ${ap.totals[k]} ≠ ${v}`);
+  record('Approve: plan totals', ap.status === 'approved' && apErr.length === 0,
+    `${ap.totals.entries} entries, ${$(ap.totals.amountCents)}; broker ${$(ap.totals.brokerCents)}, agency ${$(ap.totals.agencyCents)}, suspense ${$(ap.totals.suspenseCents)}, adjustments ${$(ap.totals.adjustmentsCents)}${apErr.length ? ` — ${apErr.join('; ')}` : ''}`);
+  const locked = await expectRejected(call('setLineMatch', { action: 'unmatch', statementId: sid, lineId: '00001' }));
+  record('Matching is locked after approval', locked.rejected, locked.message.slice(0, 160));
+  const staffPost = await expectRejected(call('postStatement', { statementId: sid }, 1, STAFF_TOKEN));
+  record('Staff cannot post', staffPost.rejected && /permission/i.test(staffPost.message), staffPost.message.slice(0, 160));
+
+  // 5. Post twice at the same time: exactly one succeeds
+  const both = await Promise.allSettled([call('postStatement', { statementId: sid }), call('postStatement', { statementId: sid })]);
+  const ok = both.filter((r) => r.status === 'fulfilled').length;
+  let entries = await ledgerFor();
+  record('Concurrent posting posts exactly once', ok === 1 && entries.length === 10, `${ok} of 2 calls succeeded; ${entries.length} ledger entries`);
+  const again = await expectRejected(call('postStatement', { statementId: sid }));
+  entries = await ledgerFor();
+  record('Posting again is refused (no duplicate entries)', again.rejected && entries.length === 10, `${again.message.slice(0, 120)}; ${entries.length} entries`);
+
+  // 6. Ledger content
+  const sum = (f) => entries.reduce((s, e) => s + f(e), 0);
+  const byLine = Object.fromEntries(entries.map((e) => [e.lineId ?? e.id, e]));
+  const susp = entries.filter((e) => e.level === 'suspense');
+  const adj = entries.filter((e) => e.level === 'carrier');
+  const l7 = byLine['00007'];
+  const l5 = byLine['00005'];
+  const contentOk = sum((e) => e.amountCents) === 41000 && sum((e) => e.brokerCents) === 14200 && sum((e) => e.agencyCents) === 26800
+    && entries.every((e) => e.brokerCents + e.agencyCents === e.amountCents && e.statementPeriod === '2026-10' && e.postingStatus === 'posted' && e.postingId === `${sid}__p1`)
+    && susp.length === 2 && susp.every((e) => e.policyId === null && e.brokerCents === 0)
+    && adj.length === 1 && adj[0].amountCents === -500 && adj[0].agencyCents === -500
+    && l7?.brokerShareBps === 3000 && l7?.brokerShareSource === 'policy' && l7?.brokerCents === -1350 && l7?.agencyCents === -3150 && l7?.classification === 'cancellation'
+    && l5?.policyId === 'SYN3B-P-DELTA' && l5?.brokerCents === 3600 && l5?.matchMethod === 'manual';
+  record('Ledger entries: amounts, allocations, suspense, adjustment, chargeback, period', contentOk,
+    `sum ${$(sum((e) => e.amountCents))}, broker ${$(sum((e) => e.brokerCents))}, agency ${$(sum((e) => e.agencyCents))}; suspense ${susp.length}; adjustment ${adj.length}; line 7 ${$(l7?.brokerCents)}/${$(l7?.agencyCents)} @${(l7?.brokerShareBps ?? 0) / 100}% ${l7?.brokerShareSource}`);
+  const stmtPosted = (await ref.get()).data();
+  record('Statement marked posted', stmtPosted.status === 'posted' && stmtPosted.postedCents === 41000, `${stmtPosted.status}, posted ${$(stmtPosted.postedCents)}`);
+
+  // 7. Reports: the rolling-12-month window moves by exactly the posted amounts
+  const afterPost = await windowTotals();
+  record('Rolling-12-month report includes the posting', afterPost.amount - before.amount === 41000 && afterPost.broker - before.broker === 14200,
+    `window ${WINDOW.start}–${WINDOW.end}: ${$(before.amount)} → ${$(afterPost.amount)} (+${$(afterPost.amount - before.amount)}); broker +${$(afterPost.broker - before.broker)}`);
+
+  // 8. Reversal
+  const staffRev = await expectRejected(call('reverseStatementPosting', { statementId: sid, reason: 'smoke' }, 1, STAFF_TOKEN));
+  record('Staff cannot reverse', staffRev.rejected && /permission/i.test(staffRev.message), staffRev.message.slice(0, 120));
+  const rv = await call('reverseStatementPosting', { statementId: sid, reason: 'smoke test: reversal' });
+  entries = await ledgerFor();
+  const originals = entries.filter((e) => !e.reversalOf);
+  const revs = entries.filter((e) => e.reversalOf);
+  const net = entries.reduce((s, e) => s + e.amountCents, 0);
+  const pairsOk = revs.length === 10 && originals.every((o) => o.postingStatus === 'reversed' && revs.some((r) => r.reversalOf === o.id && r.amountCents === -o.amountCents && r.brokerCents === -o.brokerCents));
+  const afterRev = await windowTotals();
+  const stmtRev = (await ref.get()).data();
+  record('Reversal: exact negative twins, report nets to zero, statement back in review', rv.reversedEntries === 10 && pairsOk && net === 0 && afterRev.amount === before.amount && afterRev.broker === before.broker && stmtRev.status === 'needs_review' && stmtRev.postedCents === 0,
+    `${revs.length} reversals; net ${$(net)}; window ${$(afterRev.amount)} (before posting ${$(before.amount)}); statement ${stmtRev.status}`);
+  const revAgain = await expectRejected(call('reverseStatementPosting', { statementId: sid, reason: 'again' }));
+  record('Reversing again is refused', revAgain.rejected, revAgain.message.slice(0, 120));
+
+  // 9. Correct and post again (next posting number, new entry IDs), then reverse to leave dev net zero
+  await call('approveStatement', { statementId: sid, note: 'smoke: re-approval' });
+  const p2 = await call('postStatement', { statementId: sid });
+  const second = (await ledgerFor()).filter((e) => e.postingId === `${sid}__p2` && !e.reversalOf);
+  record('Re-post after reversal uses posting 2 with new entries', p2.postingId === `${sid}__p2` && second.length === 10 && second.reduce((s, e) => s + e.amountCents, 0) === 41000, `${p2.postingId}: ${second.length} entries, ${$(second.reduce((s, e) => s + e.amountCents, 0))}`);
+  await call('reverseStatementPosting', { statementId: sid, reason: 'smoke test: cleanup' });
+
+  // 10. Retained commission
+  const requestId = `syn3b-smoke-${randomUUID()}`;
+  const staffRet = await expectRejected(call('recordRetainedCommission', { requestId, policyId: 'SYN3B-P-ZETA', statementPeriod: '2026-10', amountCents: 10000, classification: 'new_business', note: 'smoke' }, 1, STAFF_TOKEN));
+  const r1 = await call('recordRetainedCommission', { requestId, policyId: 'SYN3B-P-ZETA', statementPeriod: '2026-10', amountCents: 10000, transactionDate: '2026-10-05', classification: 'new_business', note: 'smoke: synthetic bind document' });
+  const r2 = await call('recordRetainedCommission', { requestId, policyId: 'SYN3B-P-ZETA', statementPeriod: '2026-10', amountCents: 10000, transactionDate: '2026-10-05', classification: 'new_business', note: 'smoke: synthetic bind document' });
+  const retDoc = (await db.collection('ledger').doc(r1.entryId).get()).data();
+  record('Retained commission: policy 30 % split, idempotent request, staff refused',
+    staffRet.rejected && r1.duplicate === false && r2.duplicate === true && r2.entryId === r1.entryId && retDoc.sourceType === 'retained' && retDoc.brokerCents === 3000 && retDoc.agencyCents === 7000 && retDoc.brokerShareSource === 'policy',
+    `entry ${r1.entryId}: ${$(retDoc.amountCents)} → broker ${$(retDoc.brokerCents)} / agency ${$(retDoc.agencyCents)}; second request duplicate=${r2.duplicate}; staff refused=${staffRet.rejected}`);
+  const rr = await call('reverseLedgerEntry', { entryId: r1.entryId, reason: 'smoke test: retained reversal' });
+  const rrDoc = (await db.collection('ledger').doc(rr.reversalId).get()).data();
+  const rrAgain = await expectRejected(call('reverseLedgerEntry', { entryId: r1.entryId, reason: 'again' }));
+  const stmtEntryRev = await expectRejected(call('reverseLedgerEntry', { entryId: second[0].id, reason: 'not allowed' }));
+  record('Retained reversal nets to zero; double reversal and single statement-entry reversal refused',
+    rrDoc.amountCents === -10000 && rrDoc.brokerCents === -3000 && rrAgain.rejected && stmtEntryRev.rejected, `reversal ${$(rrDoc.amountCents)}; again refused=${rrAgain.rejected}; statement entry refused=${stmtEntryRev.rejected}`);
+
+  // 11. Audit trail and data protection
+  const audit = (await db.collection('auditLog').where('entityId', '==', sid).get()).docs.map((d) => d.get('action'));
+  const count = (a) => audit.filter((x) => x === a).length;
+  const retAudit = (await db.collection('auditLog').where('entityId', '==', r1.entryId).get()).docs.map((d) => d.get('action'));
+  record('Audit: approvals, postings, reversals, retained', count('statement_approve') === 2 && count('statement_post') === 2 && count('statement_reverse') === 2 && retAudit.includes('retained_record') && retAudit.includes('ledger_reverse'),
+    `approve ${count('statement_approve')}, post ${count('statement_post')}, reverse ${count('statement_reverse')}; retained: ${retAudit.join(', ')}`);
+  const linesNow = new Map((await ref.collection('lines').get()).docs.map((d) => [d.id, extractedOnly(d.data())]));
+  const policiesNow = stable((await db.collection('policies').where('synthetic', '==', true).get()).docs.map((d) => [d.id, d.data()]));
+  record('Extracted lines and policies unchanged by posting', [...linesBefore].every(([id, h]) => linesNow.get(id) === h) && policiesNow === policiesBefore, `${linesNow.size} lines and synthetic policies compared field by field`);
+  const finalWindow = await windowTotals();
+  record('Dev reports left net zero for this run', finalWindow.amount === before.amount && finalWindow.broker === before.broker, `window ${$(finalWindow.amount)} (start ${$(before.amount)})`);
 }
 
 // ---------------------------------------------------------------- run
@@ -275,6 +415,8 @@ try {
   const where = needed.map((n) => `${n}: ${FUNCTIONS.get(n)?.region ?? 'MISSING'}`).join(', ');
   record(`Functions deployed in ${REGION}`, needed.every((n) => FUNCTIONS.get(n)?.region === REGION && FUNCTIONS.get(n)?.state === 'ACTIVE'), where);
   ID_TOKEN = await adminIdToken(cfg.apiKey);
+  WEB_API_KEY = cfg.apiKey;
+  STAFF_TOKEN = await adminIdToken(cfg.apiKey, 'ci-smoke-staff', 'staff');
   record('Signed in as synthetic admin', true, 'ci-smoke-admin (role admin, dev only)');
 
   // Dev settings for the test: AI on, current model, enough monthly calls. Dev project only.
@@ -315,7 +457,9 @@ try {
     record('Stored file is still blocked as a duplicate', r3.duplicate === true, `duplicate=${r3.duplicate}`);
   }
   // Stage 3B does not use Claude, so it runs even if the AI checks failed.
-  try { await stage3b(); } catch (err) { record('Stage 3B matching run', false, err instanceof Error ? err.message : String(err)); }
+  let ctx3b = null;
+  try { ctx3b = await stage3b(); } catch (err) { record('Stage 3B matching run', false, err instanceof Error ? err.message : String(err)); }
+  if (ctx3b) { try { await stage3c(ctx3b); } catch (err) { record('Stage 3C posting run', false, err instanceof Error ? err.message : String(err)); } }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
 }

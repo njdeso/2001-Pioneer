@@ -3,8 +3,7 @@ import { collection, doc, onSnapshot, query, where, type Query } from 'firebase/
 import {
   addMonths, brokerSplit, monthlyTotals, totalInWindow, totalsBy, totalsByBroker,
   type Broker, type Carrier, type Cents, type Client, type LedgerEntry, type Month, type Policy, type Settings,
-  UNASSIGNED_BROKER_ID,
-} from '@asm/shared';
+  UNASSIGNED_BROKER_ID, storedBrokerShare } from '@asm/shared';
 import { db } from './firebase';
 
 /**
@@ -99,8 +98,13 @@ export function DataProvider({ children }: { children: ReactNode }) {
       const entries = ledger.rows;
       const policyBroker = new Map(policies.rows.map((p) => [p.id, p.brokerId || UNASSIGNED_BROKER_ID]));
       const byBroker = totalsByBroker(entries, policyBroker, start, months);
-      let brokerShare = 0;
-      for (const [brokerId, gross] of byBroker) {
+      // Broker share = the allocation stored on each posted entry (Stage 3C: the policy's or broker's
+      // share at posting, chargebacks and reversals included). Entries without a stored allocation
+      // (none are created after Stage 3C) fall back to the policy's current broker's standard share.
+      const inWindowEntries = entries.filter((e) => (e.postingStatus === 'posted' || e.postingStatus === 'reversed') && e.statementPeriod >= start && e.statementPeriod <= addMonths(start, months - 1));
+      const legacy = inWindowEntries.filter((e) => typeof e.brokerCents !== 'number');
+      let brokerShare = storedBrokerShare(inWindowEntries.filter((e) => typeof e.brokerCents === 'number'));
+      for (const [brokerId, gross] of totalsByBroker(legacy, policyBroker, start, months)) {
         const b = brokerById.get(brokerId);
         if (b) brokerShare += brokerSplit(gross, b.shareBps).broker;
       }

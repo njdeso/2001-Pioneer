@@ -109,6 +109,17 @@ describe('statements (Firestore)', () => {
     await assertFails(setDoc(doc(admin(), 'statements/SYN-S1/lines/00001'), { paidCommissionCents: 999 }));
     await assertFails(getDoc(doc(noRole(), 'statements/SYN-S1')));
   });
+  it('Stage 3C: only the server posts — the browser cannot create, edit, reverse or delete ledger entries or approve/post statements', async () => {
+    await assertSucceeds(getDoc(doc(staff(), 'ledger/SYN-L1')));
+    await assertFails(setDoc(doc(admin(), 'ledger/SYN-S1__p1__00001'), { amountCents: 100, postingStatus: 'posted', statementPeriod: '2026-10' }));
+    await assertFails(setDoc(doc(admin(), 'ledger/SYN-L1'), { postingStatus: 'reversed' }, { merge: true }));
+    await assertFails(setDoc(doc(admin(), 'ledger/SYN-L1__rev'), { amountCents: -100, reversalOf: 'SYN-L1' }));
+    await assertFails(deleteDoc(doc(admin(), 'ledger/SYN-L1')));
+    await assertFails(setDoc(doc(admin(), 'statements/SYN-S1'), { status: 'approved' }, { merge: true }));
+    await assertFails(setDoc(doc(admin(), 'statements/SYN-S1'), { status: 'posted', postedCents: 100 }, { merge: true }));
+    await assertFails(setDoc(doc(staff(), 'ledger/retained__x'), { sourceType: 'retained', amountCents: 1 }));
+  });
+
   it('Stage 3B: match results and the matching summary are server-only, even for admin', async () => {
     const matchedLine = { paidCommissionCents: 100, match: { status: 'matched', method: 'manual', policyId: 'SYN-P1' } };
     await assertSucceeds(getDoc(doc(staff(), 'statements/SYN-S1/lines/00001')));

@@ -409,6 +409,7 @@ export const discardStatement = onCall(async (req) => {
     if (!snap.exists) throw new HttpsError('not-found', 'Statement not found.');
     if ((snap.get('postedCents') ?? 0) !== 0) throw new HttpsError('failed-precondition', 'A statement with posted lines cannot be discarded.');
     if (snap.get('status') === 'processing') throw new HttpsError('failed-precondition', 'The statement is being processed.');
+    if (['approved', 'posted'].includes(snap.get('status'))) throw new HttpsError('failed-precondition', 'An approved or posted statement cannot be discarded. Return it to review (or reverse it) first.');
     tx.update(ref, { status: 'discarded', discardReason: reason, discardedAt: FieldValue.serverTimestamp(), ...meta(actor, false) });
     tx.delete(db.collection('statementKeys').doc(String(snap.get('sha256'))));
     audit(tx, actor, { action: 'discard', entityType: 'statement', entityId: statementId, summary: `Statement discarded: ${reason}` });

@@ -1,9 +1,11 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
-import { CLASSIFICATION_LABELS, formatBps, formatMonth, type Client, type Policy } from '@asm/shared';
+import { CLASSIFICATION_LABELS, LEDGER_CLASSIFICATIONS, formatBps, formatMonth, parseMoneyToCents, type Client, type LedgerClassification, type LedgerEntry, type Policy } from '@asm/shared';
+import { api } from '../api';
+import { useAuth } from '../auth';
 import { useData } from '../data';
 import { ClientForm, PolicyForm } from '../forms';
-import { Badge, Button, Card, DataTable, Empty, Modal, Money, PageHeader, Stat, type Column } from '../ui';
+import { Badge, Button, Card, DataTable, Empty, ErrorNote, Field, Modal, Money, PageHeader, Select, Stat, TextInput, type Column } from '../ui';
 
 export function ClientsPage() {
   const { clients, policies, brokerById, revenue } = useData();
@@ -102,6 +104,10 @@ export function ClientDetailPage() {
 }
 
 function PolicyDetail({ policy, onClose, onEdit }: { policy: Policy; onClose: () => void; onEdit: () => void }) {
+  const { role } = useAuth();
+  const isAdmin = role === 'admin';
+  const [recording, setRecording] = useState(false);
+  const [reversing, setReversing] = useState<LedgerEntry | null>(null);
   const { carrierById, brokerById, revenue } = useData();
   const entries = (revenue?.entries ?? []).filter((e) => e.policyId === policy.id)
     .sort((a, b) => a.statementPeriod.localeCompare(b.statementPeriod));
@@ -131,20 +137,87 @@ function PolicyDetail({ policy, onClose, onEdit }: { policy: Policy; onClose: ()
         <p className="text-sm text-slate-500">No commission posted for this policy in the snapshot window yet.</p>
       ) : (
         <table className="min-w-full text-sm">
-          <thead><tr className="text-left text-xs uppercase text-slate-500"><th className="py-1">Statement month</th><th>Type</th><th>Source</th><th className="text-right">Amount</th></tr></thead>
+          <thead><tr className="text-left text-xs uppercase text-slate-500"><th className="py-1">Statement month</th><th>Type</th><th>Source</th><th className="text-right">Amount</th><th className="text-right">Broker</th><th className="text-right">Agency</th><th>Status</th><th /></tr></thead>
           <tbody>
             {entries.map((e) => (
               <tr key={e.id} className="border-t border-slate-100">
                 <td className="py-1">{formatMonth(e.statementPeriod)}</td>
                 <td>{CLASSIFICATION_LABELS[e.classification]}</td>
-                <td>{e.sourceType}</td>
+                <td>{e.reversalOf ? 'reversal' : e.sourceType}</td>
                 <td className="text-right"><Money cents={e.amountCents} /></td>
+                <td className="text-right">{typeof e.brokerCents === 'number' ? <Money cents={e.brokerCents} /> : '—'}{e.brokerShareSource === 'policy' ? <span className="text-xs text-slate-500"> (policy %)</span> : null}</td>
+                <td className="text-right">{typeof e.agencyCents === 'number' ? <Money cents={e.agencyCents} /> : '—'}</td>
+                <td>{e.postingStatus === 'reversed' ? <Badge>Reversed</Badge> : e.reversalOf ? <Badge tone="amber">Reversal</Badge> : <Badge tone="green">Posted</Badge>}</td>
+                <td className="text-right">{isAdmin && e.sourceType !== 'statement' && !e.reversalOf && e.postingStatus === 'posted' && <Button size="sm" variant="ghost" onClick={() => setReversing(e)}>Reverse…</Button>}</td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
-      <div className="mt-5 flex justify-end"><Button onClick={onEdit}>Edit policy</Button></div>
+      <div className="mt-5 flex justify-end gap-2">
+        {isAdmin && <Button variant="secondary" onClick={() => setRecording(true)}>Record retained commission</Button>}
+        <Button onClick={onEdit}>Edit policy</Button>
+      </div>
+      {recording && <RetainedForm policy={policy} onClose={() => setRecording(false)} />}
+      {reversing && <ReverseEntryForm entry={reversing} onClose={() => setReversing(null)} />}
+    </Modal>
+  );
+}
+
+/**
+ * Retained commission: commission the agency kept out of premium (e.g. from a bind document), posted
+ * directly to the ledger and split by the policy's applicable broker share. Admin only; each form
+ * submission has its own request ID, so a double click or retry can never post it twice.
+ */
+function RetainedForm({ policy, onClose }: { policy: Policy; onClose: () => void }) {
+  const { brokerById } = useData();
+  const [requestId] = useState(() => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`));
+  const [f, setF] = useState({ month: new Date().toISOString().slice(0, 7), amount: '', date: '', classification: 'new_business' as LedgerClassification, note: '' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const broker = brokerById.get(policy.brokerId);
+  const share = policy.brokerId === 'UNASSIGNED' ? 0 : policy.brokerShareBps ?? broker?.shareBps ?? 0;
+  async function save() {
+    setError(null);
+    let cents: number;
+    try { cents = parseMoneyToCents(f.amount); } catch { setError('Enter an amount like 245.00 (negative for a return).'); return; }
+    if (!cents) { setError('Enter a non-zero amount.'); return; }
+    if (f.note.trim().length < 3) { setError('Add a note (e.g. the bind document reference).'); return; }
+    setBusy(true);
+    try {
+      await api.recordRetainedCommission({ requestId, policyId: policy.id, statementPeriod: f.month, amountCents: cents, transactionDate: f.date || null, classification: f.classification, note: f.note.trim() });
+      onClose();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not record'); } finally { setBusy(false); }
+  }
+  return (
+    <Modal open title={`Retained commission — ${policy.policyNumber}`} onClose={onClose}>
+      <p className="mb-3 text-sm text-slate-600">Records commission the agency retained out of premium. It posts to the ledger immediately for the month you choose and is split with {broker?.name ?? 'the broker'} at {formatBps(share)}. It can be reversed later with a reason.</p>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Revenue month"><TextInput type="month" value={f.month} onChange={(e) => setF({ ...f, month: e.target.value })} /></Field>
+        <Field label="Amount retained"><TextInput value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} inputMode="decimal" placeholder="245.00" /></Field>
+        <Field label="Date (optional)"><TextInput type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} /></Field>
+        <Field label="Type"><Select value={f.classification} onChange={(e) => setF({ ...f, classification: e.target.value as LedgerClassification })} options={LEDGER_CLASSIFICATIONS.map((c) => ({ value: c, label: CLASSIFICATION_LABELS[c] }))} /></Field>
+        <Field label="Note (required)" className="col-span-2"><TextInput value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} placeholder="Bind document / reference" /></Field>
+      </div>
+      <ErrorNote message={error} />
+      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button disabled={busy} onClick={() => void save()}>{busy ? 'Posting…' : 'Post retained commission'}</Button></div>
+    </Modal>
+  );
+}
+
+function ReverseEntryForm({ entry, onClose }: { entry: LedgerEntry; onClose: () => void }) {
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <Modal open title="Reverse ledger entry" onClose={onClose}>
+      <p className="text-sm text-slate-600">Creates an exact negative entry (<Money cents={-entry.amountCents} />). The original stays, marked reversed.</p>
+      <Field label="Reason (required)" className="mt-3"><TextInput value={reason} onChange={(e) => setReason(e.target.value)} autoFocus /></Field>
+      <ErrorNote message={error} />
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button variant="danger" disabled={busy || reason.trim().length < 3} onClick={() => { setBusy(true); api.reverseLedgerEntry(entry.id, reason).then(onClose, (e) => { setError(e instanceof Error ? e.message : 'Failed'); setBusy(false); }); }}>Reverse</Button>
+      </div>
     </Modal>
   );
 }

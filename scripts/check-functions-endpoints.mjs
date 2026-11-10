@@ -53,7 +53,7 @@ for (const f of ['.env.example', 'apps/admin/.env.dev.example']) {
 const smoke = readFileSync('scripts/smoke-dev.mjs', 'utf8');
 need(smoke.includes(`const REGION = '${REGION}'`), `scripts/smoke-dev.mjs REGION must be ${REGION}`);
 // Callable protocol in the smoke test: POST, JSON {data}, Firebase ID token as Bearer, URL from the Functions API.
-need(/method: 'POST'/.test(smoke) && /JSON\.stringify\(\{ data \}\)/.test(smoke) && /authorization: `Bearer \$\{ID_TOKEN\}`/.test(smoke),
+need(/method: 'POST'/.test(smoke) && /JSON\.stringify\(\{ data \}\)/.test(smoke) && /authorization: `Bearer \$\{(ID_TOKEN|token)\}`/.test(smoke),
   'smoke test must use the callable protocol (POST, {"data": …}, Bearer ID token)');
 need(/cloudfunctions\.googleapis\.com\/v2\/projects/.test(smoke) && /fetch\(fn\.url/.test(smoke), 'smoke test must call the URL reported by the Cloud Functions API');
 
