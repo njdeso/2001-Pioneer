@@ -117,7 +117,8 @@ export interface MatchedTerm { termId: string; effectiveDate: string; endDate: s
  * Terms come from policies/{policyId}/terms. Lines without a match keep no term.
  */
 export function withTerm<M extends LineMatch>(m: M, lineEffectiveDate: string | null | undefined, terms: PolicyTerm[] | undefined): M {
-  if (m.status !== 'matched' || !m.policyId) return { ...m, term: null, termResolution: undefined };
+  // Firestore rejects undefined values: an unmatched line has no termResolution field at all.
+  if (m.status !== 'matched' || !m.policyId) { const { termResolution: _r, ...rest } = m; return { ...rest, term: null } as M; }
   const { term, resolution } = resolveTerm(lineEffectiveDate, terms ?? []);
   return { ...m, term: term ? { termId: term.id, effectiveDate: term.effectiveDate, endDate: termEnd(term), status: term.status } : null, termResolution: resolution };
 }

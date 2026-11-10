@@ -83,3 +83,25 @@ test('posted entries carry their term; amounts and splits are exactly as before'
   assert.deepEqual(tot(plan), tot(noTerms));
   assert.notEqual(planFingerprint(plan), planFingerprint(noTerms), 'a term change after approval is detected');
 });
+
+/** Firestore refuses undefined anywhere in a document (regression: runStatementMatching failed with
+ *  "Cannot use undefined as a Firestore value (found in field match.termResolution)"). */
+function undefinedPaths(v: unknown, path = ''): string[] {
+  if (v === undefined) return [path || '(root)'];
+  if (v === null || typeof v !== 'object') return [];
+  return Object.entries(v as Record<string, unknown>).flatMap(([k, x]) => undefinedPaths(x, path ? `${path}.${k}` : k));
+}
+
+test('regression: match results written to Firestore never contain undefined (matched, ambiguous, unmatched, no terms)', () => {
+  const cases = [
+    withTerm(autoMatchLine(line('1', 1, '2026-07-03', 100), ctx), '2026-07-03', terms),                    // matched, term found
+    withTerm(autoMatchLine(line('2', 2, '2026-09-01', 100), ctx), '2026-09-01', terms),                    // matched, not determined
+    withTerm(autoMatchLine(line('3', 3, '2026-07-03', 100), ctx), '2026-07-03', []),                       // matched, no terms
+    withTerm(autoMatchLine({ ...line('4', 4, '2026-07-03', 100), policyNumberRaw: 'NOPE-1' }, ctx), '2026-07-03', terms), // unmatched
+    withTerm(autoMatchLine({ ...line('5', 5, '2026-07-03', 100), insuredName: 'OTHER,Z' }, ctx), null, terms),           // ambiguous (name conflict)
+  ];
+  for (const m of cases) assert.deepEqual(undefinedPaths(m), [], `${m.status}: ${undefinedPaths(m).join(', ')}`);
+  assert.equal(cases[3].status, 'unmatched');
+  assert.ok(!('termResolution' in cases[3]));
+  assert.equal(cases[4].status, 'ambiguous');
+});
