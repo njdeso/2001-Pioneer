@@ -34,6 +34,11 @@ export async function resolvePreviewEnv(env, fetchImpl = fetch) {
   if (env.VITE_FIREBASE_API_KEY && env.VITE_FIREBASE_API_KEY.trim() === apiKey) fail('DEV_FIREBASE_API_KEY equals the VITE_FIREBASE_API_KEY used for production builds. The preview was NOT built.');
 
   // Ask Firebase Auth which project this API key belongs to. Must be the dev project.
+  // Identity Toolkit reports the project by NUMBER in "projectId" (observed: "994437988131" for
+  // pioneer-2001-dev), so accept exactly the dev project's number or ID and nothing else.
+  // The pairing pioneer-2001-dev = 994437988131 is from Firebase itself: the Management API's web app
+  // config for projects/pioneer-2001-dev (appId 1:994437988131:web:…) and the Workload Identity
+  // provider created from `gcloud projects describe pioneer-2001-dev` (projects/994437988131/…).
   let projectId = null;
   try {
     const r = await fetchImpl(`https://identitytoolkit.googleapis.com/v1/projects?key=${encodeURIComponent(apiKey)}`, {
@@ -46,7 +51,10 @@ export async function resolvePreviewEnv(env, fetchImpl = fetch) {
     if (e instanceof PreviewConfigError) throw e;
     fail('Could not verify DEV_FIREBASE_API_KEY with Firebase (network error). The preview was NOT built.');
   }
-  if (projectId !== DEV_PROJECT_ID) fail(`DEV_FIREBASE_API_KEY belongs to project "${projectId ?? 'unknown'}", not ${DEV_PROJECT_ID}. The preview was NOT built.`);
+  const reported = projectId === null || projectId === undefined ? '' : String(projectId).trim();
+  if (reported === PROD_PROJECT_ID || (reported !== DEV_PROJECT_ID && reported !== DEV_PROJECT_NUMBER)) {
+    fail(`DEV_FIREBASE_API_KEY belongs to project "${reported || 'unknown'}", not ${DEV_PROJECT_ID} (number ${DEV_PROJECT_NUMBER}). The preview was NOT built.`);
+  }
 
   return {
     VITE_FIREBASE_API_KEY: apiKey,

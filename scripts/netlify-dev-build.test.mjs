@@ -28,6 +28,24 @@ test('an app ID or API key from another project is refused', async () => {
   await refuses({ ...ok, VITE_FIREBASE_API_KEY: 'dev-key-synthetic' }, firebase('pioneer-2001-dev'), /equals the VITE_FIREBASE_API_KEY used for production/);
 });
 
+test('regression: Firebase reports the dev project by NUMBER (994437988131) — accepted', async () => {
+  // Exact production failure: "DEV_FIREBASE_API_KEY belongs to project '994437988131', not pioneer-2001-dev."
+  const env = await resolvePreviewEnv(ok, firebase('994437988131'));
+  assert.equal(env.VITE_FIREBASE_PROJECT_ID, 'pioneer-2001-dev');
+  // Numeric JSON value, in case the API ever returns a number instead of a string.
+  const asNumber = async () => new Response(JSON.stringify({ projectId: 994437988131 }), { status: 200 });
+  assert.equal((await resolvePreviewEnv(ok, asNumber)).VITE_FIREBASE_PROJECT_ID, 'pioneer-2001-dev');
+});
+
+test('regression: any other project, by ID or number, is still refused', async () => {
+  await refuses(ok, firebase('pioneer-285cf'), /belongs to project "pioneer-285cf"/);
+  await refuses(ok, firebase('123456789012'), /belongs to project "123456789012"/);       // another project number (e.g. production's)
+  await refuses(ok, firebase('9944379881310'), /belongs to project "9944379881310"/);     // near miss
+  await refuses(ok, firebase('99443798813'), /belongs to project "99443798813"/);
+  await refuses(ok, firebase(''), /belongs to project "unknown"/);
+  await refuses(ok, async () => new Response(JSON.stringify({}), { status: 200 }), /belongs to project "unknown"/);
+});
+
 test('valid dev values produce an explicit dev-only build environment', async () => {
   const env = await resolvePreviewEnv({ ...ok, VITE_FIREBASE_PROJECT_ID: 'pioneer-285cf' }, firebase('pioneer-2001-dev'));
   assert.equal(env.VITE_FIREBASE_PROJECT_ID, 'pioneer-2001-dev');
