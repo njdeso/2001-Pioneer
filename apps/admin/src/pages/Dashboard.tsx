@@ -56,7 +56,7 @@ export function DashboardPage() {
 
       <Card title="Monthly commission (statement period)">
         {posted === 0 ? (
-          <p className="text-sm text-slate-500">Monthly figures appear here once commission statements are posted (Phase 4). Every bar is the sum of posted ledger entries for that month.</p>
+          <p className="text-sm text-slate-500">Monthly figures appear here once commission statements are approved and posted (Statements → review → Approve → Post). Every bar is the sum of posted ledger entries for that statement month.</p>
         ) : (
           <div className="flex h-48 items-end gap-2">
             {monthly.map(([m, v]) => (

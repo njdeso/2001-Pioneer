@@ -83,3 +83,15 @@ See "Dev authentication setup" in the PR conversation. In short:
 - [ ] **Policy form:** edit a synthetic policy. The broker share field saves, and blank = the broker's standard share.
 
 To start over: `SEED_RESET_3B=1 node scripts/seed-dev.mjs dev`. This runs only against dev and is refused anywhere else.
+
+## Stage 3C manual checklist (PR #4 preview: https://deploy-preview-4--2001-pioneer.netlify.app, DEV banner = pioneer-2001-dev)
+- [ ] Open "Stage 3B manual test statement". **Approval & posting** shows *Not ready* and lists the ambiguous and unreviewed lines.
+- [ ] Resolve them (match, or *Mark unmatched*). *Ready to approve* appears, with totals for commission, broker, agency, suspense and adjustments.
+- [ ] **Approve for posting.** Status *Approved*; matching buttons are locked.
+- [ ] **Return to review** (with a reason) works; approve again.
+- [ ] **Post to ledger.** Status *Posted*. The Dashboard (snapshot window including Oct 2026) rises by exactly the posted amount; broker share = posted broker total.
+- [ ] Open a matched policy. Its commission history shows the entry with broker and agency amounts.
+- [ ] **Reverse posting…** (reason). The Dashboard returns to the earlier figures; the statement is back in review. Approve and post again.
+- [ ] Policy → **Record retained commission** ($100.00 on the Zeta policy). Broker $30.00 / agency $70.00 (policy 30 %). **Reverse…** it.
+- [ ] Settings → Audit log shows approve, post, reverse, retained and reversal entries.
+- [ ] Signed in as a staff (non-admin) user, the approve, post and reverse buttons are not offered.

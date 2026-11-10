@@ -63,10 +63,17 @@ import json,sys
 f=json.load(sys.stdin).get("fields",{})
 v=lambda k: list(f.get(k,{}).values())[0] if k in f else None
 print("  aiEnabled: {}   aiModel: {}   aiMonthlyCallLimit: {}".format(v("aiEnabled"), v("aiModel"), v("aiMonthlyCallLimit")))
-print("  CHECK:", "OK - claude-sonnet-5-5" if v("aiModel")=="claude-sonnet-5-5" else "ACTION - set Model to claude-sonnet-5-5 in Settings after the deploy")'
+print("  CHECK:", "OK - claude-sonnet-5-5" if v("aiModel")=="claude-sonnet-5-5" else "ACTION - set Model to claude-sonnet-5-5 in Settings after the deploy")
+start=v("snapshotStartMonth"); months=int(v("snapshotMonths") or 12)
+if start:
+    y,m=map(int,start.split("-")); e=(y*12+m-1)+months-1; end="%04d-%02d"%(e//12, e%12+1)
+    print("  snapshot window: {} to {} ({} months)".format(start, end, months))
+    print("  CHECK:", "OK - October 2026 is inside the window" if start<="2026-10"<=end else "ACTION - October 2026 is OUTSIDE the window: postings for it will not show on the Dashboard until the window (Settings) includes 2026-10")
+else:
+    print("  CHECK: ACTION - no snapshot window set (Settings)")'
   echo
   echo "== Record counts"
-  for c in clients policies statements statementKeys carriers brokers auditLog; do printf '  %-16s %s\n' "$c" "$(count "$c")"; done
+  for c in clients policies statements statementKeys carriers brokers ledger auditLog; do printf '  %-16s %s\n' "$c" "$(count "$c")"; done
   printf '  %-16s %s\n' "statement lines" "$(count lines true)"
   echo
   echo "== Stored statement PDFs"
@@ -96,7 +103,7 @@ print("  total: {}".format(len(rows)))'
 
 if [ "$LABEL" = "after" ] && [ -f preflight-before.txt ]; then
   echo; echo "== Comparison with preflight-before.txt (counts must not go down)"
-  for k in clients policies statements statementKeys carriers brokers "statement lines"; do
+  for k in clients policies statements statementKeys carriers brokers ledger "statement lines"; do
     b="$(grep -E "^  ${k} +[0-9]+$" preflight-before.txt | awk '{print $NF}')"; a="$(grep -E "^  ${k} +[0-9]+$" preflight-after.txt | awk '{print $NF}')"
     flag="OK"; [ -n "$b" ] && [ -n "$a" ] && [ "$a" -lt "$b" ] && flag="DECREASED — stop and investigate"
     printf '  %-16s before %-6s after %-6s %s\n' "$k" "${b:-?}" "${a:-?}" "$flag"

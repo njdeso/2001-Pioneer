@@ -1,4 +1,6 @@
-# Release: Stage 3A + AI statement-reader repair
+# Release: Stage 3A + AI statement-reader repair (DONE — deployed)
+
+> Stage 3A is in production. The next release (Stage 3B + 3C) is described in [RELEASE-3B-3C.md](RELEASE-3B-3C.md).
 
 Goal: process the **October 2026** statement and recover the **April 2026** statement in production.
 
