@@ -65,6 +65,8 @@ export async function resolvePreviewEnv(env, fetchImpl = fetch) {
     VITE_FUNCTIONS_REGION: 'us-central1',
     VITE_USE_EMULATORS: 'false',
     VITE_DEPLOY_CONTEXT: ctx,
+    // Netlify sets COMMIT_REF; shown in the DEV banner and in error messages so a stale build is obvious.
+    VITE_COMMIT_REF: String(env.COMMIT_REF ?? '').trim(),
   };
 }
 

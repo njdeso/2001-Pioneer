@@ -47,6 +47,12 @@ jobs:
       - name: Dev-only seeding guard refuses production
         run: node --test scripts/lib/dev-guard.test.mjs
 
+      - name: Dev ledger audit is read-only and catches unbalanced reversals
+        run: node --test scripts/audit-dev-ledger.test.mjs
+
+      - name: Ledger and posted statements are append-only (smoke, seed, functions)
+        run: node --test scripts/ledger-append-only.test.mjs
+
       - name: npm run typecheck
         run: npm run typecheck
 

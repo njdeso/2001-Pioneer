@@ -36,12 +36,13 @@ export function DashboardPage() {
       <PageHeader
         title="Dashboard"
         subtitle={settings ? `Snapshot window ${formatWindow(settings.snapshotStartMonth, settings.snapshotMonths)} · revenue month = statement period` : 'Set the snapshot window in Settings'}
+        actions={<Link to="/ledger" className="text-sm text-ink hover:underline">Ledger detail &amp; export →</Link>}
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Stat tone="gold" label="Trailing 12-month commission" value={<Money cents={revenue?.total ?? 0} />}
           sub={posted ? `${posted.toLocaleString()} posted ledger entries` : 'No statements posted yet'} />
-        <Stat label="Broker share (internal)" value={<Money cents={revenue?.brokerShare ?? 0} />} sub="Per each broker's share %" />
+        <Stat label="Broker share (internal)" value={<Money cents={revenue?.brokerShare ?? 0} />} sub="As allocated when posted" />
         <Stat label="Agency net (internal)" value={<Money cents={revenue?.agencyNet ?? 0} />} sub="Gross minus broker share" />
         <Stat label="Average month" value={<Money cents={revenue ? Math.trunc(revenue.total / revenue.months) : 0} />} sub="Window total ÷ months (display only)" />
       </div>
@@ -56,7 +57,7 @@ export function DashboardPage() {
 
       <Card title="Monthly commission (statement period)">
         {posted === 0 ? (
-          <p className="text-sm text-slate-500">Monthly figures appear here once commission statements are posted (Phase 4). Every bar is the sum of posted ledger entries for that month.</p>
+          <p className="text-sm text-slate-500">Monthly figures appear here once commission statements are approved and posted (Statements → review → Approve → Post). Every bar is the sum of posted ledger entries for that statement month.</p>
         ) : (
           <div className="flex h-48 items-end gap-2">
             {monthly.map(([m, v]) => (
@@ -91,7 +92,7 @@ export function DashboardPage() {
           <Progress done={carriers.length > 0} label="Carriers and wholesalers set up" to="/carriers" />
           <Progress done={brokers.length > 1} label="Brokers set up" to="/brokers" />
           <Progress done={clients.length > 0} label="Client list loaded (Phase 2 import)" to="/clients" />
-          <Progress done={posted > 0} label="Commission statements posted (Phases 3–4)" />
+          <Progress done={posted > 0} label="Commission statements posted" to="/ledger" />
         </ul>
       </Card>
     </div>

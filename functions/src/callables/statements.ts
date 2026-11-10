@@ -223,6 +223,11 @@ async function claimForProcessing(id: string, actor: Actor): Promise<DocumentDat
       throw new HttpsError('failed-precondition', `This statement is ${status}.`);
     }
     if ((snap.get('postedCents') ?? 0) !== 0) throw new HttpsError('failed-precondition', 'Lines from this statement have been posted.');
+    // A statement that was ever posted (even if since reversed) keeps its extracted lines: they are the
+    // source of ledger entries in the audit trail, and re-reading would delete and rewrite them.
+    if ((snap.get('postingSeq') ?? 0) > 0 || ((snap.get('reversals') as unknown[] | undefined) ?? []).length > 0) {
+      throw new HttpsError('failed-precondition', 'This statement has posting history, so its extracted lines are kept as the source of those ledger entries. To read the file again, discard this statement and upload the file as a new statement.');
+    }
     tx.update(ref, { status: 'processing', ...meta(actor, false) });
     return snap.data()!;
   });
@@ -409,6 +414,7 @@ export const discardStatement = onCall(async (req) => {
     if (!snap.exists) throw new HttpsError('not-found', 'Statement not found.');
     if ((snap.get('postedCents') ?? 0) !== 0) throw new HttpsError('failed-precondition', 'A statement with posted lines cannot be discarded.');
     if (snap.get('status') === 'processing') throw new HttpsError('failed-precondition', 'The statement is being processed.');
+    if (['approved', 'posted'].includes(snap.get('status'))) throw new HttpsError('failed-precondition', 'An approved or posted statement cannot be discarded. Return it to review (or reverse it) first.');
     tx.update(ref, { status: 'discarded', discardReason: reason, discardedAt: FieldValue.serverTimestamp(), ...meta(actor, false) });
     tx.delete(db.collection('statementKeys').doc(String(snap.get('sha256'))));
     audit(tx, actor, { action: 'discard', entityType: 'statement', entityId: statementId, summary: `Statement discarded: ${reason}` });

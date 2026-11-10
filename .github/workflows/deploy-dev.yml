@@ -19,12 +19,35 @@
 #
 # Trigger: push the commit to test to the "deploy/dev" branch.
 # Until the GCP_WIF_PROVIDER / GCP_DEV_SERVICE_ACCOUNT variables exist, it skips with a notice.
+#
+# Every run starts with a READ-ONLY ledger audit of the existing dev data (scripts/audit-dev-ledger.mts),
+# before anything is deployed, seeded or smoke-tested. If the audit finds an error, the run stops there
+# and nothing in dev changes, so the evidence is preserved.
+# Audit only (no deploy, no seed, no smoke test, no writes):
+#   - Actions → "Deploy to dev" → Run workflow → branch deploy/dev, mode "audit-only"; or
+#   - push to deploy/dev with "[audit-only]" in the head commit message.
+# Audit artifacts (JSON + CSV of the synthetic dev ledger) leave out staff email addresses: this
+# repository is public.
 name: Deploy to dev (pioneer-2001-dev)
 
 on:
   push:
     branches: [deploy/dev]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'deploy = audit, deploy, seed, smoke test, audit again. audit-only = read-only ledger audit. diagnose = audit + read-only diagnostics (functions, endpoints, request logs, statements). audit-only and diagnose deploy and change nothing.'
+        type: choice
+        options: [deploy, audit-only, diagnose]
+        default: deploy
+      focus:
+        description: 'Optional: posting or statement ID prefixes to list in the audit summary (comma-separated). Blank = all postings.'
+        type: string
+        default: ''
+      dd_period_start:
+        description: 'Optional (YYYY-MM): also build the due-diligence summary for the 12 months starting here, read-only, without changing Settings.'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -45,6 +68,10 @@ jobs:
       DEV_PROJECT_ID: pioneer-2001-dev
       WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
       DEV_SA: ${{ vars.GCP_DEV_SERVICE_ACCOUNT }}
+      # audit-only / diagnose: chosen in Run workflow, or "[audit-only]" / "[diagnose]" in the pushed commit message.
+      RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (contains(github.event.head_commit.message, '[audit-only]') && 'audit-only' || (contains(github.event.head_commit.message, '[diagnose]') && 'diagnose' || 'deploy')) }}
+      AUDIT_FOCUS: ${{ github.event_name == 'workflow_dispatch' && inputs.focus || '' }}
+      AUDIT_DD_START: ${{ github.event_name == 'workflow_dispatch' && inputs.dd_period_start || '' }}
     steps:
       - name: Check for Workload Identity configuration
         id: cfg
@@ -58,7 +85,10 @@ jobs:
             *@"$DEV_PROJECT_ID".iam.gserviceaccount.com) ;;
             *) echo "::error::GCP_DEV_SERVICE_ACCOUNT must be a service account of $DEV_PROJECT_ID."; exit 1 ;;
           esac
+          case "$RUN_MODE" in deploy|audit-only|diagnose) ;; *) echo "::error::Unknown mode $RUN_MODE"; exit 1 ;; esac
+          echo "Mode: $RUN_MODE"
           echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "deploy=$([ "$RUN_MODE" = deploy ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - if: steps.cfg.outputs.ready == 'true'
         uses: actions/checkout@v4
@@ -79,7 +109,7 @@ jobs:
           test "$(node -p "JSON.parse(require('fs').readFileSync('.firebaserc', 'utf8')).projects.dev")" = "$DEV_PROJECT_ID"
 
       - name: Unit tests
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         run: npm run test
 
       - name: Authenticate to Google Cloud (Workload Identity Federation, no key)
@@ -96,14 +126,107 @@ jobs:
         if: steps.cfg.outputs.ready == 'true'
         run: node scripts/assert-dev-project.mjs
 
-      - name: Owner email for dev
+      # Read-only. Runs against the EXISTING dev ledger before any deploy, seed or smoke test.
+      # A failure here stops the run, so no later step can change the data being examined.
+      - name: Ledger audit BEFORE any change (read-only)
         if: steps.cfg.outputs.ready == 'true'
+        env:
+          AUDIT_LABEL: Ledger audit before any change (read-only)
+          AUDIT_OUT_DIR: audit-out/before
+        run: npx tsx scripts/audit-dev-ledger.mts dev
+
+      - name: Upload pre-change audit (JSON, CSV; no email addresses)
+        if: always() && steps.cfg.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-audit-before-${{ github.run_id }}
+          path: audit-out/before
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Read-only: lists deployed functions, probes each callable endpoint without credentials (an existing
+      # callable answers 401/400 JSON; a missing one 404), reads the last 24 h of request logs, and checks
+      # the synthetic statements and every record they refer to. Nothing is deployed or written.
+      - name: Dev diagnostics (read-only)
+        if: steps.cfg.outputs.ready == 'true' && env.RUN_MODE == 'diagnose'
+        continue-on-error: true
+        run: |
+          set -u
+          P="$DEV_PROJECT_ID"
+          SINCE=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
+          {
+            echo "### Deployed functions in $P (us-central1)"
+            echo '```'
+            gcloud functions list --project "$P" --regions us-central1 --format='table(name.basename(), state, updateTime)' 2>&1 | head -60
+            echo '```'
+            echo "### Callable endpoint probe (no credentials)"
+            echo '```'
+            for f in approveStatement unapproveStatement postStatement reverseStatementPosting recordRetainedCommission reverseLedgerEntry runStatementMatching setLineMatch processStatement doesNotExistProbe; do
+              code=$(curl -s -o /tmp/b -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"data":{}}' "https://us-central1-$P.cloudfunctions.net/$f")
+              printf '%-26s %s %s\n' "$f" "$code" "$(head -c 110 /tmp/b | tr '\n' ' ')"
+            done
+            echo '```'
+            echo "### Browser-style check of EVERY deployed function: CORS preflight from the dev site, then POST"
+            echo '```'
+            ORIGIN=https://deploy-dev--2001-pioneer.netlify.app
+            for f in $(gcloud functions list --project "$P" --regions us-central1 --format='value(name.basename())' 2>/dev/null); do
+              pre=$(curl -s -o /dev/null -D /tmp/h -w '%{http_code}' -X OPTIONS -H "Origin: $ORIGIN" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' "https://us-central1-$P.cloudfunctions.net/$f")
+              acao=$(grep -i '^access-control-allow-origin:' /tmp/h | tr -d '\r' | cut -d' ' -f2)
+              post=$(curl -s -o /tmp/b -D /tmp/h2 -w '%{http_code}' -X POST -H "Origin: $ORIGIN" -H 'Content-Type: application/json' -d '{"data":{}}' "https://us-central1-$P.cloudfunctions.net/$f")
+              acao2=$(grep -i '^access-control-allow-origin:' /tmp/h2 | tr -d '\r' | cut -d' ' -f2)
+              svc=$(echo "$f" | tr 'A-Z' 'a-z')
+              inv=$(gcloud run services get-iam-policy "$svc" --project "$P" --region us-central1 --format='value(bindings.members)' --flatten=bindings --filter='bindings.role:roles/run.invoker' 2>&1 | tr '\n' ' ' | cut -c1-60)
+              printf '%-26s preflight %s acao=%-38s post %s acao=%-38s invoker=%s %s\n' "$f" "$pre" "${acao:--}" "$post" "${acao2:--}" "${inv:--}" "$(head -c 70 /tmp/b | tr '\n' ' ')"
+            done
+            echo '```'
+            echo "### savesettings requests and errors since $SINCE"
+            echo '```'
+            gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"savesettings\" AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
+              --format='table(timestamp, severity, httpRequest.requestMethod, httpRequest.status, httpRequest.requestSize, httpRequest.responseSize, textPayload, jsonPayload.message)' 2>&1 | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | head -60
+            echo '```'
+            echo "### HTTP 404 responses since $SINCE"
+            echo '```'
+            gcloud logging read "httpRequest.status=404 AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
+              --format='table(timestamp, resource.type, resource.labels.service_name, httpRequest.requestMethod, httpRequest.requestUrl)' 2>&1 | head -60
+            echo '```'
+            echo "### approvestatement requests and errors since $SINCE"
+            echo '```'
+            gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"approvestatement\" AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
+              --format='table(timestamp, severity, httpRequest.status, textPayload, jsonPayload.message)' 2>&1 | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | head -60
+            echo '```'
+            echo "### Web app builds (public pages, read-only GET): Firebase project, region and functions in the bundle"
+            echo '```'
+            for site in deploy-dev--2001-pioneer deploy-preview-4--2001-pioneer deploy-preview-3--2001-pioneer; do
+              base="https://$site.netlify.app"
+              code=$(curl -s -o /tmp/index.html -w '%{http_code}' "$base/")
+              js=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/index.html | head -1)
+              echo "$site  HTTP $code  bundle ${js:-none}  $(curl -sI "$base/" | grep -iE '^(last-modified|age):' | tr -d '\r' | tr '\n' ' ')"
+              if [ -n "$js" ]; then
+                curl -s "$base$js" -o /tmp/b.js
+                echo "  projectId values: $(grep -oE 'projectId:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
+                echo "  authDomain:       $(grep -oE 'authDomain:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
+                echo "  deploy context:   $(grep -oE '"(deploy-preview|branch-deploy|production)"' /tmp/b.js | sort -u | tr '\n' ' ')"
+                for k in pioneer-2001-dev us-central1 cloudfunctions.net approveStatement postStatement runStatementMatching 'Due Diligence Package' 'Ties to the Dashboard'; do
+                  printf '  %-24s %s\n' "$k" "$(grep -oF "$k" /tmp/b.js | wc -l)"
+                done
+              fi
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          npx tsx scripts/diagnose-dev.mts dev
+
+      - name: Audit-only or diagnose run — nothing deployed, seeded or changed
+        if: steps.cfg.outputs.ready == 'true' && steps.cfg.outputs.deploy != 'true'
+        run: echo "::notice::$RUN_MODE run. Nothing was deployed, seeded or changed in $DEV_PROJECT_ID."
+
+      - name: Owner email for dev
+        if: steps.cfg.outputs.deploy == 'true'
         env:
           DEV_OWNER_EMAILS: ${{ vars.DEV_OWNER_EMAILS }}
         run: printf 'OWNER_EMAILS=%s\n' "${DEV_OWNER_EMAILS:-owner@example.invalid}" > "functions/.env.$DEV_PROJECT_ID"
 
       - name: Anthropic dev key exists in dev Secret Manager (value not read)
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         run: |
           if npx firebase functions:secrets:get ANTHROPIC_API_KEY --project dev --non-interactive > /dev/null 2>&1; then
             echo "ANTHROPIC_API_KEY exists in $DEV_PROJECT_ID."
@@ -113,18 +236,49 @@ jobs:
           fi
 
       - name: Deploy rules, indexes and functions to pioneer-2001-dev
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         run: |
           deploy() { npx firebase deploy --project dev --only firestore,storage,functions --non-interactive --force; }
           # First deploys sometimes fail while service agents and IAM changes propagate; retry once.
           deploy || { echo "Deploy failed; retrying in 90 s (permission propagation)."; sleep 90; deploy; }
 
+      # Firebase callables check the sign-in and role inside the function, so Cloud Run must accept calls
+      # from the browser (allUsers may invoke). A deploy grants that only when it CREATES a function, so a
+      # function created without it stays private and the browser's CORS preflight gets 403 (seen in dev:
+      # saveSettings and nine others). Grant it explicitly for every callable this codebase exports.
+      - name: Ensure every callable accepts browser calls (public invoker)
+        if: steps.cfg.outputs.deploy == 'true'
+        run: |
+          set -euo pipefail
+          for f in $(node scripts/lib/callables.mjs); do
+            svc=$(echo "$f" | tr 'A-Z' 'a-z')
+            gcloud run services add-iam-policy-binding "$svc" --project "$DEV_PROJECT_ID" --region us-central1 \
+              --member=allUsers --role=roles/run.invoker --quiet --format=none
+            echo "$f: allUsers may invoke"
+          done
+
       - name: Seed dev reference data (synthetic)
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         run: node scripts/seed-dev.mjs dev
 
       - name: Live smoke test (AI connection, PDF read, interrupted-upload recovery)
-        if: steps.cfg.outputs.ready == 'true'
+        if: steps.cfg.outputs.deploy == 'true'
         env:
           SMOKE_SERVICE_ACCOUNT: ${{ vars.GCP_DEV_SERVICE_ACCOUNT }}
         run: node scripts/smoke-dev.mjs
+
+      - name: Ledger audit AFTER the smoke test (read-only)
+        if: always() && steps.cfg.outputs.deploy == 'true'
+        env:
+          AUDIT_LABEL: Ledger audit after deploy and smoke test (read-only)
+          AUDIT_OUT_DIR: audit-out/after
+        run: npx tsx scripts/audit-dev-ledger.mts dev
+
+      - name: Upload post-run audit (JSON, CSV; no email addresses)
+        if: always() && steps.cfg.outputs.deploy == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ledger-audit-after-${{ github.run_id }}
+          path: audit-out/after
+          retention-days: 14
+          if-no-files-found: ignore

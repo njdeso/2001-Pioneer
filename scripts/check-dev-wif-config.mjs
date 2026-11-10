@@ -53,6 +53,24 @@ need(wf.includes('*@"$DEV_PROJECT_ID".iam.gserviceaccount.com'), 'workflow must 
 need(shVar('SECRET_NAME') === 'ANTHROPIC_API_KEY', 'setup script secret name must be ANTHROPIC_API_KEY');
 need(!/secrets:access|versions access/.test(wf), 'workflow must never read the secret value');
 
+// Ledger audit: read-only, runs BEFORE any deploy/seed/smoke step, and an audit-only mode exists.
+{
+  const at = (re) => { const m = re.exec(wf); return m ? m.index : -1; };
+  const audit = at(/name: Ledger audit BEFORE any change \(read-only\)/);
+  const deployStep = at(/name: Deploy rules, indexes and functions/);
+  const seedStep = at(/name: Seed dev reference data/);
+  const smokeStep = at(/name: Live smoke test/);
+  need(audit > 0 && audit < deployStep && audit < seedStep && audit < smokeStep, 'the read-only ledger audit must run before the deploy, seed and smoke-test steps');
+  need(/run: npx tsx scripts\/audit-dev-ledger\.mts dev/.test(wf), 'workflow must run scripts/audit-dev-ledger.mts against dev');
+  need(/options: \[deploy, audit-only(, diagnose)?\]/.test(wf), 'workflow must offer an audit-only mode');
+  const inv = at(/name: Ensure every callable accepts browser calls \(public invoker\)/);
+  need(inv > deployStep && inv < seedStep && inv < smokeStep, 'the public-invoker step must run after the deploy and before the seed and smoke test');
+  need(/for f in \$\(node scripts\/lib\/callables\.mjs\)/.test(wf) && /--member=allUsers --role=roles\/run\.invoker/.test(wf), 'the public-invoker step must cover every exported callable');
+  for (const [name, re] of [['deploy', /name: Deploy rules[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/], ['seed', /name: Seed dev[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/], ['smoke test', /name: Live smoke test[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/]]) {
+    need(re.test(wf), `the ${name} step must be skipped in audit-only mode (if: steps.cfg.outputs.deploy == 'true')`);
+  }
+}
+
 // .firebaserc is JSON without a .json extension: require() would parse it as JavaScript and crash.
 for (const [file, text] of [['deploy-dev.yml', wf], ['setup-dev-wif.sh', sh], ['smoke-dev.mjs', smoke]]) {
   need(!/require\(\s*['"][^'"]*\.firebaserc['"]\s*\)/.test(text), `${file} loads .firebaserc with require(); read it with JSON.parse(readFileSync(...))`);

@@ -19,7 +19,13 @@ Production (**pioneer-285cf**, https://2001-pioneer.netlify.app) is not touched.
 - Every document is tagged `synthetic: true`, and every ID starts with `SYN3B-`. All names say "Synthetic" or "TEST".
 - **Statements:**
   - `SYN3B-MANUAL` is for your manual tests. It is created once and never reset, unless the seed is run with `SEED_RESET_3B=1`.
-  - The automated test uses a fresh `SYN3B-AUTO-…` statement each run.
+  - The automated test uses a fresh `SYN3B-AUTO-…` statement each run, and reverses everything it posts.
+  - **Nothing is deleted.** Earlier runs' statements, postings and reversals stay in dev; the ledger is append-only.
+    (Until this change the smoke test deleted earlier `SYN3B-AUTO-…` statements and their ledger entries.)
+  - `SEED_RESET_3B=1` refuses to reset `SYN3B-MANUAL` once it has been approved, posted or reversed.
+- **Ledger audit (read-only):** every dev run first audits the existing dev ledger, before anything is deployed,
+  seeded or tested, and stops if it finds an imbalance. It runs again after the smoke test. An **audit-only** run
+  changes nothing at all (`docs/LEDGER-REPORT-AND-AUDIT.md`).
 
 ## One-time setup
 
@@ -83,3 +89,18 @@ See "Dev authentication setup" in the PR conversation. In short:
 - [ ] **Policy form:** edit a synthetic policy. The broker share field saves, and blank = the broker's standard share.
 
 To start over: `SEED_RESET_3B=1 node scripts/seed-dev.mjs dev`. This runs only against dev and is refused anywhere else.
+
+## Stage 3C manual checklist (PR #4 preview: https://deploy-preview-4--2001-pioneer.netlify.app, DEV banner = pioneer-2001-dev)
+- [ ] Open "Stage 3B manual test statement". **Approval & posting** shows *Not ready* and lists the ambiguous and unreviewed lines.
+- [ ] Resolve them (match, or *Mark unmatched*). *Ready to approve* appears, with totals for commission, broker, agency, suspense and adjustments.
+- [ ] **Approve for posting.** Status *Approved*; matching buttons are locked.
+- [ ] **Return to review** (with a reason) works; approve again.
+- [ ] **Post to ledger.** Status *Posted*. The Dashboard (snapshot window including Oct 2026) rises by exactly the posted amount; broker share = posted broker total.
+- [ ] Open a matched policy. Its commission history shows the entry with broker and agency amounts.
+- [ ] **Reverse posting…** (reason). The Dashboard returns to the earlier figures; the statement is back in review. Approve and post again.
+- [ ] **Ledger** (left menu), snapshot window selected: the tie-out line says ✓ *Ties to the Dashboard*. Postings tab: the reversed posting shows *Reversed · nets $0.00* with $0.00 net gross, broker and agency; the new posting is *Posted*.
+- [ ] Filter *Posting status → Reversed*: Net commission, broker share and agency net are all $0.00. Filter by the Zeta policy number: broker 30 % (policy).
+- [ ] Export *Transactions — accounting* and *Transactions — due diligence*. The accounting file's amount, broker_amount and agency_amount columns total the figures on screen; the due-diligence file has no broker, split, staff or note columns.
+- [ ] Policy → **Record retained commission** ($100.00 on the Zeta policy). Broker $30.00 / agency $70.00 (policy 30 %). **Reverse…** it.
+- [ ] Settings → Audit log shows approve, post, reverse, retained and reversal entries.
+- [ ] Signed in as a staff (non-admin) user, the approve, post and reverse buttons are not offered.

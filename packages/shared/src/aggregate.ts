@@ -11,9 +11,17 @@ import type { LedgerEntry } from './types.js';
 type Entry = Pick<LedgerEntry, 'amountCents' | 'statementPeriod' | 'postingStatus'> &
   Partial<Pick<LedgerEntry, 'policyId' | 'payerId' | 'carrierId' | 'classification' | 'level'>>;
 
-/** Posted entries only; a reversal is its own posted negative entry, so both stay included. */
+/**
+ * Whether a ledger entry counts in reports: posted entries, and originals later reversed (the
+ * reversal is its own posted negative entry, so both stay included and net to zero). Every report,
+ * the Dashboard, the Ledger report and the dev audit use this one rule.
+ */
+export function isReportable(e: Pick<LedgerEntry, 'postingStatus'>): boolean {
+  return e.postingStatus === 'posted' || e.postingStatus === 'reversed';
+}
+
 function counted<T extends Entry>(entries: Iterable<T>): T[] {
-  return [...entries].filter((e) => e.postingStatus === 'posted' || e.postingStatus === 'reversed');
+  return [...entries].filter(isReportable);
 }
 
 export function totalInWindow(entries: Iterable<Entry>, start: Month, count = 12): Cents {

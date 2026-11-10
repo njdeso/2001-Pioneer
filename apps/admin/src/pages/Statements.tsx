@@ -10,6 +10,7 @@ import { db, storage } from '../firebase';
 import { api } from '../api';
 import { useData } from '../data';
 import { Badge, Button, Card, DataTable, Empty, ErrorNote, Field, Modal, Money, PageHeader, Select, Stat, TextArea, cx, type Column } from '../ui';
+import { PostingPanel, type PostingInfo } from './StatementPosting';
 import { BrokerCell, MatchBadge, MatchDialog, MatchedTo, MatchingPanel, lineMatch, matchFilterFn, type MatchFilter, type MatchingInfo, type MatchLine } from './StatementMatching';
 
 // ---------------------------------------------------------------------------
@@ -24,7 +25,7 @@ const CONTENT_TYPES: Record<string, string> = {
 
 interface StatementDoc {
   id: string;
-  status: 'awaiting_upload' | 'processing' | 'needs_review' | 'discrepancy' | 'extraction_failed' | 'discarded';
+  status: 'awaiting_upload' | 'processing' | 'needs_review' | 'discrepancy' | 'extraction_failed' | 'discarded' | 'approved' | 'posted';
   fileName: string;
   fileType: 'pdf' | 'xlsx' | 'csv';
   size: number;
@@ -62,6 +63,8 @@ const STATUS: Record<StatementDoc['status'], { label: string; tone: 'slate' | 'g
   discrepancy: { label: 'Discrepancy', tone: 'red' },
   extraction_failed: { label: 'Processing failed', tone: 'red' },
   discarded: { label: 'Discarded', tone: 'slate' },
+  approved: { label: 'Approved — ready to post', tone: 'blue' },
+  posted: { label: 'Posted', tone: 'green' },
 };
 
 const METHOD: Record<string, string> = { 'travelers-pl-v1': 'Parsed (Travelers)', ai: 'AI (PDF)', 'table-ai': 'AI (spreadsheet)' };
@@ -421,8 +424,11 @@ export function StatementReviewPage() {
         </Card>
       )}
 
-      {['needs_review', 'discrepancy'].includes(stmt.status) && (
+      {['needs_review', 'discrepancy', 'approved', 'posted'].includes(stmt.status) && (
         <MatchingPanel statementId={stmt.id} payerId={stmt.payerId} matching={stmt.matching} lines={lines} canMatch={canMatch} />
+      )}
+      {['needs_review', 'discrepancy', 'approved', 'posted'].includes(stmt.status) && (
+        <PostingPanel statementId={stmt.id} stmt={stmt as unknown as PostingInfo} lines={lines} />
       )}
 
       {lines.length > 0 && (
