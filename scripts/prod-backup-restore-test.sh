@@ -28,6 +28,7 @@ fail() { echo; echo "BACKUP: NOT VERIFIED — $1"; echo "Do not deploy. Send thi
 
 [ -f last-backup.txt ] || fail "last-backup.txt not found. Run 'bash scripts/prod-backup.sh' first, in this folder."
 [ -f preflight-before.txt ] || fail "preflight-before.txt not found."
+grep -q '^  FP-COMPLETE ' preflight-before.txt || fail "preflight-before.txt is incomplete (no FP-COMPLETE line). Run the preflight again."
 BACKUP="$(cat last-backup.txt)"
 [[ "$BACKUP" =~ ^gs://${PROJECT_ID}-firestore-backups/firestore-backups/[0-9]{8}T[0-9]{6}Z$ ]] || fail "unexpected backup path: ${BACKUP}"
 
@@ -55,7 +56,7 @@ gcloud firestore databases create --database="$TMP_DB" --location="$LOCATION" --
 CREATED="$TMP_DB"
 
 TOKEN="$(gcloud auth print-access-token)"
-RELEASES="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" -H "x-goog-user-project: ${PROJECT_ID}" "https://firebaserules.googleapis.com/v1/projects/${PROJECT_ID}/releases?pageSize=100" || echo '{}')"
+RELEASES="$(curl -fsS --max-time 60 --retry 2 -H "Authorization: Bearer ${TOKEN}" -H "x-goog-user-project: ${PROJECT_ID}" "https://firebaserules.googleapis.com/v1/projects/${PROJECT_ID}/releases?pageSize=100" || echo '{}')"
 # No rules release may target this (or any earlier) temporary database.
 if echo "$RELEASES" | grep -qE "cloud\.firestore/(${TMP_DB}|bkverify-)"; then fail "a security-rules release targets a bkverify- database; client access is possible."; fi
 echo "  CHECK: OK - no security-rules release for ${TMP_DB}: clients are denied"
@@ -72,8 +73,10 @@ PY
 
 echo "== Fingerprinting the restored copy (read-only)"
 TOKEN="$(gcloud auth print-access-token)"
-python3 scripts/prod-fingerprint.py "$PROJECT_ID" "$TOKEN" "$TMP_DB" | tee restored-fingerprint.txt
-AUD_RESTORED="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" -H "x-goog-user-project: ${PROJECT_ID}" -H 'Content-Type: application/json' -X POST \
+timeout 1500 python3 -u scripts/prod-fingerprint.py "$PROJECT_ID" "$TOKEN" "$TMP_DB" > restored-fingerprint.txt || { cat restored-fingerprint.txt; fail "the fingerprint of the restored copy did not complete."; }
+cat restored-fingerprint.txt
+grep -q '^  FP-COMPLETE ' restored-fingerprint.txt || fail "the fingerprint of the restored copy is incomplete."
+AUD_RESTORED="$(curl -fsS --max-time 60 --retry 2 -H "Authorization: Bearer ${TOKEN}" -H "x-goog-user-project: ${PROJECT_ID}" -H 'Content-Type: application/json' -X POST \
   "https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/${TMP_DB}/documents:runAggregationQuery" \
   -d '{"structuredAggregationQuery":{"structuredQuery":{"from":[{"collectionId":"auditLog"}]},"aggregations":[{"alias":"n","count":{}}]}}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["result"]["aggregateFields"]["n"]["integerValue"])')"

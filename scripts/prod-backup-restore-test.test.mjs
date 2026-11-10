@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os';
 const SCRIPT = resolve('scripts/prod-backup-restore-test.sh');
 const BACKUP = 'gs://pioneer-285cf-firestore-backups/firestore-backups/20261110T210000Z';
 const FP = ['  FP clients                   157 aaa', '  FP ledger                    310 bbb', '  TOTAL amountCents          123456', '  NEW policy terms              0'];
-const PREFLIGHT = ['2001-Pioneer production snapshot (before) — project pioneer-285cf', '  auditLog         40', ...FP].join('\n');
+const DONE = '  FP-COMPLETE 11 collections fingerprinted, 30 requests, 12s';
+const PREFLIGHT = ['2001-Pioneer production snapshot (before) — project pioneer-285cf', '  auditLog         40', ...FP, DONE].join('\n');
 
 const GCLOUD = `#!/usr/bin/env bash
 echo "gcloud $*" >> "$WORK/calls.log"
@@ -40,13 +41,13 @@ function run(over = {}) {
   writeFileSync(join(bin, 'gcloud'), GCLOUD); chmodSync(join(bin, 'gcloud'), 0o755);
   writeFileSync(join(bin, 'curl'), CURL); chmodSync(join(bin, 'curl'), 0o755);
   // Fake fingerprint script: prints FAKE_RESTORED (records the database it was pointed at).
-  writeFileSync(join(work, 'scripts', 'prod-fingerprint.py'), 'import os,sys\nopen(os.environ["WORK"]+"/fp-args","w").write(" ".join(sys.argv[1:]))\nprint(os.environ["FAKE_RESTORED"])\n');
+  writeFileSync(join(work, 'scripts', 'prod-fingerprint.py'), 'import os,sys\nopen(os.environ["WORK"]+"/fp-args","w").write(" ".join(sys.argv[1:]))\nprint(os.environ["FAKE_RESTORED"])\nsys.exit(int(os.environ.get("FAKE_FP_EXIT","0")))\n');
   writeFileSync(join(work, 'preflight-before.txt'), PREFLIGHT);
   writeFileSync(join(work, 'last-backup.txt'), over.backup ?? BACKUP);
   const env = {
     ...process.env, WORK: work, PATH: `${bin}:${process.env.PATH}`,
     FAKE_META: '1', FAKE_RELEASES: '{"releases":[{"name":"projects/pioneer-285cf/releases/cloud.firestore"}]}',
-    FAKE_IMPORT_JSON: '{"done":true,"metadata":{"operationState":"SUCCESSFUL"}}', FAKE_AUDIT: '40', FAKE_RESTORED: FP.join('\n'),
+    FAKE_IMPORT_JSON: '{"done":true,"metadata":{"operationState":"SUCCESSFUL"}}', FAKE_AUDIT: '40', FAKE_RESTORED: [...FP, DONE].join('\n'),
     ...over,
   };
   const r = spawnSync('bash', [SCRIPT], { cwd: work, env, encoding: 'utf8' });
@@ -70,10 +71,12 @@ test('identical restored copy: VERIFIED BY RESTORE; imports into and deletes onl
 });
 
 for (const [name, over, why] of [
-  ['a collection differs', { FAKE_RESTORED: ['  FP clients                   157 ZZZ', ...FP.slice(1)].join('\n') }, /DIFFERENT preflight: FP clients/],
-  ['a ledger total differs', { FAKE_RESTORED: [...FP.slice(0, 2), '  TOTAL amountCents          999', FP[3]].join('\n') }, /DIFFERENT preflight: TOTAL amountCents/],
-  ['a collection is missing', { FAKE_RESTORED: FP.slice(1).join('\n') }, /restored:  missing/],
+  ['a collection differs', { FAKE_RESTORED: ['  FP clients                   157 ZZZ', ...FP.slice(1), DONE].join('\n') }, /DIFFERENT preflight: FP clients/],
+  ['a ledger total differs', { FAKE_RESTORED: [...FP.slice(0, 2), '  TOTAL amountCents          999', FP[3], DONE].join('\n') }, /DIFFERENT preflight: TOTAL amountCents/],
+  ['a collection is missing', { FAKE_RESTORED: [...FP.slice(1), DONE].join('\n') }, /restored:  missing/],
   ['audit-log count differs', { FAKE_AUDIT: '39' }, /DIFFERENT auditLog/],
+  ['fingerprint of the restored copy fails', { FAKE_FP_EXIT: '2', FAKE_RESTORED: '  FINGERPRINT FAILED: HTTP 503' }, /fingerprint of the restored copy did not complete/],
+  ['fingerprint of the restored copy is incomplete', { FAKE_RESTORED: FP.join('\n') }, /fingerprint of the restored copy is incomplete/],
   ['import failed', { FAKE_IMPORT_JSON: '{"done":true,"error":{"message":"x"},"metadata":{"operationState":"FAILED"}}' }, /import did not finish successfully/],
   ['rules release targets the temp database', { FAKE_RELEASES: '{"releases":[{"name":"projects/pioneer-285cf/releases/cloud.firestore/bkverify-x"}]}' }, /security-rules release/],
 ]) {

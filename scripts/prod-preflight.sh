@@ -27,11 +27,13 @@ export CLOUDSDK_CORE_PROJECT="$PROJECT_ID"
 OUT="preflight-${LABEL}.txt"
 TOKEN="$(gcloud auth print-access-token)"
 H=(-H "Authorization: Bearer ${TOKEN}" -H "x-goog-user-project: ${PROJECT_ID}" -H "Content-Type: application/json")
+# Every request has a time limit and retries temporary failures, so the preflight fails instead of hanging.
+CURL=(curl -fsS --max-time 60 --retry 2 --retry-delay 3 --retry-connrefused)
 FS="https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents"
 
 count() { # $1 collection id, $2 "true" for collection group
   local scope=""; [ "${2:-}" = "true" ] && scope=',"allDescendants":true'
-  curl -fsS "${H[@]}" -X POST "${FS}:runAggregationQuery" \
+  "${CURL[@]}" "${H[@]}" -X POST "${FS}:runAggregationQuery" \
     -d "{\"structuredAggregationQuery\":{\"structuredQuery\":{\"from\":[{\"collectionId\":\"$1\"${scope}}]},\"aggregations\":[{\"alias\":\"n\",\"count\":{}}]}}" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["result"]["aggregateFields"]["n"]["integerValue"])'
 }
@@ -40,7 +42,7 @@ count() { # $1 collection id, $2 "true" for collection group
   echo "2001-Pioneer production snapshot (${LABEL}) — $(date -u +%FT%TZ) — project ${PROJECT_ID}"
   echo
   echo "== Functions (name, region, state)"
-  curl -fsS "${H[@]}" "https://cloudfunctions.googleapis.com/v2/projects/${PROJECT_ID}/locations/-/functions?pageSize=200" | python3 -c '
+  "${CURL[@]}" "${H[@]}" "https://cloudfunctions.googleapis.com/v2/projects/${PROJECT_ID}/locations/-/functions?pageSize=200" | python3 -c '
 import json,sys,collections
 fs=json.load(sys.stdin).get("functions",[])
 regions=collections.Counter()
@@ -60,7 +62,7 @@ print("  CHECK:", "OK - all us-central1" if fs and not bad else ("WARNING - func
   unset PFX
   echo
   echo "== AI settings (settings/app)"
-  curl -fsS "${H[@]}" "${FS}/settings/app" | python3 -c '
+  "${CURL[@]}" "${H[@]}" "${FS}/settings/app" | python3 -c '
 import json,sys
 f=json.load(sys.stdin).get("fields",{})
 v=lambda k: list(f.get(k,{}).values())[0] if k in f else None
@@ -87,7 +89,7 @@ else:
   done
   echo
   echo "== Statements (month, status, failure, original stored, file)"
-  curl -fsS "${H[@]}" -X POST "${FS}:runQuery" \
+  "${CURL[@]}" "${H[@]}" -X POST "${FS}:runQuery" \
     -d '{"structuredQuery":{"from":[{"collectionId":"statements"}],"select":{"fields":[{"fieldPath":"statementMonth"},{"fieldPath":"status"},{"fieldPath":"failure"},{"fieldPath":"originalPath"},{"fieldPath":"fileName"}]},"limit":500}}' \
     | python3 -c '
 import json,sys
@@ -103,14 +105,19 @@ for m,s,fl,o,fn,i in sorted(rows):
 print("  total: {}".format(len(rows)))'
 
   echo; echo "== Content fingerprints, ledger totals, new collections (read-only; see scripts/prod-fingerprint.py)"
-  python3 scripts/prod-fingerprint.py "$PROJECT_ID" "$TOKEN"
+  echo "  (progress is shown below while it reads; with ~1,500 policies this takes a few minutes)"
+  if ! timeout 1500 python3 -u scripts/prod-fingerprint.py "$PROJECT_ID" "$TOKEN"; then
+    echo "  PREFLIGHT FAILED: the content fingerprint did not complete (see FINGERPRINT FAILED above, or it hit the"
+    echo "  25-minute limit). Nothing was changed. This snapshot cannot be used; run the preflight again."
+    exit 1
+  fi
 
   echo; echo "== Browser access: CORS preflight (OPTIONS only; no function code runs, nothing changes)"
   echo "   204 = callable from the web app. 403 = NOT callable from the browser (no public invoker): the"
   echo "   web app shows 'Could not reach the server function'. 404 = not deployed (expected before the release"
   echo "   for the 8 new Stage 3B/3C functions)."
   for f in $(node scripts/lib/callables.mjs); do
-    c="$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://2001-pioneer.netlify.app' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' "https://us-central1-${PROJECT_ID}.cloudfunctions.net/${f}")"
+    c="$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://2001-pioneer.netlify.app' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' "https://us-central1-${PROJECT_ID}.cloudfunctions.net/${f}")"
     case "$c" in 204) note="ok";; 403) note="NOT CALLABLE FROM THE BROWSER";; 404) note="not deployed";; *) note="check";; esac
     printf '  %-26s %s %s\n' "$f" "$c" "$note"
   done
@@ -127,6 +134,9 @@ if [ "$LABEL" = "after" ] && [ -f preflight-before.txt ]; then
   echo "  stored PDFs      before ${b:-?}  after ${a:-?}"
   echo; echo "== Exact comparison: every record and financial total must be IDENTICAL; new collections must be 0"
   RESULT=OK
+  for f in preflight-before.txt preflight-after.txt; do
+    grep -q '^  FP-COMPLETE ' "$f" || { echo "  INCOMPLETE $f has no FP-COMPLETE line (its fingerprint did not finish)"; RESULT=STOP; }
+  done
   while read -r line; do
     key="$(echo "$line" | awk '{print $1, $2}')"
     [ "$(echo "$line" | awk '{print $1}')" = "NEW" ] && continue

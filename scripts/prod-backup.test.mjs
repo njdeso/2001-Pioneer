@@ -16,6 +16,7 @@ const PREFLIGHT = [
   '  FP clients                   157 aaa',
   '  FP policies                  233 bbb',
   '  TOTAL amountCents          123456',
+  '  FP-COMPLETE 11 collections fingerprinted, 30 requests, 12s',
 ].join('\n');
 
 // The fake gcloud reads its behaviour from env vars and logs every call.
@@ -46,11 +47,11 @@ const good = {
   FAKE_META: '1', FAKE_DATA: '1', FAKE_DONE_AFTER: '2',
 };
 
-function run(over = {}, { preflight = true, input = '' } = {}) {
+function run(over = {}, { preflight = true, input = '', preflightText = PREFLIGHT } = {}) {
   const work = mkdtempSync(join(tmpdir(), 'bk-'));
   const bin = join(work, 'bin'); mkdirSync(bin);
   writeFileSync(join(bin, 'gcloud'), FAKE); chmodSync(join(bin, 'gcloud'), 0o755);
-  if (preflight) writeFileSync(join(work, 'preflight-before.txt'), PREFLIGHT);
+  if (preflight) writeFileSync(join(work, 'preflight-before.txt'), preflightText);
   const env = { ...process.env, ...good, ...over, WORK: work, PATH: `${bin}:${process.env.PATH}`, POLL_SECONDS: '0', TIMEOUT_SECONDS: over.TIMEOUT_SECONDS ?? '60' };
   // The operation must report the destination the script chose; the fake substitutes it from the export call.
   env.FAKE_DEST_PREFIX = 'gs://pioneer-285cf-firestore-backups/firestore-backups/STAMP';
@@ -132,4 +133,11 @@ test('creating the bucket after "yes": US, uniform access, public access prevent
   const r = run({ FAKE_BUCKET_EXISTS: 'after-create' }, { input: 'yes\n' });
   assert.match(r.calls, /storage buckets create gs:\/\/pioneer-285cf-firestore-backups --project pioneer-285cf --location=US --uniform-bucket-level-access --public-access-prevention --default-storage-class=STANDARD/);
   assert.equal(r.code, 0, r.out);
+});
+
+test('refuses a preflight that did not finish (no FP-COMPLETE line), before any gcloud call', () => {
+  const r = run({}, { preflightText: PREFLIGHT.split('\n').filter((l) => !l.includes('FP-COMPLETE')).join('\n') });
+  assert.notEqual(r.code, 0);
+  assert.match(r.out, /incomplete \(no FP-COMPLETE line\)/);
+  assert.equal(r.calls, '');
 });

@@ -35,6 +35,7 @@ json() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); v=eval(sys
 
 [ -f preflight-before.txt ] || fail "preflight-before.txt not found. Run 'bash scripts/prod-preflight.sh before' first, in this folder."
 grep -q "project ${PROJECT_ID}" preflight-before.txt || fail "preflight-before.txt is not a ${PROJECT_ID} snapshot."
+grep -q '^  FP-COMPLETE ' preflight-before.txt || fail "preflight-before.txt is incomplete (no FP-COMPLETE line): the preflight did not finish. Run it again."
 
 # ---------------------------------------------------------------- 1. dedicated private backup bucket
 echo "== Backup bucket ${BUCKET}"

@@ -221,14 +221,6 @@ jobs:
             echo '```'
             echo "### Web app builds (public pages, read-only GET): Firebase project, region and functions in the bundle"
             echo '```'
-            # Netlify builds this branch in parallel with this workflow: give the dev site up to 8 minutes to
-            # serve a bundle built from THIS commit (the DEV banner stamp is the full commit SHA in the bundle).
-            for i in $(seq 1 16); do
-              js=$(curl -s "https://deploy-dev--2001-pioneer.netlify.app/" | grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' | head -1)
-              if [ -n "$js" ] && curl -s "https://deploy-dev--2001-pioneer.netlify.app$js" | grep -qF "$GITHUB_SHA"; then echo "deploy-dev serves $GITHUB_SHA (after $i check(s))"; break; fi
-              [ "$i" = 16 ] && echo "deploy-dev did NOT serve a bundle built from $GITHUB_SHA within 8 minutes"
-              sleep 30
-            done
             for site in deploy-dev--2001-pioneer deploy-preview-6--2001-pioneer; do
               base="https://$site.netlify.app"
               code=$(curl -s -o /tmp/index.html -w '%{http_code}' "$base/")
@@ -250,9 +242,10 @@ jobs:
           npx tsx scripts/diagnose-dev.mts dev
           # Self-test of the production preflight's read-only fingerprint script, against DEV only.
           echo "### Fingerprint self-test (scripts/prod-fingerprint.py, read-only, ${DEV_PROJECT_ID})" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 scripts/prod-fingerprint.py "$DEV_PROJECT_ID" "$(gcloud auth print-access-token)" | tee /tmp/fp1.txt | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 scripts/prod-fingerprint.py "$DEV_PROJECT_ID" "$(gcloud auth print-access-token)" > /tmp/fp2.txt
-          if diff -q /tmp/fp1.txt /tmp/fp2.txt >/dev/null; then echo "Fingerprint self-test: two consecutive reads are identical (deterministic)" | tee -a "$GITHUB_STEP_SUMMARY"; else echo "::error::Fingerprint self-test: two reads differ"; diff /tmp/fp1.txt /tmp/fp2.txt; exit 1; fi
+          timeout 1500 python3 -u scripts/prod-fingerprint.py "$DEV_PROJECT_ID" "$(gcloud auth print-access-token)" | tee /tmp/fp1.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          timeout 1500 python3 -u scripts/prod-fingerprint.py "$DEV_PROJECT_ID" "$(gcloud auth print-access-token)" > /tmp/fp2.txt
+          grep -q '^  FP-COMPLETE ' /tmp/fp1.txt || { echo "::error::Fingerprint self-test did not complete"; exit 1; }
+          if diff -q <(grep -v FP-COMPLETE /tmp/fp1.txt) <(grep -v FP-COMPLETE /tmp/fp2.txt) >/dev/null; then echo "Fingerprint self-test: two consecutive reads are identical (deterministic)" | tee -a "$GITHUB_STEP_SUMMARY"; else echo "::error::Fingerprint self-test: two reads differ"; diff /tmp/fp1.txt /tmp/fp2.txt; exit 1; fi
 
       - name: Audit-only or diagnose run — nothing deployed, seeded or changed
         if: steps.cfg.outputs.ready == 'true' && steps.cfg.outputs.deploy != 'true'
