@@ -77,6 +77,6 @@ Real work (matching, posting, adding terms or advances) starts only after that. 
 | What | How | Data |
 |---|---|---|
 | Web app | Netlify → Deploys → the deploy noted in Step 1 → **Publish deploy** | None |
-| Functions | `git checkout b4b6a29 && npm install && npx firebase deploy --project pioneer-285cf --only functions`. Answer **No** to deleting the newer functions only if data from them exists; otherwise either answer is safe | None |
+| Functions | `git checkout 48d725f && npm install && npx firebase deploy --project pioneer-285cf --only functions` (the current Stage 3C baseline). It will offer to delete the 13 new functions: answer **No** if any terms, advances or settlements were created; otherwise either answer is safe | None |
 | Firestore rules | Firebase console → Firestore → Rules → history → previous version → **Publish** | None |
 | Data | No restore is part of a code rollback. The backup from Step 1 is for disaster recovery only | — |
