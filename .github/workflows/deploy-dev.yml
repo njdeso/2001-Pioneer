@@ -161,6 +161,24 @@ jobs:
               printf '%-26s %s %s\n' "$f" "$code" "$(head -c 110 /tmp/b | tr '\n' ' ')"
             done
             echo '```'
+            echo "### Browser-style check of EVERY deployed function: CORS preflight from the dev site, then POST"
+            echo '```'
+            ORIGIN=https://deploy-dev--2001-pioneer.netlify.app
+            for f in $(gcloud functions list --project "$P" --regions us-central1 --format='value(name.basename())' 2>/dev/null); do
+              pre=$(curl -s -o /dev/null -D /tmp/h -w '%{http_code}' -X OPTIONS -H "Origin: $ORIGIN" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' "https://us-central1-$P.cloudfunctions.net/$f")
+              acao=$(grep -i '^access-control-allow-origin:' /tmp/h | tr -d '\r' | cut -d' ' -f2)
+              post=$(curl -s -o /tmp/b -D /tmp/h2 -w '%{http_code}' -X POST -H "Origin: $ORIGIN" -H 'Content-Type: application/json' -d '{"data":{}}' "https://us-central1-$P.cloudfunctions.net/$f")
+              acao2=$(grep -i '^access-control-allow-origin:' /tmp/h2 | tr -d '\r' | cut -d' ' -f2)
+              svc=$(echo "$f" | tr 'A-Z' 'a-z')
+              inv=$(gcloud run services get-iam-policy "$svc" --project "$P" --region us-central1 --format='value(bindings.members)' --flatten=bindings --filter='bindings.role:roles/run.invoker' 2>&1 | tr '\n' ' ' | cut -c1-60)
+              printf '%-26s preflight %s acao=%-38s post %s acao=%-38s invoker=%s %s\n' "$f" "$pre" "${acao:--}" "$post" "${acao2:--}" "${inv:--}" "$(head -c 70 /tmp/b | tr '\n' ' ')"
+            done
+            echo '```'
+            echo "### savesettings requests and errors since $SINCE"
+            echo '```'
+            gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"savesettings\" AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
+              --format='table(timestamp, severity, httpRequest.requestMethod, httpRequest.status, httpRequest.requestSize, httpRequest.responseSize, textPayload, jsonPayload.message)' 2>&1 | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | head -60
+            echo '```'
             echo "### HTTP 404 responses since $SINCE"
             echo '```'
             gcloud logging read "httpRequest.status=404 AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
