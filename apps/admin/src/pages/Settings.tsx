@@ -85,6 +85,9 @@ export function SettingsPage() {
       (s) => setEvents(s.docs.map((d) => ({ id: d.id, ...d.data() }) as AuditEvent)));
   }, [role]);
 
+  // The form shows edits immediately; the rest of the app uses the SAVED settings. Make the difference visible.
+  const windowUnsaved = !!settings && (f.snapshotStartMonth !== settings.snapshotStartMonth || Number(f.snapshotMonths) !== (settings.snapshotMonths ?? 12));
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null); setSaved(false);
@@ -116,8 +119,12 @@ export function SettingsPage() {
             <Field label="Agency name" error={errors.agencyName} className="sm:col-span-2">
               <TextInput value={f.agencyName} onChange={(e) => setF({ ...f, agencyName: e.target.value })} />
             </Field>
+            <div className={`rounded-md border p-3 text-sm sm:col-span-2 ${windowUnsaved ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
+              <div><span className="font-semibold">Saved reporting period:</span> {settings ? formatWindow(settings.snapshotStartMonth, settings.snapshotMonths ?? 12) : 'not set'}. The Dashboard, Ledger and Due Diligence Package use this saved period.</div>
+              {windowUnsaved && <div className="mt-1 font-semibold">Unsaved change: {f.snapshotStartMonth.match(/^\d{4}-\d{2}$/) ? formatWindow(f.snapshotStartMonth, Number(f.snapshotMonths) || 12) : f.snapshotStartMonth}. It takes effect only after Save settings succeeds.</div>}
+            </div>
             <Field label="First month of the window" error={errors.snapshotStartMonth}
-              hint={f.snapshotStartMonth.match(/^\d{4}-\d{2}$/) ? formatWindow(f.snapshotStartMonth, Number(f.snapshotMonths) || 12) : 'YYYY-MM'}>
+              hint={f.snapshotStartMonth.match(/^\d{4}-\d{2}$/) ? `${formatWindow(f.snapshotStartMonth, Number(f.snapshotMonths) || 12)}${windowUnsaved ? ' (not saved)' : ''}` : 'YYYY-MM'}>
               <TextInput type="month" value={f.snapshotStartMonth} onChange={(e) => setF({ ...f, snapshotStartMonth: e.target.value })} />
             </Field>
             <Field label="Months in window" error={errors.snapshotMonths}>

@@ -63,6 +63,9 @@ need(!/secrets:access|versions access/.test(wf), 'workflow must never read the s
   need(audit > 0 && audit < deployStep && audit < seedStep && audit < smokeStep, 'the read-only ledger audit must run before the deploy, seed and smoke-test steps');
   need(/run: npx tsx scripts\/audit-dev-ledger\.mts dev/.test(wf), 'workflow must run scripts/audit-dev-ledger.mts against dev');
   need(/options: \[deploy, audit-only(, diagnose)?\]/.test(wf), 'workflow must offer an audit-only mode');
+  const inv = at(/name: Ensure every callable accepts browser calls \(public invoker\)/);
+  need(inv > deployStep && inv < seedStep && inv < smokeStep, 'the public-invoker step must run after the deploy and before the seed and smoke test');
+  need(/for f in \$\(node scripts\/lib\/callables\.mjs\)/.test(wf) && /--member=allUsers --role=roles\/run\.invoker/.test(wf), 'the public-invoker step must cover every exported callable');
   for (const [name, re] of [['deploy', /name: Deploy rules[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/], ['seed', /name: Seed dev[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/], ['smoke test', /name: Live smoke test[^\n]*\n\s*if: steps\.cfg\.outputs\.deploy == 'true'/]]) {
     need(re.test(wf), `the ${name} step must be skipped in audit-only mode (if: steps.cfg.outputs.deploy == 'true')`);
   }

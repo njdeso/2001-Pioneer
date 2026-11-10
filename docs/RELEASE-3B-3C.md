@@ -55,6 +55,15 @@ Check:
    - New functions can take **1–3 minutes** before they accept calls ("permission denied" or 401 meanwhile).
 4. **Snapshot again:** run `bash scripts/prod-preflight.sh after`. Every count must be the same, and the ledger must
    still be 0.
+5. **Browser access:** the snapshot's *Browser access* section must show **204** for every function. A **403** means
+   that function does not accept calls from the browser (it was created without public invocation; a deploy only
+   grants it when it creates a function). This happened in dev to `saveSettings` and nine others: the web app shows
+   "Could not reach the server function …". Do not fix production without authorizing it; the fix for one function is
+   `gcloud run services add-iam-policy-binding <name-lowercase> --project pioneer-285cf --region us-central1 --member=allUsers --role=roles/run.invoker`.
+   Callables check the sign-in and role inside the function, so this is the intended setting (the dev deploy now
+   applies it to every callable on every run).
+   Run the *before* snapshot too: if existing production functions already show 403, decide on the fix before the
+   release.
 
 ## First production use (October 2026)
 1. **Statements → October 2026 → Run automatic matching.**

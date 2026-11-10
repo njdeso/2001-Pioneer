@@ -84,6 +84,10 @@ export function DueDiligencePage() {
         subtitle="Buyer-facing exports from the posted ledger and the client and policy records. No broker or internal compensation information is included." />
       <ErrorNote message={statements.error} />
 
+      <p className="text-sm text-slate-600">
+        Reporting period: <b>{formatMonth(s.from)} – {formatMonth(s.to)}</b> (statement months), the saved snapshot window in <Link to="/settings" className="text-ink underline">Settings</Link>.
+        Entries outside this period are not included.
+      </p>
       <div className={cx('rounded-lg border p-4', tone[s.status])}>
         <div className="text-sm font-semibold">{s.statusLabel}</div>
         <p className="mt-1 text-sm">{s.statusText}</p>

@@ -28,10 +28,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { initializeApp, applicationDefault } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { exportedCallables } from './lib/callables.mjs';
 import { getStorage } from 'firebase-admin/storage';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { assertDevProjectNumber } from './lib/dev-guard.mjs';
-import { seedBook, writeStatement, LINES, EXPECTED_SUMMARY } from './lib/synthetic-3b.mjs';
+import { seedBook, writeStatement, LINES, EXPECTED_SUMMARY, PAYER_ID } from './lib/synthetic-3b.mjs';
 
 const DEV = 'pioneer-2001-dev';
 const PROD = 'pioneer-285cf';
@@ -299,9 +300,16 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   const staffApprove = await expectRejected(call('approveStatement', { statementId: sid }, 1, STAFF_TOKEN));
   record('Staff cannot approve', staffApprove.rejected && /permission/i.test(staffApprove.message), staffApprove.message.slice(0, 160));
 
-  // 4. Approve
+  // 4. Approve. If a statement from the same carrier and month is already posted (e.g. a manual test
+  //    posting in dev), approval must first require the "separate statement" confirmation.
   const before = await windowTotals();
-  const ap = await call('approveStatement', { statementId: sid, note: 'smoke test approval' });
+  const otherPosted = (await db.collection('statements').where('payerId', '==', PAYER_ID).where('statementMonth', '==', '2026-10').where('status', '==', 'posted').get()).docs.map((d) => d.id).filter((id) => id !== sid);
+  if (otherPosted.length) {
+    const dup = await expectRejected(call('approveStatement', { statementId: sid, note: 'smoke test approval' }));
+    record('Another posted statement for this carrier and month requires "separate statement" confirmation', dup.rejected && /separate statement|duplicate/i.test(dup.message), `${otherPosted.join(', ')}: ${dup.message.slice(0, 160)}`);
+  }
+  const confirm = otherPosted.length > 0;
+  const ap = await call('approveStatement', { statementId: sid, note: 'smoke test approval', confirmNotDuplicate: confirm });
   const expected = { entries: 10, amountCents: 41000, brokerCents: 14200, agencyCents: 26800, suspenseCents: 8000, adjustmentsCents: -500 };
   const apErr = Object.entries(expected).filter(([k, v]) => ap.totals[k] !== v).map(([k, v]) => `${k} ${ap.totals[k]} ≠ ${v}`);
   record('Approve: plan totals', ap.status === 'approved' && apErr.length === 0,
@@ -360,7 +368,7 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   record('Reversing again is refused', revAgain.rejected, revAgain.message.slice(0, 120));
 
   // 9. Correct and post again (next posting number, new entry IDs), then reverse to leave dev net zero
-  await call('approveStatement', { statementId: sid, note: 'smoke: re-approval' });
+  await call('approveStatement', { statementId: sid, note: 'smoke: re-approval', confirmNotDuplicate: confirm });
   const p2 = await call('postStatement', { statementId: sid });
   const second = (await ledgerFor()).filter((e) => e.postingId === `${sid}__p2` && !e.reversalOf);
   record('Re-post after reversal uses posting 2 with new entries', p2.postingId === `${sid}__p2` && second.length === 10 && second.reduce((s, e) => s + e.amountCents, 0) === 41000, `${p2.postingId}: ${second.length} entries, ${$(second.reduce((s, e) => s + e.amountCents, 0))}`);
@@ -410,6 +418,51 @@ try {
   WEB_API_KEY = cfg.apiKey;
   STAFF_TOKEN = await adminIdToken(cfg.apiKey, 'ci-smoke-staff', 'staff');
   record('Signed in as synthetic admin', true, 'ci-smoke-admin (role admin, dev only)');
+
+  // 0a. Every callable is reachable FROM THE BROWSER: the CORS preflight the dev site sends must be
+  //     answered 204 with Access-Control-Allow-Origin. A function without public invocation answers 403
+  //     with no CORS headers, which the browser reports as a network error (regression: saveSettings).
+  {
+    const ORIGIN = 'https://deploy-dev--2001-pioneer.netlify.app';
+    const names = exportedCallables();
+    const probe = async (fn) => {
+      const r = await fetch(`https://${REGION}-${DEV}.cloudfunctions.net/${fn}`, { method: 'OPTIONS', headers: { Origin: ORIGIN, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'authorization,content-type' } });
+      return { fn, status: r.status, acao: r.headers.get('access-control-allow-origin') };
+    };
+    let bad = [];
+    for (let attempt = 1; attempt <= 12; attempt++) { // IAM changes can take a minute or two to apply
+      bad = (await Promise.all(names.map(probe))).filter((x) => !(x.status === 204 && (x.acao === ORIGIN || x.acao === '*')));
+      if (!bad.length || attempt === 12) break;
+      await new Promise((res) => setTimeout(res, 15_000));
+    }
+    record('Every callable answers the browser CORS preflight from the dev site', bad.length === 0,
+      bad.length ? `${bad.length} of ${names.length} not reachable: ${bad.map((x) => `${x.fn} ${x.status}`).join(', ')}` : `${names.length} of ${names.length}: 204 with allow-origin`);
+  }
+
+  // 0b. Settings persistence through the real saveSettings callable: change the reporting window,
+  //     read it back, then restore the original values (also read back). Dev project only.
+  {
+    const ref = db.collection('settings').doc('app');
+    const orig = (await ref.get()).data() ?? {};
+    const body = (start) => ({
+      agencyName: orig.agencyName ?? 'Central Insurance Agency', snapshotStartMonth: start, snapshotMonths: Number(orig.snapshotMonths ?? 12),
+      revenueBasis: 'statementPeriod', defaultBrokerShareBps: Number(orig.defaultBrokerShareBps ?? 5000),
+      aiEnabled: !!orig.aiEnabled, aiModel: orig.aiModel ?? MODEL, aiMonthlyCallLimit: Number(orig.aiMonthlyCallLimit ?? 100),
+    });
+    const origStart = orig.snapshotStartMonth ?? '2025-11';
+    const temp = origStart === '2024-06' ? '2024-07' : '2024-06';
+    let changed = null; let restored = null; let err = '';
+    try {
+      await call('saveSettings', body(temp));
+      changed = (await ref.get()).get('snapshotStartMonth');
+    } catch (e) { err = e instanceof Error ? e.message : String(e); }
+    finally {
+      try { await call('saveSettings', body(origStart)); restored = (await ref.get()).get('snapshotStartMonth'); } catch (e) { err += ` restore: ${e instanceof Error ? e.message : String(e)}`; }
+    }
+    const audits = await db.collection('auditLog').where('entityType', '==', 'settings').where('entityId', '==', 'app').get();
+    record('Settings save persists (change window, read back, restore)', changed === temp && restored === origStart && audits.size >= 2,
+      `saved ${temp} → read ${changed}; restored ${origStart} → read ${restored}; settings audit entries ${audits.size}${err ? `; ${err}` : ''}`);
+  }
 
   // Dev settings for the test: AI on, current model, enough monthly calls. Dev project only.
   const settingsRef = db.collection('settings').doc('app');

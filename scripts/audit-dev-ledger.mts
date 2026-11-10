@@ -128,6 +128,20 @@ for (const c of [...(dd.status === 'NO_PERIOD' ? [] : dd.checks), ...ddCp.checks
   if (!c.pass) { result.findings.push({ severity: 'error', code: 'diligence_check_failed', message: `Due-diligence check failed: ${c.name} (${c.detail}).`, ids: [] }); result.errors++; result.ok = false; }
 }
 
+// Optional read-only period override (AUDIT_DD_START=YYYY-MM): the same summary for another 12 months,
+// computed without changing Settings.
+const ddStart = process.env.AUDIT_DD_START?.trim() || '';
+const ddOverride = /^\d{4}-(0[1-9]|1[0-2])$/.test(ddStart)
+  ? buildDiligenceSummary({
+    entries, start: ddStart, months: 12,
+    carriers: carriers as unknown as DiligenceCarrier[], policies: policies as unknown as DiligencePolicy[],
+    statements: rawStatements.map((x) => ({ id: x.id, status: String(x.status ?? ''), statementMonth: (x.statementMonth as string) ?? null, payerId: (x.payerId as string) ?? null })),
+  })
+  : null;
+if (ddOverride) for (const c of ddOverride.checks) {
+  if (!c.pass) { result.findings.push({ severity: 'error', code: 'diligence_check_failed', message: `Due-diligence check failed for ${ddStart}: ${c.name} (${c.detail}).`, ids: [] }); result.errors++; result.ok = false; }
+}
+
 // ---------------------------------------------------------------- output (local files only)
 const $ = (c: number) => formatCents(c);
 const lines: string[] = [];
@@ -175,6 +189,20 @@ md('|---|---|');
 for (const c of [...dd.checks, ...ddCp.checks]) md(`| ${c.name} | ${c.pass ? '✅' : '❌'} ${c.detail.replace(/\|/g, '/')} |`);
 md(`| No broker identifiers, broker names or email addresses in either export | ${result.findings.some((f) => f.code === 'diligence_export_leak') ? '❌' : '✅'} |`);
 md();
+if (ddOverride) {
+  md(`#### Due-diligence summary for ${ddOverride.from} – ${ddOverride.to} (read-only period override; Settings unchanged)`);
+  md();
+  md(`**${ddOverride.statusLabel}**. Total ${$(ddOverride.total.total)} (matched ${$(ddOverride.total.commission)}, unmatched ${$(ddOverride.total.unmatched)}, adjustments ${$(ddOverride.total.adjustment)}, retained ${$(ddOverride.total.retained)}); months with posted statements ${ddOverride.byMonth.filter((m) => m.hasPostedStatement).length} of ${ddOverride.months.length}.`);
+  md();
+  md('| Month | Total | Posted statements |');
+  md('|---|---|---|');
+  for (const m of ddOverride.byMonth) if (m.totals.total !== 0 || m.hasPostedStatement) md(`| ${m.month} | ${$(m.totals.total)} | ${m.statementPostings} |`);
+  md();
+  md(`Checks: ${ddOverride.checks.filter((c) => c.pass).length} of ${ddOverride.checks.length} pass${ddOverride.checks.some((c) => !c.pass) ? ` — FAILED: ${ddOverride.checks.filter((c) => !c.pass).map((c) => c.name).join('; ')}` : ''}.`);
+  md();
+  mkdirSync(OUT, { recursive: true });
+  writeFileSync(join(OUT, `due-diligence-commission-summary-${ddOverride.from}.csv`), diligenceSummaryCsv(ddOverride, { agencyName: settings?.agencyName ?? 'Agency', preparedAtIso: new Date().toISOString() }));
+}
 if (result.findings.length) {
   md('#### Findings');
   md();

@@ -44,6 +44,10 @@ on:
         description: 'Optional: posting or statement ID prefixes to list in the audit summary (comma-separated). Blank = all postings.'
         type: string
         default: ''
+      dd_period_start:
+        description: 'Optional (YYYY-MM): also build the due-diligence summary for the 12 months starting here, read-only, without changing Settings.'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -67,6 +71,7 @@ jobs:
       # audit-only / diagnose: chosen in Run workflow, or "[audit-only]" / "[diagnose]" in the pushed commit message.
       RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (contains(github.event.head_commit.message, '[audit-only]') && 'audit-only' || (contains(github.event.head_commit.message, '[diagnose]') && 'diagnose' || 'deploy')) }}
       AUDIT_FOCUS: ${{ github.event_name == 'workflow_dispatch' && inputs.focus || '' }}
+      AUDIT_DD_START: ${{ github.event_name == 'workflow_dispatch' && inputs.dd_period_start || '' }}
     steps:
       - name: Check for Workload Identity configuration
         id: cfg
@@ -236,6 +241,21 @@ jobs:
           deploy() { npx firebase deploy --project dev --only firestore,storage,functions --non-interactive --force; }
           # First deploys sometimes fail while service agents and IAM changes propagate; retry once.
           deploy || { echo "Deploy failed; retrying in 90 s (permission propagation)."; sleep 90; deploy; }
+
+      # Firebase callables check the sign-in and role inside the function, so Cloud Run must accept calls
+      # from the browser (allUsers may invoke). A deploy grants that only when it CREATES a function, so a
+      # function created without it stays private and the browser's CORS preflight gets 403 (seen in dev:
+      # saveSettings and nine others). Grant it explicitly for every callable this codebase exports.
+      - name: Ensure every callable accepts browser calls (public invoker)
+        if: steps.cfg.outputs.deploy == 'true'
+        run: |
+          set -euo pipefail
+          for f in $(node scripts/lib/callables.mjs); do
+            svc=$(echo "$f" | tr 'A-Z' 'a-z')
+            gcloud run services add-iam-policy-binding "$svc" --project "$DEV_PROJECT_ID" --region us-central1 \
+              --member=allUsers --role=roles/run.invoker --quiet --format=none
+            echo "$f: allUsers may invoke"
+          done
 
       - name: Seed dev reference data (synthetic)
         if: steps.cfg.outputs.deploy == 'true'

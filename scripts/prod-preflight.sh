@@ -99,6 +99,16 @@ for r in json.load(sys.stdin):
 for m,s,fl,o,fn,i in sorted(rows):
     print("  {:<8} {:<18} {:<16} stored:{:<4} {}  [{}]".format(m, s, fl, o, fn, i))
 print("  total: {}".format(len(rows)))'
+
+  echo; echo "== Browser access: CORS preflight (OPTIONS only; no function code runs, nothing changes)"
+  echo "   204 = callable from the web app. 403 = NOT callable from the browser (no public invoker): the"
+  echo "   web app shows 'Could not reach the server function'. 404 = not deployed (expected before the release"
+  echo "   for the 8 new Stage 3B/3C functions)."
+  for f in $(node scripts/lib/callables.mjs); do
+    c="$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://2001-pioneer.netlify.app' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' "https://us-central1-${PROJECT_ID}.cloudfunctions.net/${f}")"
+    case "$c" in 204) note="ok";; 403) note="NOT CALLABLE FROM THE BROWSER";; 404) note="not deployed";; *) note="check";; esac
+    printf '  %-26s %s %s\n' "$f" "$c" "$note"
+  done
 } | tee "$OUT"
 
 if [ "$LABEL" = "after" ] && [ -f preflight-before.txt ]; then
