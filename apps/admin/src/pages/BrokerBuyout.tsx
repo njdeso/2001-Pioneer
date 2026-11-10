@@ -9,11 +9,12 @@ import { useAuth } from '../auth';
 import { useData } from '../data';
 import { db } from '../firebase';
 import { Badge, Button, Card, ErrorNote, Field, Modal, Money, PageHeader, Select, Stat, TextInput } from '../ui';
+import { BuyoutSettlement } from './BuyoutSettlement';
 
 /**
- * Broker Buyout (owners only). This first part records commission ACTUALLY PAID to brokers upfront
- * (advance payments) and reviews every broker-owned active policy's current term for missing or
- * inconsistent advances. The settlement calculation, snapshots and reports come next.
+ * Broker Buyout (owners only): the settlement dashboard (live preview, snapshots, statements), plus the
+ * records of commission ACTUALLY PAID to brokers upfront (advance payments), reviewed against every
+ * broker-owned active policy's current term for missing or inconsistent advances.
  * Nothing here is visible to staff or included in any Pioneer / due-diligence export.
  */
 
@@ -51,7 +52,7 @@ export function BrokerBuyoutPage() {
   const [q, setQ] = useState('');
   const [open, setOpen] = useState<string | null>(null);
   const [form, setForm] = useState<{ policy: Policy; advance?: BrokerAdvance } | null>(null);
-  const [tab, setTab] = useState<'review' | 'import'>('review');
+  const [tab, setTab] = useState<'settlement' | 'review' | 'import'>('settlement');
 
   const reviews = useMemo(() => {
     const withAdvances = new Set(advances.map((a) => a.policyId));
@@ -77,7 +78,7 @@ export function BrokerBuyoutPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Broker Buyout" subtitle="Owners only. Advance payments actually paid to brokers, reviewed against each broker-owned policy’s current term. Settlement calculation, snapshots and reports come next." />
+      <PageHeader title="Broker Buyout" subtitle="Owners only. 1.5× annualized broker commission, less outstanding unearned advances, paid 50 % / 25 % / 25 %. Separate from every Pioneer export." />
       <ErrorNote message={error} />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Stat label="Broker-owned active policies" value={owned.length} />
@@ -86,11 +87,11 @@ export function BrokerBuyoutPage() {
         <Stat label="Policies requiring review" value={material} sub="Material advance issues" />
       </div>
       <div className="flex gap-2 border-b border-slate-200">
-        {(['review', 'import'] as const).map((t) => (
-          <button key={t} onClick={() => setTab(t)} className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === t ? 'border-ink font-semibold text-ink' : 'border-transparent text-slate-500'}`}>{t === 'review' ? 'Advance review' : 'Import advances'}</button>
+        {(['settlement', 'review', 'import'] as const).map((t) => (
+          <button key={t} onClick={() => setTab(t)} className={`-mb-px border-b-2 px-3 py-2 text-sm ${tab === t ? 'border-ink font-semibold text-ink' : 'border-transparent text-slate-500'}`}>{t === 'settlement' ? 'Settlement' : t === 'review' ? 'Advance review' : 'Import advances'}</button>
         ))}
       </div>
-      {tab === 'import' ? <AdvanceImport /> : (
+      {tab === 'settlement' ? <BuyoutSettlement advances={advances} terms={terms} /> : tab === 'import' ? <AdvanceImport /> : (
         <Card>
           <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
             <Field label="Review as of" hint="Which term is current; the closing date later"><TextInput type="date" value={asOf} onChange={(e) => setAsOf(e.target.value || today())} /></Field>

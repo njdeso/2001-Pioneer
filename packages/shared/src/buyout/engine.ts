@@ -212,9 +212,22 @@ export function valueBuyout(input: {
     });
   }
 
+  return settleBuyout({ closingDate: closing, rules, policies: out, brokers: input.brokers, adjustments: input.adjustments ?? [], expectedPolicyCount: input.policies.length });
+}
+
+/**
+ * Broker aggregation, installments, checks and blockers, from policy valuations. Used by valueBuyout and
+ * to re-settle a stored snapshot after an adjustment (the stored policy valuations never change).
+ */
+export function settleBuyout(input: {
+  closingDate: string; rules: BuyoutRules; policies: PolicyValuation[]; brokers: BuyoutBroker[]; adjustments: BuyoutAdjustment[]; expectedPolicyCount?: number;
+}): BuyoutValuation {
+  const { rules, adjustments } = input;
+  const closing = input.closingDate;
+  const out = input.policies;
+  const brokerById = new Map(input.brokers.map((b) => [b.id, b]));
   const sum = (xs: number[]) => xs.reduce((s, x) => s + x, 0);
   const included = out.filter((v) => v.included);
-  const adjustments = input.adjustments ?? [];
   const brokerIds = [...new Set([...included.map((v) => v.brokerId), ...adjustments.map((a) => a.brokerId)])].sort((a, b) => (brokerById.get(a)?.name ?? a).localeCompare(brokerById.get(b)?.name ?? b));
   const brokers: BrokerSettlement[] = brokerIds.map((id) => {
     const mine = included.filter((v) => v.brokerId === id);
@@ -262,7 +275,7 @@ export function valueBuyout(input: {
     { name: 'Broker totals add up to the grand totals', pass: sum(brokers.map((b) => b.grossBuyoutCents)) === totals.grossBuyoutCents && sum(brokers.map((b) => b.outstandingAdvanceCents)) === totals.outstandingAdvanceCents && sum(brokers.map((b) => b.netBeforeAdjustmentsCents)) === totals.netBeforeAdjustmentsCents, detail: `${brokers.length} brokers` },
     { name: 'Each broker settlement = Σ policy contributions + adjustments', pass: brokers.every((b) => b.finalNetCents === b.netBeforeAdjustmentsCents + b.adjustmentsCents), detail: '' },
     { name: 'Each broker’s three installments equal its net settlement exactly', pass: brokers.every((b) => b.finalNetCents <= 0 || sum(b.installments.map((x) => x.amountCents)) === b.finalNetCents), detail: '' },
-    { name: 'Every policy is either included or excluded with a reason', pass: out.every((v) => v.included !== !!v.exclusion) && out.length === input.policies.length, detail: `${out.length} considered: ${included.length} included, ${out.length - included.length} excluded` },
+    { name: 'Every policy is either included or excluded with a reason', pass: out.every((v) => v.included !== !!v.exclusion) && out.length === (input.expectedPolicyCount ?? out.length), detail: `${out.length} considered: ${included.length} included, ${out.length - included.length} excluded` },
     { name: 'Every policy belongs to exactly one broker', pass: new Set(out.map((v) => v.policyId)).size === out.length, detail: '' },
     { name: 'Adjustments belong to a broker with a reason', pass: adjustments.every((a) => !!a.brokerId && a.reason.trim().length >= 3 && Number.isSafeInteger(a.amountCents)), detail: `${adjustments.length} adjustment(s)` },
   ];

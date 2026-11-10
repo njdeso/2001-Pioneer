@@ -38,6 +38,10 @@ beforeEach(async () => {
     await setDoc(doc(db, 'brokerAdvances/SYN-ADV1'), { policyId: 'SYN-P1', brokerId: 'SYN-B1', amountPaidCents: 50000, status: 'active' });
     await setDoc(doc(db, 'advanceImports/SYN-IMP1'), { status: 'staged' });
     await setDoc(doc(db, 'advanceImports/SYN-IMP1/rows/00002'), { ok: true });
+    await setDoc(doc(db, 'buyoutSettlements/SYN-S1'), { closingDate: '2027-01-15', version: 1, state: 'finalized' });
+    await setDoc(doc(db, 'buyoutSettlements/SYN-S1/policyRows/SYN-P1'), { brokerId: 'SYN-B1', netContributionCents: 33904 });
+    await setDoc(doc(db, 'buyoutCounters/2027-01-15'), { lastVersion: 1 });
+    await setDoc(doc(db, 'buyoutConfig/current'), { plannedClosingDate: '2027-01-15', closingDateConfirmed: false });
   });
 });
 
@@ -183,6 +187,27 @@ describe('broker buyout data (owner only)', () => {
     const { collectionGroup } = await import('firebase/firestore');
     await assertSucceeds(getDocs(collectionGroup(staff(), 'terms')));
     await assertFails(getDocs(collectionGroup(buyerLike(), 'terms')));
+  });
+});
+
+describe('broker buyout settlements (owner only)', () => {
+  const paths = ['buyoutSettlements/SYN-S1', 'buyoutSettlements/SYN-S1/policyRows/SYN-P1', 'buyoutCounters/2027-01-15', 'buyoutConfig/current'];
+  it('only admin can read settlements, their policy rows, counters and config', async () => {
+    for (const p of paths) await assertSucceeds(getDoc(doc(admin(), p)));
+    await assertSucceeds(getDocs(collection(admin(), 'buyoutSettlements')));
+    for (const ctx of [staff, buyerLike, noRole, anon]) {
+      for (const p of paths) await assertFails(getDoc(doc(ctx(), p)));
+      await assertFails(getDocs(collection(ctx(), 'buyoutSettlements')));
+      await assertFails(getDocs(collection(ctx(), 'buyoutSettlements/SYN-S1/policyRows')));
+    }
+  });
+  it('a finalized settlement cannot be changed or deleted from any browser, even an admin', async () => {
+    await assertFails(setDoc(doc(admin(), 'buyoutSettlements/SYN-S1'), { state: 'draft' }, { merge: true }));
+    await assertFails(setDoc(doc(admin(), 'buyoutSettlements/SYN-S1/policyRows/SYN-P1'), { netContributionCents: 1 }, { merge: true }));
+    await assertFails(deleteDoc(doc(admin(), 'buyoutSettlements/SYN-S1')));
+    await assertFails(setDoc(doc(admin(), 'buyoutSettlements/SYN-NEW'), { state: 'finalized' }));
+    await assertFails(setDoc(doc(admin(), 'buyoutCounters/2027-01-15'), { lastVersion: 0 }));
+    await assertFails(setDoc(doc(admin(), 'buyoutConfig/current'), { plannedClosingDate: '2026-01-01' }));
   });
 });
 

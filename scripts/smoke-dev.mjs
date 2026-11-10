@@ -10,6 +10,10 @@
 //                            scenario, broker percentages, negative commission, totals; manual assign /
 //                            unmatch / re-run keeps manual / return to automatic; audit entries;
 //                            extracted values and policies unchanged; nothing posted to the ledger)
+//   7. Broker buyout        (synthetic broker SYNBO-B50 at closing 2026-03-07: staff denied; snapshot math for
+//                            the specified $339.04 example, a two-term policy and a cancelled policy (no clawback);
+//                            adjustment re-settles installments; reviewed locks adjustments; finalize refused
+//                            when data changed since the snapshot, or while blockers remain; no ledger writes)
 //   6. Stage 3C posting     (same statement: approval blocked until ambiguous/unreviewed lines are
 //                            resolved; staff cannot approve or post; approve; matching locked; concurrent
 //                            and repeated posting post exactly once; ledger entries, allocations, suspense,
@@ -33,6 +37,7 @@ import { getStorage } from 'firebase-admin/storage';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { assertDevProjectNumber } from './lib/dev-guard.mjs';
 import { seedBook, writeStatement, LINES, EXPECTED_SUMMARY, PAYER_ID } from './lib/synthetic-3b.mjs';
+import * as BO from './lib/synthetic-buyout.mjs';
 
 const DEV = 'pioneer-2001-dev';
 const PROD = 'pioneer-285cf';
@@ -403,6 +408,68 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   record('Dev reports left net zero for this run', finalWindow.amount === before.amount && finalWindow.broker === before.broker, `window ${$(finalWindow.amount)} (start ${$(before.amount)})`);
 }
 
+// ---------------------------------------------------------------- Broker buyout
+async function buyoutStage() {
+  summary('\n#### Broker buyout — settlement snapshots (synthetic broker SYNBO-B50)\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  await BO.seedBuyout(db, FieldValue);
+  const ledgerBefore = (await db.collection('ledger').count().get()).data().count;
+  const note = 'smoke test: synthetic buyout';
+  const staffCreate = await expectRejected(call('createBuyoutSnapshot', { closingDate: BO.BUYOUT_CLOSING, note }, 1, STAFF_TOKEN));
+  record('Buyout: staff cannot create a settlement snapshot', staffCreate.rejected && /permission/i.test(staffCreate.message), staffCreate.message);
+
+  const c = await call('createBuyoutSnapshot', { closingDate: BO.BUYOUT_CLOSING, note });
+  const ref = db.collection('buyoutSettlements').doc(c.id);
+  const row = async (id) => (await ref.collection('policyRows').doc(id).get()).data() ?? {};
+  for (const [k, id] of [['P1', 'SYNBO-P1'], ['P2', 'SYNBO-P2'], ['P3', 'SYNBO-P3']]) {
+    const r = await row(id);
+    const errs = Object.entries(BO.EXPECTED[k]).filter(([f, want]) => r[f] !== want).map(([f, want]) => `${f} ${r[f]} ≠ ${want}`);
+    record(`Buyout: ${id} ${k === 'P1' ? '(specified example)' : k === 'P2' ? '(two terms, one policy record)' : '(cancelled before closing)'}`, errs.length === 0,
+      r.included ? `gross ${$(r.grossBuyoutCents)} − unearned ${$(r.outstandingAdvanceCents)} = net ${$(r.netContributionCents)} (${r.remainingDays}/${r.termDays} days)` + (errs.length ? ` — ${errs.join('; ')}` : '') : `excluded: ${r.exclusion}${errs.length ? ` — ${errs.join('; ')}` : ''}`);
+  }
+  const brokerOf = async () => ((await ref.get()).get('brokers') ?? []).find((b) => b.brokerId === BO.BROKER.id) ?? {};
+  const inst = (b) => (b.installments ?? []).map((i) => i.amountCents);
+  let b = await brokerOf();
+  record('Buyout: broker settlement and 50/25/25 schedule', b.policies === BO.EXPECTED.broker.policies && b.finalNetCents === BO.EXPECTED.broker.finalNetCents && JSON.stringify(inst(b)) === JSON.stringify(BO.EXPECTED.broker.installments) && (b.installments ?? []).map((i) => i.dueDate).join() === '2026-03-07,2027-03-07,2028-03-07',
+    `net ${$(b.finalNetCents)}; ${(b.installments ?? []).map((i) => `${i.dueDate} ${$(i.amountCents)}`).join(', ')}`);
+
+  const staffAdj = await expectRejected(call('addBuyoutAdjustment', { snapshotId: c.id, brokerId: BO.BROKER.id, amountCents: 3, reason: note }, 1, STAFF_TOKEN));
+  const noReason = await expectRejected(call('addBuyoutAdjustment', { snapshotId: c.id, brokerId: BO.BROKER.id, amountCents: 3, reason: '' }));
+  await call('addBuyoutAdjustment', { snapshotId: c.id, brokerId: BO.BROKER.id, amountCents: 3, reason: note });
+  b = await brokerOf();
+  const adjId = b.adjustments?.[0]?.id;
+  record('Buyout: adjustment needs admin + reason, re-settles before installments', staffAdj.rejected && noReason.rejected && b.finalNetCents === BO.EXPECTED.adjusted.finalNetCents && JSON.stringify(inst(b)) === JSON.stringify(BO.EXPECTED.adjusted.installments),
+    `staff rejected=${staffAdj.rejected}, blank reason rejected=${noReason.rejected}; net ${$(b.finalNetCents)}; ${inst(b).map($).join(' / ')}`);
+  await call('removeBuyoutAdjustment', { snapshotId: c.id, adjustmentId: adjId, reason: note });
+  b = await brokerOf();
+  record('Buyout: removing the adjustment restores the settlement', b.finalNetCents === BO.EXPECTED.broker.finalNetCents, `net ${$(b.finalNetCents)}`);
+
+  await call('setBuyoutSnapshotState', { snapshotId: c.id, to: 'reviewed', note });
+  const lockedAdj = await expectRejected(call('addBuyoutAdjustment', { snapshotId: c.id, brokerId: BO.BROKER.id, amountCents: 3, reason: note }));
+  record('Buyout: a reviewed version is locked against adjustments', lockedAdj.rejected && /draft/i.test(lockedAdj.message), lockedAdj.message);
+
+  // Data changed after the snapshot → finalize refused. (Synthetic advance changed, then restored by re-seeding.)
+  await db.collection('brokerAdvances').doc('SYNBO-ADV1').set({ amountPaidCents: 50001 }, { merge: true });
+  const stale = await expectRejected(call('setBuyoutSnapshotState', { snapshotId: c.id, to: 'finalized', note }));
+  await BO.seedBuyout(db, FieldValue);
+  record('Buyout: finalize refused when the data changed since the snapshot', stale.rejected && /changed since/i.test(stale.message), stale.message);
+
+  const snap = (await ref.get()).data() ?? {};
+  if (snap.finalizable) {
+    await call('setBuyoutSnapshotState', { snapshotId: c.id, to: 'finalized', note });
+    const after = await expectRejected(call('setBuyoutSnapshotState', { snapshotId: c.id, to: 'draft', note }));
+    record('Buyout: finalized version is immutable', (await ref.get()).get('state') === 'finalized' && after.rejected, after.message);
+  } else {
+    const blocked = await expectRejected(call('setBuyoutSnapshotState', { snapshotId: c.id, to: 'finalized', note }));
+    record('Buyout: finalize refused while blockers remain', blocked.rejected && /Cannot finalize/i.test(blocked.message), `${(snap.blockers ?? []).join(' ')}`);
+    await call('setBuyoutSnapshotState', { snapshotId: c.id, to: 'discarded', note });
+  }
+  const audits = await db.collection('auditLog').where('entityType', '==', 'buyoutSettlement').where('entityId', '==', c.id).get();
+  const ledgerAfter = (await db.collection('ledger').count().get()).data().count;
+  record('Buyout: every step audit-logged; nothing written to the ledger', audits.size >= 5 && ledgerAfter === ledgerBefore, `${audits.size} audit entries; ledger ${ledgerBefore} → ${ledgerAfter}; snapshot v${c.version} (${c.id}) left ${(await ref.get()).get('state')}`);
+}
+
 // ---------------------------------------------------------------- run
 summary(`### Live smoke test — ${DEV}\n`);
 summary('| | Check | Result |');
@@ -505,6 +572,7 @@ try {
   let ctx3b = null;
   try { ctx3b = await stage3b(); } catch (err) { record('Stage 3B matching run', false, err instanceof Error ? err.message : String(err)); }
   if (ctx3b) { try { await stage3c(ctx3b); } catch (err) { record('Stage 3C posting run', false, err instanceof Error ? err.message : String(err)); } }
+  try { await buyoutStage(); } catch (err) { record('Broker buyout run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
 }

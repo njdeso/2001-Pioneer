@@ -82,6 +82,11 @@ export const api = {
     call<typeof input, { importId: string; counts: { rows: number; ok: number; errors: number; warnings: number }; totalOkCents: number; rows: ParsedAdvanceRow[] }>('stageAdvanceImport', input),
   commitAdvanceImport: (input: { importId: string; note: string }) => call<typeof input, { created: number; already: boolean }>('commitAdvanceImport', input),
   discardAdvanceImport: (input: { importId: string }) => call<typeof input, { discarded: string }>('discardAdvanceImport', input),
+  saveBuyoutConfig: (input: { plannedClosingDate: string | null; closingDateConfirmed: boolean; note: string }) => call<typeof input, { ok: true }>('saveBuyoutConfig', input),
+  createBuyoutSnapshot: (input: { closingDate: string; note: string }) => call<typeof input, { id: string; version: number; finalizable: boolean; blockers: string[] }>('createBuyoutSnapshot', input, 300_000),
+  addBuyoutAdjustment: (input: { snapshotId: string; brokerId: string; amountCents: number; reason: string }) => call<typeof input, { finalizable: boolean; blockers: string[] }>('addBuyoutAdjustment', input),
+  removeBuyoutAdjustment: (input: { snapshotId: string; adjustmentId: string; reason: string }) => call<typeof input, { finalizable: boolean; blockers: string[] }>('removeBuyoutAdjustment', input),
+  setBuyoutSnapshotState: (input: { snapshotId: string; to: 'draft' | 'reviewed' | 'finalized' | 'discarded'; note: string }) => call<typeof input, { state: string }>('setBuyoutSnapshotState', input, 120_000),
   savePolicyTerm: (input: { policyId: string; originalTermId: string | null; term: { effectiveDate: string; scheduledExpirationDate: string; cancellationDate: string | null; status: string; note: string }; note: string }) =>
     call<typeof input, { termId: string; warnings: { message: string }[] }>('savePolicyTerm', input),
   removePolicyTerm: (input: { policyId: string; termId: string; note: string }) => call<typeof input, { removed: string }>('removePolicyTerm', input),

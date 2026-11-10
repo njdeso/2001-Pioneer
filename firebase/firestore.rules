@@ -54,6 +54,12 @@ service cloud.firestore {
     match /advanceImports/{id}     { allow read: if isAdmin(); allow write: if false;
       match /rows/{rowId}          { allow read: if isAdmin(); allow write: if false; }
     }
+    // Broker buyout settlements (owner only): snapshots, their frozen per-policy rows, version counters, config.
+    match /buyoutSettlements/{id}  { allow read: if isAdmin(); allow write: if false;
+      match /policyRows/{rowId}    { allow read: if isAdmin(); allow write: if false; }
+    }
+    match /buyoutCounters/{id}     { allow read: if isAdmin(); allow write: if false; }
+    match /buyoutConfig/{id}       { allow read: if isAdmin(); allow write: if false; }
     // Collection-group reads of coverage terms (the advance review lists every policy's terms).
     match /{path=**}/terms/{termId} { allow read: if isStaff(); allow write: if false; }
 
