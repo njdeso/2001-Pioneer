@@ -221,7 +221,15 @@ jobs:
             echo '```'
             echo "### Web app builds (public pages, read-only GET): Firebase project, region and functions in the bundle"
             echo '```'
-            for site in deploy-dev--2001-pioneer deploy-preview-4--2001-pioneer deploy-preview-3--2001-pioneer; do
+            # Netlify builds this branch in parallel with this workflow: give the dev site up to 8 minutes to
+            # serve a bundle built from THIS commit (the DEV banner stamp is the full commit SHA in the bundle).
+            for i in $(seq 1 16); do
+              js=$(curl -s "https://deploy-dev--2001-pioneer.netlify.app/" | grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' | head -1)
+              if [ -n "$js" ] && curl -s "https://deploy-dev--2001-pioneer.netlify.app$js" | grep -qF "$GITHUB_SHA"; then echo "deploy-dev serves $GITHUB_SHA (after $i check(s))"; break; fi
+              [ "$i" = 16 ] && echo "deploy-dev did NOT serve a bundle built from $GITHUB_SHA within 8 minutes"
+              sleep 30
+            done
+            for site in deploy-dev--2001-pioneer deploy-preview-6--2001-pioneer; do
               base="https://$site.netlify.app"
               code=$(curl -s -o /tmp/index.html -w '%{http_code}' "$base/")
               js=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/index.html | head -1)
@@ -231,7 +239,8 @@ jobs:
                 echo "  projectId values: $(grep -oE 'projectId:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
                 echo "  authDomain:       $(grep -oE 'authDomain:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
                 echo "  deploy context:   $(grep -oE '"(deploy-preview|branch-deploy|production)"' /tmp/b.js | sort -u | tr '\n' ' ')"
-                for k in pioneer-2001-dev us-central1 cloudfunctions.net approveStatement postStatement runStatementMatching 'Due Diligence Package' 'Ties to the Dashboard'; do
+                echo "  built from commit: $(grep -oE '[0-9a-f]{40}' /tmp/b.js | sort -u | tr '\n' ' ')"
+                for k in pioneer-2001-dev us-central1 cloudfunctions.net approveStatement postStatement runStatementMatching 'Coverage terms' 'Add term' savePolicyTerm 'Broker Buyout' createBuyoutSnapshot 'Search customer or policy'; do
                   printf '  %-24s %s\n' "$k" "$(grep -oF "$k" /tmp/b.js | wc -l)"
                 done
               fi
