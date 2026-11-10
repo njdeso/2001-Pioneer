@@ -95,7 +95,7 @@ async function deployedFunctions() {
     if (!r.ok) throw new Error(`Listing deployed functions failed: HTTP ${r.status} ${j.error?.message ?? ''}`);
     for (const f of j.functions ?? []) {
       const [, , , region, , name] = f.name.split('/'); // projects/P/locations/REGION/functions/NAME
-      out.set(name, { region, url: f.url ?? f.serviceConfig?.uri, state: f.state });
+      out.set(name, { region, url: f.url ?? f.serviceConfig?.uri, state: f.state, service: f.serviceConfig?.service ?? null, updated: f.updateTime ?? null });
     }
     pageToken = j.nextPageToken ?? '';
   } while (pageToken);
@@ -104,17 +104,34 @@ async function deployedFunctions() {
 
 let ID_TOKEN = '';
 let FUNCTIONS = new Map();
+/** Does the Cloud Run service behind a function allow public invocation (allUsers → run.invoker)? */
+async function invokerStatus(fn) {
+  if (!fn.service) return 'unknown (no service name)';
+  const r = await fetch(`https://run.googleapis.com/v2/${fn.service}:getIamPolicy`, { headers: { authorization: `Bearer ${await googleToken()}` } });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return `could not read IAM policy (HTTP ${r.status} ${j.error?.message ?? ''})`;
+  const inv = (j.bindings ?? []).find((b) => b.role === 'roles/run.invoker');
+  return inv?.members?.includes('allUsers') ? 'allUsers can invoke' : `no public invoker (run.invoker: ${inv?.members?.join(', ') || 'none'})`;
+}
+
 /** Firebase callable protocol: POST JSON {"data": …} with the user's Firebase ID token as Bearer. */
-async function call(name, data) {
+async function call(name, data, attempt = 1) {
   const fn = FUNCTIONS.get(name);
   if (!fn) throw new Error(`${name} is not deployed in ${DEV}.`);
   if (fn.region !== REGION) throw new Error(`${name} is deployed in ${fn.region}, but the app calls ${REGION}.`);
-  const r = await fetch(fn.url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${ID_TOKEN}` },
-    body: JSON.stringify({ data }),
-    signal: AbortSignal.timeout(560_000),
-  });
+  // A function created moments ago can answer 401/403 from Cloud Run until its public-invoker IAM
+  // binding propagates (usually under 2 minutes). Wait for that, up to ~4 minutes, then report the
+  // actual IAM policy instead of retrying forever. Callable errors (JSON) are never retried.
+  const r0 = await fetch(fn.url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ID_TOKEN}` }, body: JSON.stringify({ data }), signal: AbortSignal.timeout(560_000) });
+  if ((r0.status === 401 || r0.status === 403) && !(r0.headers.get('content-type') ?? '').includes('json')) {
+    if (attempt < 9) { await new Promise((res) => setTimeout(res, 30_000)); return call(name, data, attempt + 1); }
+    throw new Error(`${name}: Cloud Run still answers HTTP ${r0.status} after ${attempt} tries; IAM: ${await invokerStatus(fn)}`);
+  }
+  if (attempt > 1) summary(`\n_${name} became callable after ${attempt - 1} wait(s) of 30 s (new-function IAM propagation)._\n`);
+  return parseCallable(name, r0);
+}
+
+async function parseCallable(name, r) {
   const text = await r.text();
   let j; try { j = JSON.parse(text); } catch { throw new Error(`${name}: HTTP ${r.status}, not a callable JSON response (${text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)})`); }
   if (j.error) throw new Error(`${name}: ${j.error.status ?? r.status} ${j.error.message}`);
