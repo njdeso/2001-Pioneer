@@ -118,7 +118,7 @@ export function CarrierDetailPage() {
             </tbody>
           </table>
         </div>
-        {entries.length === 0 && <p className="mt-2 text-xs text-slate-500">No statements posted for this {isWholesaler ? 'wholesaler' : 'carrier'} yet. Statements, payment history and reconciliation status appear here from Phases 3–4.</p>}
+        {entries.length === 0 && <p className="mt-2 text-xs text-slate-500">No statements posted for this {isWholesaler ? 'wholesaler' : 'carrier'} yet. Monthly totals appear here once its statements are approved and posted; every transaction is listed in the Ledger.</p>}
       </Card>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">

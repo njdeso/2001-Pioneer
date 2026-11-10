@@ -3,7 +3,8 @@
 //   - reference data for Stage 3A (Travelers carrier, Unassigned broker, default settings)
 //   - the Stage 3B synthetic book (carriers, brokers, clients, policies tagged synthetic, IDs SYN3B-…)
 //   - one synthetic extracted statement for manual matching tests: SYN3B-MANUAL, created once and then
-//     left as you leave it; set SEED_RESET_3B=1 to reset it
+//     left as you leave it; set SEED_RESET_3B=1 to reset it (refused once it has been approved, posted
+//     or reversed: those records are kept; the ledger is never deleted from)
 //
 //   npm run seed:dev                      (dev project; Application Default Credentials)
 //   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 node scripts/seed-dev.mjs demo-asm

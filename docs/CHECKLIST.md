@@ -66,10 +66,21 @@ one PR per stage; per-policy broker % (default broker %); payment-only rows kept
 - ✅ Broker vs agency commission in integer cents (half-even, sums exact); negatives and chargebacks; adjustments agency-only; per-policy broker share (default: broker's share)
 - ✅ Review screen: progress, totals with balance check, per-broker table, match and broker filters, search on matched records
 - ✅ Writes only line match, statement summary and audit log; no clients/policies/ledger writes; posted statements locked; rules test
-- 🟡 Live test in pioneer-2001-dev (not run: Stage 3B was not deployed anywhere)
-- ⏳ Stage 3B review and approval
+- ✅ Live test in pioneer-2001-dev: all matching checks pass (run 42744707814)
+- ⏳ Stage 3B review and approval (PR #3)
 
-### Stages 3C–3F ⏳ (approval & posting · broker statements & payments · corrections & revisions · Lancer)
+### Stage 3C — Approval and posting (PR #4, branch `feature/stage-3c-posting`) — docs/STAGE-3C-POSTING.md
+- ✅ Readiness: reconciled, payer, month, matching current/balanced, no ambiguous/unreviewed lines, duplicate acknowledged
+- ✅ Approve (fingerprint) → post in one transaction with deterministic entry IDs; concurrent/double posting refused
+- ✅ Allocations stored per entry: policy-specific or broker %, chargebacks, suspense (100 % agency), adjustments (carrier-level)
+- ✅ Reversal with reason: exact negative twins, originals marked reversed, statement back in review, re-post as posting #2
+- ✅ Retained commission (manual, idempotent, policy split) with reversal
+- ✅ Admin-only on the server; staff refused; browser cannot write ledger/statement status (rules test)
+- ✅ Rolling-12-month reports from the ledger; Dashboard broker share from stored allocations
+- ✅ Live test in pioneer-2001-dev: 48 of 48 checks (matching + posting end to end)
+- ⏳ Stage 3C review and approval (PR #4); production checklist docs/RELEASE-3B-3C.md
+
+### Stages 3D–3F ⏳ (broker statements & payments · corrections & revisions · Lancer)
 
 ## Phase 4 — Reports, valuation, lock, due-diligence package ⏳
 ## Phase 5 — Final hardening ⏳

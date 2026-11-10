@@ -1,10 +1,9 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { collection, doc, onSnapshot, query, where, type Query } from 'firebase/firestore';
 import {
-  addMonths, brokerSplit, monthlyTotals, totalInWindow, totalsBy, totalsByBroker,
-  type Broker, type Carrier, type Cents, type Client, type LedgerEntry, type Month, type Policy, type Settings,
-  UNASSIGNED_BROKER_ID,
-} from '@asm/shared';
+  addMonths, inRange, ledgerTotals, monthlyTotals, totalsBy, totalsByBroker, windowRange,
+  type Broker, type Carrier, type Cents, type Client, type LedgerEntry, type LegacyBrokerFn, type Month, type MonthRange, type Policy, type Settings,
+  UNASSIGNED_BROKER_ID } from '@asm/shared';
 import { db } from './firebase';
 
 /**
@@ -26,6 +25,7 @@ export interface Revenue {
   byLine: Map<string, Cents>;
   brokerShare: Cents;
   agencyNet: Cents;
+  range: MonthRange;
 }
 
 interface DataState {
@@ -41,6 +41,8 @@ interface DataState {
   clientById: Map<string, Client>;
   policyById: Map<string, Policy>;
   revenue: Revenue | null;
+  /** Broker for an entry without a stored allocation (pre-Stage-3C): the policy's current broker. */
+  legacyBroker: LegacyBrokerFn;
 }
 
 const DataContext = createContext<DataState | null>(null);
@@ -94,30 +96,33 @@ export function DataProvider({ children }: { children: ReactNode }) {
     const clientById = new Map(clients.rows.map((c) => [c.id, c]));
     const policyById = new Map(policies.rows.map((p) => [p.id, p]));
 
+    const policyBroker = new Map(policies.rows.map((p) => [p.id, p.brokerId || UNASSIGNED_BROKER_ID]));
+    const legacyBroker: LegacyBrokerFn = (e) => {
+      const b = e.policyId ? brokerById.get(policyBroker.get(e.policyId) ?? UNASSIGNED_BROKER_ID) : undefined;
+      return b ? { brokerId: b.id, shareBps: b.shareBps } : null;
+    };
+
     let revenue: Revenue | null = null;
     if (start) {
       const entries = ledger.rows;
-      const policyBroker = new Map(policies.rows.map((p) => [p.id, p.brokerId || UNASSIGNED_BROKER_ID]));
-      const byBroker = totalsByBroker(entries, policyBroker, start, months);
-      let brokerShare = 0;
-      for (const [brokerId, gross] of byBroker) {
-        const b = brokerById.get(brokerId);
-        if (b) brokerShare += brokerSplit(gross, b.shareBps).broker;
-      }
-      const total = totalInWindow(entries, start, months);
+      const range = windowRange(start, months);
+      // Gross, broker share and agency net come from ledgerTotals, the same function the Ledger
+      // report and the dev audit use: stored allocation per entry, reversals included.
+      const totals = ledgerTotals(entries.filter((e) => inRange(e, range)), legacyBroker);
       revenue = {
         start,
         months,
         entries,
-        total,
+        total: totals.grossCents,
         monthly: monthlyTotals(entries, start, months),
         byPayer: totalsBy(entries, (e) => e.payerId, start, months),
         byCarrier: totalsBy(entries, (e) => e.carrierId, start, months),
-        byBroker,
+        byBroker: totalsByBroker(entries, policyBroker, start, months),
         byPolicy: totalsBy(entries, (e) => e.policyId, start, months),
         byLine: totalsBy(entries, (e) => (e.policyId ? policyById.get(e.policyId)?.line : null), start, months, 'carrier_level'),
-        brokerShare,
-        agencyNet: total - brokerShare,
+        brokerShare: totals.brokerCents,
+        agencyNet: totals.agencyCents,
+        range,
       };
     }
 
@@ -135,6 +140,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
       clientById,
       policyById,
       revenue,
+      legacyBroker,
     };
   }, [settings, settingsLoaded, carriers, brokers, clients, policies, ledger, start, months]);
 

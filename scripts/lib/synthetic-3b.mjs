@@ -107,10 +107,24 @@ export async function seedBook(db, FieldValue) {
   await b.commit();
 }
 
-/** Create (or replace) a synthetic extracted statement with the LINES above. No file is attached. */
+/**
+ * Create a synthetic extracted statement with the LINES above (no file attached), or reset one that has
+ * never been approved or posted. A statement that has been approved, posted or reversed, or that any
+ * ledger entry refers to, is never replaced: its records are part of the append-only audit trail.
+ */
 export async function writeStatement(db, FieldValue, statementId, label) {
   if (!statementId.startsWith('SYN3B-')) throw new Error('Synthetic statement IDs must start with SYN3B-');
   const ref = db.collection('statements').doc(statementId);
+  const cur = await ref.get();
+  if (cur.exists) {
+    const s = cur.data();
+    const touched = s.synthetic !== true || s.approval || s.posting || (s.reversals ?? []).length > 0 || (s.postingSeq ?? 0) > 0
+      || Number(s.postedCents ?? 0) !== 0 || ['approved', 'posted'].includes(s.status);
+    const ledger = await db.collection('ledger').where('statementId', '==', statementId).limit(1).get();
+    if (touched || !ledger.empty) {
+      throw new Error(`Refusing to replace statement ${statementId}: it has been approved, posted or reversed (or ledger entries refer to it). Its records are kept; use a new statement instead.`);
+    }
+  }
   const old = await ref.collection('lines').listDocuments();
   for (let i = 0; i < old.length; i += 400) { const b = db.batch(); old.slice(i, i + 400).forEach((d) => b.delete(d)); await b.commit(); }
   const b = db.batch();

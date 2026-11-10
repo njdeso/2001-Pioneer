@@ -55,3 +55,10 @@ test('valid dev values produce an explicit dev-only build environment', async ()
   assert.equal(env.VITE_FUNCTIONS_REGION, 'us-central1');
   assert.equal(env.VITE_DEPLOY_CONTEXT, 'deploy-preview');
 });
+
+test('the build is stamped with the Netlify commit so a stale page is visible', async () => {
+  const env = await resolvePreviewEnv({ ...ok, COMMIT_REF: '7456f2b0123456789' }, firebase('pioneer-2001-dev'));
+  assert.equal(env.VITE_COMMIT_REF, '7456f2b0123456789');
+  const none = await resolvePreviewEnv({ ...ok }, firebase('pioneer-2001-dev'));
+  assert.equal(none.VITE_COMMIT_REF, '');
+});

@@ -25,7 +25,10 @@ export const configMissing = !config.apiKey || !config.projectId || previewTarge
 export const app = initializeApp(configMissing ? { apiKey: 'missing', projectId: 'demo-asm' } : config);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-export const functions = getFunctions(app, env.VITE_FUNCTIONS_REGION || 'us-central1');
+export const functionsRegion = env.VITE_FUNCTIONS_REGION || 'us-central1';
+export const functions = getFunctions(app, functionsRegion);
+/** Commit the web app was built from (Netlify COMMIT_REF, short), shown in the DEV banner and in errors. */
+export const buildRef = (env.VITE_COMMIT_REF ?? '').slice(0, 7) || null;
 export const storage = getStorage(app);
 
 /** The production project. Anything else (dev project, emulator) shows a DEV banner. */

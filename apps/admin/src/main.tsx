@@ -14,6 +14,8 @@ import { SettingsPage } from './pages/Settings';
 import { ImportPage } from './pages/Import';
 import { StatementUploadPage, StatementQueuePage, StatementReviewPage } from './pages/Statements';
 import { ComingSoonPage } from './pages/ComingSoon';
+import { LedgerPage } from './pages/Ledger';
+import { DueDiligencePage } from './pages/DueDiligence';
 import { configMissing, previewTargetsWrongProject } from './firebase';
 
 function Gate() {
@@ -51,6 +53,8 @@ function Gate() {
           <Route path="/statements" element={<StatementUploadPage />} />
           <Route path="/queue" element={<StatementQueuePage />} />
           <Route path="/statements/:id" element={<StatementReviewPage />} />
+          <Route path="/ledger" element={<LedgerPage />} />
+          <Route path="/package" element={<DueDiligencePage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<ComingSoonPage />} />
         </Routes>

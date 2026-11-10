@@ -2,7 +2,8 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { formatBps, formatWindow, parsePercentToBps, settingsInput, fieldErrors, type AiDiagnosis, type AuditEvent } from '@asm/shared';
 import { db } from '../firebase';
-import { api, ApiError } from '../api';
+import { api, ApiError, probeStatementFunctions } from '../api';
+import { buildRef, functionsRegion, projectId } from '../firebase';
 import { useAuth } from '../auth';
 import { useData } from '../data';
 import { Button, Card, DataTable, ErrorNote, Field, PageHeader, TextInput } from '../ui';
@@ -10,6 +11,33 @@ import { Button, Card, DataTable, ErrorNote, Field, PageHeader, TextInput } from
 function stampToText(v: unknown): string {
   const t = v as { toDate?: () => Date } | null;
   return t?.toDate ? t.toDate().toLocaleString() : '';
+}
+
+/** Read-only check, from this browser, that every statement function is deployed and reachable. */
+function ServerConnectionCard() {
+  const [busy, setBusy] = useState(false);
+  const [rows, setRows] = useState<Awaited<ReturnType<typeof probeStatementFunctions>> | null>(null);
+  const run = async () => { setBusy(true); try { setRows(await probeStatementFunctions()); } finally { setBusy(false); } };
+  const bad = rows?.filter((r) => r.result !== 'reachable') ?? [];
+  return (
+    <Card title="Server connection">
+      <dl className="space-y-1 text-sm">
+        <div className="flex justify-between"><dt className="text-slate-500">Project</dt><dd className="font-mono text-xs">{projectId}</dd></div>
+        <div className="flex justify-between"><dt className="text-slate-500">Functions region</dt><dd className="font-mono text-xs">{functionsRegion}</dd></div>
+        <div className="flex justify-between"><dt className="text-slate-500">Web app build</dt><dd className="font-mono text-xs">{buildRef ?? 'not stamped'}</dd></div>
+      </dl>
+      <div className="mt-3"><Button size="sm" variant="secondary" disabled={busy} onClick={() => void run()}>{busy ? 'Checking…' : 'Check statement functions'}</Button></div>
+      <p className="mt-2 text-xs text-slate-500">Calls each matching, approval and posting function with deliberately invalid input, which every one of them refuses before reading or changing anything.</p>
+      {rows && (
+        <div className="mt-3 space-y-1 text-xs">
+          <div className={bad.length ? 'font-semibold text-red-700' : 'font-semibold text-emerald-700'}>{bad.length ? `${bad.length} of ${rows.length} not reachable from this browser` : `All ${rows.length} reachable`}</div>
+          {rows.map((r) => (
+            <div key={r.name} className="flex justify-between gap-2"><span className="font-mono">{r.name}</span><span className={r.result === 'reachable' ? 'text-emerald-700' : 'text-red-700'}>{r.result}{r.result !== 'reachable' ? ` — ${r.detail} — ${r.url}` : ''}</span></div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
 }
 
 export function SettingsPage() {
@@ -57,6 +85,9 @@ export function SettingsPage() {
       (s) => setEvents(s.docs.map((d) => ({ id: d.id, ...d.data() }) as AuditEvent)));
   }, [role]);
 
+  // The form shows edits immediately; the rest of the app uses the SAVED settings. Make the difference visible.
+  const windowUnsaved = !!settings && (f.snapshotStartMonth !== settings.snapshotStartMonth || Number(f.snapshotMonths) !== (settings.snapshotMonths ?? 12));
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null); setSaved(false);
@@ -88,8 +119,12 @@ export function SettingsPage() {
             <Field label="Agency name" error={errors.agencyName} className="sm:col-span-2">
               <TextInput value={f.agencyName} onChange={(e) => setF({ ...f, agencyName: e.target.value })} />
             </Field>
+            <div className={`rounded-md border p-3 text-sm sm:col-span-2 ${windowUnsaved ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
+              <div><span className="font-semibold">Saved reporting period:</span> {settings ? formatWindow(settings.snapshotStartMonth, settings.snapshotMonths ?? 12) : 'not set'}. The Dashboard, Ledger and Due Diligence Package use this saved period.</div>
+              {windowUnsaved && <div className="mt-1 font-semibold">Unsaved change: {f.snapshotStartMonth.match(/^\d{4}-\d{2}$/) ? formatWindow(f.snapshotStartMonth, Number(f.snapshotMonths) || 12) : f.snapshotStartMonth}. It takes effect only after Save settings succeeds.</div>}
+            </div>
             <Field label="First month of the window" error={errors.snapshotStartMonth}
-              hint={f.snapshotStartMonth.match(/^\d{4}-\d{2}$/) ? formatWindow(f.snapshotStartMonth, Number(f.snapshotMonths) || 12) : 'YYYY-MM'}>
+              hint={f.snapshotStartMonth.match(/^\d{4}-\d{2}$/) ? `${formatWindow(f.snapshotStartMonth, Number(f.snapshotMonths) || 12)}${windowUnsaved ? ' (not saved)' : ''}` : 'YYYY-MM'}>
               <TextInput type="month" value={f.snapshotStartMonth} onChange={(e) => setF({ ...f, snapshotStartMonth: e.target.value })} />
             </Field>
             <Field label="Months in window" error={errors.snapshotMonths}>
@@ -147,6 +182,7 @@ export function SettingsPage() {
             </div>
           </form>
         </Card>
+        <ServerConnectionCard />
         <Card title="Your account">
           <dl className="space-y-2 text-sm">
             <div className="flex justify-between"><dt className="text-slate-500">Email</dt><dd>{user?.email}</dd></div>
