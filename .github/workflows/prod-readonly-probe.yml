@@ -52,7 +52,8 @@ jobs:
           set -u
           git show origin/main:functions/src/index.ts > /tmp/main-index.ts
           main=$(node -e "import('./scripts/lib/callables.mjs').then(m=>console.log(m.exportedCallables('/tmp/main-index.ts').join(' ')))")
-          pr6=$(node scripts/lib/callables.mjs | tr '\n' ' ')
+          git show origin/feature/broker-buyout:functions/src/index.ts > /tmp/pr6-index.ts
+          pr6=$(node -e "import('./scripts/lib/callables.mjs').then(m=>console.log(m.exportedCallables('/tmp/pr6-index.ts').join(' ')))")
           extra=$(comm -13 <(tr ' ' '\n' <<<"$main" | sort) <(tr ' ' '\n' <<<"$pr6" | sort) | tr '\n' ' ')
           probe() {
             curl -s -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://2001-pioneer.netlify.app' \
