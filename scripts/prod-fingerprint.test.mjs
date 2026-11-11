@@ -21,6 +21,8 @@ function dataset({ policyCount = 250, tweak = false } = {}) {
     'statements/s2/lines': [],
   };
   for (const k of ['policyKeys', 'carriers', 'brokers', 'statementKeys', 'settings', 'users']) c[k] = [];
+  // 130 coverage terms (more than one page of 100) under policies/*/terms.
+  c.__terms = Array.from({ length: 130 }, (_, i) => doc(`policies/p${String(i).padStart(4, '0')}/terms/2025-07-0${(i % 9) + 1}`, { status: { stringValue: i === 7 && tweak ? 'cancelled' : 'renewed' } }));
   return c;
 }
 
@@ -34,7 +36,24 @@ function fakeFirestore(data, behaviour) {
     const expired = behaviour.expireAfter && token === behaviour.expireAfter.token && requests > behaviour.expireAfter.n;
     if (!behaviour.validTokens.has(token) || expired) { res.writeHead(401); res.end('{"error":{"code":401,"status":"UNAUTHENTICATED"}}'); return; }
     const u = new URL(req.url, 'http://x');
-    if (req.method === 'POST' && u.pathname.endsWith(':runAggregationQuery')) { res.end(JSON.stringify([{ result: { aggregateFields: { n: { integerValue: '0' } } } }])); return; }
+    if (req.method === 'POST' && (u.pathname.endsWith(':runAggregationQuery') || u.pathname.endsWith(':runQuery'))) {
+      let body = ''; req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        const q = JSON.parse(body);
+        const terms = data.__terms ?? [];
+        if (u.pathname.endsWith(':runAggregationQuery')) {
+          const from = q.structuredAggregationQuery.structuredQuery.from[0];
+          const n = from.collectionId === 'terms' && from.allDescendants ? terms.length + (data.__strayTerms ?? 0) : 0;
+          res.end(JSON.stringify([{ result: { aggregateFields: { n: { integerValue: String(n) } } } }])); return;
+        }
+        const sq = q.structuredQuery; const after = sq.startAt?.values?.[0]?.referenceValue;
+        const sorted = [...terms].sort((a, b) => a.name.localeCompare(b.name));
+        const start = after ? sorted.findIndex((d) => d.name === after) + 1 : 0;
+        const page = sorted.slice(start, start + sq.limit);
+        res.end(JSON.stringify(page.length ? page.map((document) => ({ document, readTime: 'x' })) : [{ readTime: 'x' }]));
+      });
+      return;
+    }
     const path = decodeURIComponent(u.pathname.split('/documents/')[1] ?? '');
     const size = Number(u.searchParams.get('pageSize')); const start = Number(u.searchParams.get('pageToken') ?? 0);
     if (behaviour.hangOnce === `${path}@${start}` && !hung) { hung = true; return; } // never answers: client must time out and retry
@@ -65,13 +84,17 @@ test('pages of 100: every policy is read and fingerprinted; output is determinis
   assert.match(a.out, /^ {2}FP policies +250 [0-9a-f]{64}$/m);
   assert.match(a.out, /^ {2}FP statement lines +1 /m);
   assert.match(a.out, /^ {2}TOTAL amountCents +5000$/m);
-  assert.match(a.out, /FP-COMPLETE 11 collections fingerprinted, \d+ requests, 0 token refreshes/);
+  assert.match(a.out, /^ {2}FP policy terms +130 [0-9a-f]{64}$/m, 'coverage terms: every one read across pages and fingerprinted');
+  assert.match(a.out, /^ {2}NEW policy terms +130$/m);
+  assert.match(a.out, /FP-COMPLETE 12 collections fingerprinted, \d+ requests, 0 token refreshes/);
   assert.match(a.err, /policies: 200 read …/, 'page-by-page progress');
   assert.equal(a.out.replace(/FP-COMPLETE.*/, ''), b.out.replace(/FP-COMPLETE.*/, ''));
   const g = await fakeFirestore(dataset({ tweak: true }), { validTokens: new Set(['T1']) });
   const c = await runFp(g.port, 'T1'); g.server.close();
   const line = (o) => o.match(/FP policies .*/)[0];
   assert.notEqual(line(c.out), line(a.out), 'one changed policy changes the fingerprint');
+  const tline = (o) => o.match(/FP policy terms .*/)[0];
+  assert.notEqual(tline(c.out), tline(a.out), 'one changed coverage term changes the terms fingerprint');
 });
 
 test('token expires mid-run (HTTP 401): refreshed via gcloud and the same read repeated; result identical', async () => {
@@ -118,4 +141,12 @@ test('the test-only base URL cannot point anywhere but this machine', async () =
   const r = await runFp(1, 'T1', { env: { FP_FIRESTORE_BASE: 'https://evil.example.com' } });
   assert.equal(r.code, 2);
   assert.match(r.err, /may only point at localhost/);
+});
+
+test('coverage terms: a count that differs from the documents read fails the run (no silent partial read)', async () => {
+  const data = dataset(); data.__strayTerms = 1;
+  const f = await fakeFirestore(data, { validTokens: new Set(['T1']) });
+  const r = await runFp(f.port, 'T1'); f.server.close();
+  assert.equal(r.code, 2);
+  assert.match(r.out, /FINGERPRINT FAILED: coverage terms: the server count \(131\) differs from the documents read \(130\)/);
 });

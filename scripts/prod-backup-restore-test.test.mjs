@@ -38,7 +38,7 @@ case "$*" in
 esac
 `;
 
-function run(over = {}) {
+function run(over = {}, args = [], { afterText = null } = {}) {
   const work = mkdtempSync(join(tmpdir(), 'rt-'));
   const bin = join(work, 'bin'); mkdirSync(bin); mkdirSync(join(work, 'scripts'));
   writeFileSync(join(bin, 'gcloud'), GCLOUD); chmodSync(join(bin, 'gcloud'), 0o755);
@@ -47,13 +47,14 @@ function run(over = {}) {
   writeFileSync(join(work, 'scripts', 'prod-fingerprint.py'), 'import os,sys\nopen(os.environ["WORK"]+"/fp-args","w").write(" ".join(sys.argv[1:]))\nprint(os.environ["FAKE_RESTORED"])\nsys.exit(int(os.environ.get("FAKE_FP_EXIT","0")))\n');
   writeFileSync(join(work, 'preflight-before.txt'), PREFLIGHT);
   writeFileSync(join(work, 'last-backup.txt'), over.backup ?? BACKUP);
+  if (afterText) writeFileSync(join(work, 'preflight-after.txt'), afterText);
   const env = {
     ...process.env, WORK: work, POLL_SECONDS: '0', PATH: `${bin}:${process.env.PATH}`,
     FAKE_META: '1', FAKE_RELEASES: '{"releases":[{"name":"projects/pioneer-285cf/releases/cloud.firestore"}]}',
     FAKE_IMPORT_JSON: '{"done":true,"metadata":{"operationState":"SUCCESSFUL"}}', FAKE_AUDIT: '40', FAKE_RESTORED: [...FP, DONE].join('\n'),
     ...over,
   };
-  const r = spawnSync('bash', [SCRIPT], { cwd: work, env, encoding: 'utf8' });
+  const r = spawnSync('bash', [SCRIPT, ...args], { cwd: work, env, encoding: 'utf8' });
   const calls = existsSync(join(work, 'calls.log')) ? readFileSync(join(work, 'calls.log'), 'utf8') : '';
   return { code: r.status, out: `${r.stdout}${r.stderr}`, calls, work };
 }
@@ -109,4 +110,27 @@ test('if creating the temporary database fails, nothing is imported or deleted',
   const r = run({ FAKE_CREATE_FAILS: '1' });
   assert.notEqual(r.code, 0);
   assert.doesNotMatch(r.calls, /firestore import|databases delete/);
+});
+
+test('compare the backup with the live AFTER snapshot: every after line incl. the terms fingerprint; audit may only grow', () => {
+  const TERMS = '  FP policy terms               20 ' + 'c'.repeat(64);
+  const after = ['2001-Pioneer production snapshot (after) — project pioneer-285cf', '  auditLog         47', ...FP, TERMS, DONE].join('\n');
+  const ok = run({ FAKE_RESTORED: [...FP, TERMS, DONE].join('\n') }, ['preflight-after.txt'], { afterText: after });
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /Restored copy vs preflight-after\.txt/);
+  assert.match(ok.out, /OK +FP policy terms +20/);
+  assert.match(ok.out, /INFO +auditLog backup 40, live after 47/);
+  assert.match(ok.out, /VERIFIED BY RESTORE/);
+  const changed = run({ FAKE_RESTORED: [...FP, '  FP policy terms               20 ' + 'd'.repeat(64), DONE].join('\n') }, ['preflight-after.txt'], { afterText: after });
+  assert.notEqual(changed.code, 0);
+  assert.match(changed.out, /DIFFERENT preflight: FP policy terms/);
+  const shrunk = run({ FAKE_AUDIT: '50' }, ['preflight-after.txt'], { afterText: after.replace(TERMS + '\n', '') });
+  assert.match(shrunk.out, /DIFFERENT auditLog/, 'fewer audit entries live than in the backup is never acceptable');
+});
+
+test('refuses any reference file other than the two preflight snapshots', () => {
+  const r = run({}, ['../etc/passwd']);
+  assert.notEqual(r.code, 0);
+  assert.match(r.out, /reference must be preflight-before\.txt or preflight-after\.txt/);
+  assert.equal(r.calls, '');
 });
