@@ -54,7 +54,13 @@ jobs:
         run: node --test scripts/ledger-append-only.test.mjs
 
       - name: Production backup scripts fail closed and only verify by restore (fake gcloud, no Google access)
-        run: node --test scripts/prod-backup.test.mjs scripts/prod-backup-restore-test.test.mjs scripts/prod-fingerprint.test.mjs
+        run: node --test scripts/prod-backup.test.mjs scripts/prod-backup-restore-test.test.mjs scripts/prod-fingerprint.test.mjs scripts/prod-preflight-compare.test.mjs scripts/inspect-statement-xlsx.test.mjs
+
+      - name: Cloud Functions runtime dependencies load from a clean install (as Cloud Functions installs them)
+        run: |
+          mkdir -p /tmp/fn-deps && cp functions/package.json /tmp/fn-deps/ && cd /tmp/fn-deps
+          npm install --omit=dev --no-audit --no-fund
+          node -e "Promise.all([import('exceljs'), import('pdfjs-dist/legacy/build/pdf.mjs')]).then(([x]) => { if (typeof (x.default ?? x).Workbook !== 'function') throw new Error('exceljs Workbook missing'); console.log('exceljs and pdfjs-dist load'); })"
 
       - name: npm run typecheck
         run: npm run typecheck
@@ -64,6 +70,16 @@ jobs:
 
       - name: npm run build
         run: npm run build
+
+      # 1,600 synthetic customers through the real callable (auth + firestore + functions emulators, demo
+      # project, no credentials). The secret and parameter files only satisfy the emulator (it would otherwise
+      # prompt for them and wait); no function under test uses them.
+      - name: Customer & Policy Export end to end with 1,600 synthetic customers (emulators, .xlsx)
+        timeout-minutes: 12
+        run: |
+          printf 'ANTHROPIC_API_KEY=emulator-only-not-a-key\n' > functions/.secret.local
+          printf 'OWNER_EMAILS=owner@example.test\n' > functions/.env.demo-asm-export
+          npx firebase emulators:exec --only auth,firestore,functions --project demo-asm-export "node --import tsx --test scripts/book-export-emulator.test.mjs"
 
       - name: Function endpoints match the app and smoke test (region, callable, options)
         run: node scripts/check-functions-endpoints.mjs

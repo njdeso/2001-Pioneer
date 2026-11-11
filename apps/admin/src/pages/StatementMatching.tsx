@@ -1,8 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import {
   formatBps, matchToPolicy, MATCH_REASON_TEXT, TERM_RESOLUTION_TEXT, nameEvidence, prepareMatchContext, TRANSACTION_TYPE_LABELS, UNASSIGNED_BROKER_ID,
-  type Cents, type ExtractedLine, type LineMatch, type MatchCandidate, type MatchSummary, type NameEvidence, type Policy,
-} from '@asm/shared';
+  type Cents, type ExtractedLine, type LineMatch, type MatchCandidate, type MatchSummary, type NameEvidence, type Policy, displayName } from '@asm/shared';
 import { api } from '../api';
 import { useData } from '../data';
 import { Badge, Button, Card, ErrorNote, Field, Modal, Money, Select, Stat, TextArea, TextInput, cx } from '../ui';
@@ -53,7 +52,7 @@ export function MatchedTo({ m }: { m: StoredMatch | null }) {
     const h = m.historical;
     return (
       <div className="text-xs leading-tight">
-        <div className="font-medium text-ink">{h.clientId ? clientById.get(h.clientId)?.name ?? h.clientId : h.insuredName}</div>
+        <div className="font-medium text-ink">{h.clientId ? displayName(clientById.get(h.clientId)?.name) || h.clientId : h.insuredName}</div>
         <div className="font-mono text-slate-600">{h.policyNumber} <span className="font-sans text-amber-700">({h.policyStatus})</span></div>
         <div className="text-slate-500">{carrierById.get(h.carrierId ?? '')?.name ?? h.carrierId} · suspense, not in book</div>
       </div>
@@ -63,7 +62,7 @@ export function MatchedTo({ m }: { m: StoredMatch | null }) {
   const p = policyById.get(m.policyId);
   return (
     <div className="text-xs leading-tight">
-      <div className="font-medium text-ink">{clientById.get(m.clientId ?? '')?.name ?? m.clientId}</div>
+      <div className="font-medium text-ink">{displayName(clientById.get(m.clientId ?? '')?.name) || m.clientId}</div>
       <div className="font-mono text-slate-600">{p?.policyNumber ?? m.policyId}</div>
       {m.term ? <div className="text-slate-500">Term {m.term.effectiveDate} → {m.term.endDate} ({m.term.status})</div>
         : m.termResolution && m.termResolution !== 'no_terms' ? <div className="text-amber-700">{TERM_RESOLUTION_TEXT[m.termResolution]}</div> : null}
@@ -207,9 +206,9 @@ export function MatchDialog({ statementId, payerId, line, onClose }: { statement
       <button key={p.id} type="button" onClick={() => setChosen(p.id)}
         className={cx('flex w-full items-start justify-between gap-3 rounded border px-3 py-2 text-left text-xs', chosen === p.id ? 'border-ink bg-amber-50' : 'border-slate-200 hover:bg-slate-50')}>
         <span>
-          <span className="block font-medium text-ink">{c?.name ?? p.clientId}</span>
+          <span className="block font-medium text-ink">{displayName(c?.name) || p.clientId}</span>
           <span className="block font-mono text-slate-700">{p.policyNumber}{p.status !== 'active' && <span className="ml-1 text-amber-700">({p.status})</span>}</span>
-          <span className="block text-slate-500">{carrierById.get(p.carrierId)?.name ?? p.carrierId}{p.wholesalerId ? ` via ${carrierById.get(p.wholesalerId)?.name ?? p.wholesalerId}` : ''} · {p.namedInsured || '—'}</span>
+          <span className="block text-slate-500">{carrierById.get(p.carrierId)?.name ?? p.carrierId}{p.wholesalerId ? ` via ${carrierById.get(p.wholesalerId)?.name ?? p.wholesalerId}` : ''} · {displayName(p.namedInsured) || '—'}</span>
         </span>
         <span className="shrink-0 text-right text-slate-600">
           <span className="block">{b?.name ?? 'Unassigned'} · {formatBps(share)}{p.brokerShareBps != null ? ' (policy)' : ''}</span>
@@ -343,7 +342,7 @@ function PastPolicyForm({ statementId, payerId, line, existing, busy, onCancel, 
           <>
             <TextInput value={q} placeholder="Search customers by name or ID" onChange={(e) => setQ(e.target.value)} />
             <div className="mt-1 max-h-32 space-y-0.5 overflow-y-auto">{found.map((c) => (
-              <button key={c.id} type="button" className="block w-full rounded px-2 py-1 text-left hover:bg-white" onClick={() => { setClientId(c.id); setQ(''); }}>{c.name}{c.externalId ? <span className="text-slate-500"> · {c.externalId}</span> : null}</button>
+              <button key={c.id} type="button" className="block w-full rounded px-2 py-1 text-left hover:bg-white" onClick={() => { setClientId(c.id); setQ(''); }}>{displayName(c.name)}{c.externalId ? <span className="text-slate-500"> · {c.externalId}</span> : null}</button>
             ))}</div>
           </>
         )}

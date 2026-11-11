@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { collection, onSnapshot } from 'firebase/firestore';
-import { checkTerms, searchBook, termEnd, TERM_STATUSES, TERM_STATUS_LABELS, type PolicyTerm, type TermStatus } from '@asm/shared';
+import { checkTerms, searchBook, termEnd, TERM_STATUSES, TERM_STATUS_LABELS, type PolicyTerm, type TermStatus, displayName } from '@asm/shared';
+import { BookExportButton } from './BookExport';
 import { db } from '../firebase';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { CLASSIFICATION_LABELS, LEDGER_CLASSIFICATIONS, formatBps, formatMonth, parseMoneyToCents, type Client, type LedgerClassification, type LedgerEntry, type Policy } from '@asm/shared';
@@ -29,7 +30,7 @@ export function ClientsPage() {
   }, [policies, revenue]);
 
   const columns: Column<Client>[] = [
-    { key: 'name', header: 'Client', render: (c) => <span className="font-medium text-ink">{c.name}</span>, sort: (c) => c.name },
+    { key: 'name', header: 'Client', render: (c) => <span className="font-medium text-ink">{displayName(c.name)}</span>, sort: (c) => c.name },
     { key: 'class', header: 'Class', render: (c) => (c.classification === 'personal' ? <Badge>Personal</Badge> : <Badge tone="blue">Commercial</Badge>), sort: (c) => c.classification },
     { key: 'broker', header: 'Broker', render: (c) => brokerById.get(c.brokerId)?.name ?? '—', sort: (c) => brokerById.get(c.brokerId)?.name ?? '' },
     { key: 'policies', header: 'Policies', align: 'right', render: (c) => perClient.get(c.id)?.count ?? 0, sort: (c) => perClient.get(c.id)?.count ?? 0 },
@@ -50,6 +51,7 @@ export function ClientsPage() {
     <div>
       <PageHeader title="Clients & Policies" subtitle={`${clients.length.toLocaleString()} clients · ${policies.length.toLocaleString()} policies`}
         actions={<>
+          <BookExportButton />
           <Link to="/import"><Button variant="secondary">Import from CSV</Button></Link>
           <Button onClick={() => setAdding(true)}>Add client</Button>
         </>} />
@@ -89,7 +91,7 @@ export function ClientDetailPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title={client.name}
+      <PageHeader title={displayName(client.name)}
         subtitle={<span className="flex gap-2">{client.classification === 'personal' ? 'Personal lines' : 'Commercial lines'} · Broker: {brokerById.get(client.brokerId)?.name ?? '—'}
           {client.status !== 'active' && <Badge>Inactive</Badge>}</span>}
         actions={<>
@@ -322,3 +324,4 @@ function TermForm({ policy, term, onClose }: { policy: Policy; term: PolicyTerm 
     </Modal>
   );
 }
+

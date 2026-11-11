@@ -6,7 +6,7 @@ import { getStorage } from 'firebase-admin/storage';
 import type { DocumentData, DocumentReference } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import {
-  DEFAULT_AI_MODEL, AI_PROMPT_VERSION, TRAVELERS_PL_PARSER, extractWithClaude, isTravelersPlStatement, normalizeName,
+  DEFAULT_AI_MODEL, AI_PROMPT_VERSION, DETAILED_STATEMENT_READER, TRAVELERS_PL_PARSER, extractWithClaude, readDetailedStatement, isTravelersPlStatement, normalizeName, sniffError, sniffSpreadsheet,
   parseCsv, parseTravelersPl, reconcileStatement, tableToText,
   type ExtractedStatement, type ExtractionMethod,
   type DupLine,
@@ -26,6 +26,8 @@ export const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY');
 /** processStatement runs for at most 540 s; a run older than this is treated as abandoned. */
 const STALE_PROCESSING_MS = 12 * 60 * 1000;
 const MAX_BYTES = 20 * 1024 * 1024;
+/** Rows (incl. sheet markers) the statement reader receives from one spreadsheet; more is refused, never truncated. */
+const TABLE_MAX_ROWS = 3000;
 const FILE_TYPES = { pdf: 'pdf', xlsx: 'xlsx', xlsm: 'xlsx', csv: 'csv' } as const;
 type FileType = 'pdf' | 'xlsx' | 'csv';
 
@@ -118,6 +120,8 @@ interface RunOutcome {
 interface FailureInfo {
   code: string;
   message: string;
+  /** Technical detail (parser message, sheet list …) shown under the message for support. */
+  detail?: string;
   httpStatus?: number;
   errorType?: string | null;
   apiMessage?: string | null;
@@ -168,16 +172,44 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
     aiInput = { kind: 'pdf', base64: buf.toString('base64'), pageCount: text.pageCount };
   } else {
     let rows: string[][];
+    let sheets: { name: string; rows: string[][] }[] = [];
     try {
       if (type === 'csv') rows = parseCsv(new TextDecoder('utf-8').decode(buf));
       else {
-        const { readXlsx } = await import('@asm/shared/excel');
-        rows = (await readXlsx(new Uint8Array(buf))).flatMap((s) => [[`# Sheet: ${s.name}`], ...s.rows]);
+        const { readXlsxDetailed } = await import('@asm/shared/excel');
+        const r = await readXlsxDetailed(new Uint8Array(buf));
+        // Which reader succeeded, and why exceljs did not (if it did not): no document content is logged.
+        logger.info('Spreadsheet read', { fileName, reader: r.reader, exceljsError: r.exceljsError, sheets: r.allSheets, rows: r.sheets.map((s) => ({ name: s.name, rows: s.rows.length })) });
+        sheets = r.sheets;
+        rows = r.sheets.flatMap((s) => [[`# Sheet: ${s.name}`], ...s.rows]);
       }
-    } catch {
-      return { ...none, failure: { code: 'table_unreadable', message: 'The spreadsheet could not be read.' } };
+    } catch (err) {
+      // A specific, actionable reason (old .xls, encrypted, HTML export, damaged, no visible data, …).
+      const e = err as { name?: string; code?: string; message?: string; detail?: string };
+      const specific = e?.name === 'SpreadsheetError' && typeof e.code === 'string';
+      logger.warn('Spreadsheet unreadable', { fileName, type, code: specific ? e.code : 'unexpected', detail: specific ? e.detail : String(e?.message ?? err).slice(0, 300) });
+      return {
+        ...none,
+        failure: specific
+          ? { code: e.code!, message: e.message!, detail: e.detail ?? '' }
+          : { code: 'table_unreadable', message: `The ${type === 'csv' ? 'CSV file' : 'spreadsheet'} could not be read: ${String(e?.message ?? err).slice(0, 200)}`, detail: '' },
+      };
     }
-    aiInput = { kind: 'table', text: tableToText(rows), fileName };
+    if (!rows.length) return { ...none, failure: { code: 'table_empty', message: `The ${type === 'csv' ? 'CSV file' : 'spreadsheet'} has no rows of data.` } };
+    // Never cut a statement short: the statement reader receives at most TABLE_MAX_ROWS rows.
+    if (rows.length > TABLE_MAX_ROWS) return { ...none, failure: { code: 'table_too_large', message: `The ${type === 'csv' ? 'CSV file' : 'spreadsheet'} has ${rows.length} rows; at most ${TABLE_MAX_ROWS} can be read in one statement. Split it (for example by month or line of business) and upload each part.`, detail: `${rows.length} rows` } };
+    // Carrier DetailedStatement workbooks (Detailed + Summary sheets, Gross Comm / Net Due Agent): read
+    // deterministically — brokers on gross, MVR charges as agency-only adjustments — and NEVER by the AI,
+    // even on "read again with AI": an ambiguous file is refused or held as a discrepancy, not guessed.
+    if (type === 'xlsx') {
+      const det = readDetailedStatement(sheets);
+      if (det.kind === 'incomplete') return { ...none, method: DETAILED_STATEMENT_READER, failure: { code: det.code, message: det.message, detail: det.detail } };
+      if (det.kind === 'statement') {
+        logger.info('DetailedStatement read', { fileName, rows: det.statement.sourceAccounting, columns: Object.fromEntries(Object.entries(det.report.columns).map(([k, v]) => [k, v.header])), checks: det.report.checks.map((c) => ({ key: c.key, ok: c.ok })) });
+        return { ...none, statement: det.statement, method: DETAILED_STATEMENT_READER };
+      }
+    }
+    aiInput = { kind: 'table', text: tableToText(rows, TABLE_MAX_ROWS), fileName };
   }
 
   if (!aiEnabled) {
@@ -296,7 +328,11 @@ export const processStatement = onCall(
         }
         if (!magicOk(type, buf)) {
           await incoming.delete({ ignoreNotFound: true });
-          return await fail('wrong_type', `The file is not a valid ${type.toUpperCase()}.`);
+          // Name what the file really is (old .xls, encrypted workbook, HTML/XML export, CSV …). The code stays
+          // 'wrong_type' so the corrected file can be uploaded into the same record.
+          const sniff = type === 'xlsx' ? sniffSpreadsheet(new Uint8Array(buf)) : null;
+          const specific = sniff ? sniffError(sniff.kind, sniff.detail) : null;
+          return await fail('wrong_type', specific?.message ?? `The file is not a valid ${type.toUpperCase()}.`, {}, specific ? { detail: `${specific.code}: ${specific.detail}` } : {});
         }
         originalPath = `statements/${statementId}/original.${type}`;
         await incoming.copy(bucket.file(originalPath), { preconditionOpts: { ifGenerationMatch: 0 } });
@@ -308,7 +344,7 @@ export const processStatement = onCall(
 
       // ---- Extract ----
       const out = await extract(buf, type, String(doc.fileName), force);
-      const runBase = { statementId, method: out.method, model: out.model, promptVersion: out.method === TRAVELERS_PL_PARSER ? null : AI_PROMPT_VERSION, attempts: out.attempts, usage: out.usage };
+      const runBase = { statementId, method: out.method, model: out.model, promptVersion: out.method === TRAVELERS_PL_PARSER || out.method === DETAILED_STATEMENT_READER ? null : AI_PROMPT_VERSION, attempts: out.attempts, usage: out.usage };
       if (out.failure || !out.statement) return await fail(out.failure?.code ?? 'unknown', out.failure?.message ?? 'Extraction failed.', runBase, out.failure ?? {});
       const s = out.statement;
 
@@ -344,6 +380,7 @@ export const processStatement = onCall(
         stated: s.stated,
         adjustments: s.adjustments,
         statementIssues: s.issues,
+        sourceAccounting: s.sourceAccounting ?? null,
         reconciliation: rec,
         reconciled: rec.reconciled,
         payerId: payer.payerId,

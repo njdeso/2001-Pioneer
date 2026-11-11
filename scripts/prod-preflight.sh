@@ -18,7 +18,8 @@
 #   - every statement's status, month, failure code and whether its original PDF is stored
 #   - content fingerprints (SHA-256 of every document) of clients, policies, statements, statement lines
 #     (incl. matching decisions), ledger, settings…; ledger totals; and the new collections' counts.
-#     "after" requires every fingerprint and total to be IDENTICAL and the new collections to be empty.
+#     "after" requires every fingerprint, total and new-collection count to be IDENTICAL to "before"
+#     (a release must not create, change or delete anything — including records that already existed).
 set -euo pipefail
 PROJECT_ID="pioneer-285cf"
 LABEL="${1:-before}"
@@ -132,22 +133,22 @@ if [ "$LABEL" = "after" ] && [ -f preflight-before.txt ]; then
   done
   b="$(grep -E 'statements/: [0-9]+ objects' preflight-before.txt | grep -oE '[0-9]+ objects' | head -1 || true)"; a="$(grep -E 'statements/: [0-9]+ objects' preflight-after.txt | grep -oE '[0-9]+ objects' | head -1 || true)"
   echo "  stored PDFs      before ${b:-?}  after ${a:-?}"
-  echo; echo "== Exact comparison: every record and financial total must be IDENTICAL; new collections must be 0"
+  echo; echo "== Exact comparison: every fingerprint, total and new-collection count must be IDENTICAL to the baseline"
   RESULT=OK
   for f in preflight-before.txt preflight-after.txt; do
     grep -q '^  FP-COMPLETE ' "$f" || { echo "  INCOMPLETE $f has no FP-COMPLETE line (its fingerprint did not finish)"; RESULT=STOP; }
   done
   while read -r line; do
     key="$(echo "$line" | awk '{print $1, $2}')"
-    [ "$(echo "$line" | awk '{print $1}')" = "NEW" ] && continue
     other="$(grep -F "  $key " preflight-after.txt | head -1 | sed 's/^ *//' || true)"
     if [ "$line" = "$other" ]; then echo "  OK        $line"; else echo "  CHANGED   before: $line"; echo "            after:  ${other:-missing}"; RESULT=STOP; fi
-  done < <(grep -E '^  (FP|TOTAL) ' preflight-before.txt | sed 's/^ *//')
+  done < <(grep -E '^  (FP|TOTAL|NEW) ' preflight-before.txt | sed 's/^ *//')
+  # Lines the baseline does not have (it was taken by an older script) cannot be compared: shown, not judged.
   while read -r line; do
-    n="$(echo "$line" | awk '{print $NF}')"
-    if [ "$n" = "0" ]; then echo "  OK        $line"; else echo "  NOT EMPTY $line"; RESULT=STOP; fi
-  done < <(grep -E '^  NEW ' preflight-after.txt | sed 's/^ *//')
-  echo; [ "$RESULT" = OK ] && echo "RESULT: OK - production records and financial totals are unchanged; nothing was created automatically." \
-    || echo "RESULT: STOP - a record or total changed, or a new collection is not empty. Do not continue; send this output to Claude."
+    key="$(echo "$line" | awk '{print $1, $2}')"
+    grep -qF "  $key " preflight-before.txt || echo "  NO BASELINE $line (not in preflight-before.txt; compare with the restored backup: see docs)"
+  done < <(grep -E '^  (FP|TOTAL|NEW) ' preflight-after.txt | sed 's/^ *//')
+  echo; [ "$RESULT" = OK ] && echo "RESULT: OK - production records, financial totals and new-collection counts are unchanged from the baseline." \
+    || echo "RESULT: STOP - a record, total or count differs from the baseline. Do not continue; send this output to Claude."
 fi
 echo; echo "Saved to ${OUT}. Nothing in ${PROJECT_ID} was changed."

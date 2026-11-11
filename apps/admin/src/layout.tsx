@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router';
-import { formatWindow, normalizeName, normalizePolicyNumber } from '@asm/shared';
+import { formatWindow, normalizeName, normalizePolicyNumber, displayName } from '@asm/shared';
 import { useAuth } from './auth';
 import { useData } from './data';
 import { buildRef, isProduction, projectId, usingEmulators } from './firebase';
@@ -16,7 +16,7 @@ export const NAV = [
   { to: '/queue', label: 'AI Processing Queue', icon: '⟳' },
   { to: '/ledger', label: 'Ledger', icon: '≡' },
   { to: '/reconciliation', label: 'Reconciliation', icon: '⚖', phase: 4 },
-  { to: '/reports', label: 'Reports & Analytics', icon: '▤', phase: 5 },
+  { to: '/reports', label: 'Reports & Analytics', icon: '▤' },
   { to: '/valuation', label: 'Book Valuation', icon: '$', phase: 5 },
   { to: '/package', label: 'Due Diligence Package', icon: '⎙' },
   { to: '/buyout', label: 'Broker Buyout', icon: '⇄', adminOnly: true },
@@ -43,12 +43,12 @@ function GlobalSearch() {
     if (name.length < 2 && num.length < 2) return [];
     const out: { key: string; label: string; sub: string; to: string }[] = [];
     for (const c of clients) {
-      if (name.length >= 2 && c.normalizedName?.includes(name)) out.push({ key: 'c' + c.id, label: c.name, sub: 'Client', to: `/clients/${c.id}` });
+      if (name.length >= 2 && c.normalizedName?.includes(name)) out.push({ key: 'c' + c.id, label: displayName(c.name), sub: 'Client', to: `/clients/${c.id}` });
       if (out.length > 8) break;
     }
     for (const p of policies) {
       if (num.length >= 2 && (p.normalizedPolicyNumber?.includes(num))) {
-        out.push({ key: 'p' + p.id, label: p.policyNumber, sub: `Policy · ${clientById.get(p.clientId)?.name ?? ''}`, to: `/clients/${p.clientId}?policy=${p.id}` });
+        out.push({ key: 'p' + p.id, label: p.policyNumber, sub: `Policy · ${displayName(clientById.get(p.clientId)?.name)}`, to: `/clients/${p.clientId}?policy=${p.id}` });
       }
       if (out.length > 14) break;
     }

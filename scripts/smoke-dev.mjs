@@ -17,6 +17,14 @@
 //                            the specified $339.04 example, a two-term policy and a cancelled policy (no clawback);
 //                            adjustment re-settles installments; reviewed locks adjustments; finalize refused
 //                            when data changed since the snapshot, or while blockers remain; no ledger writes)
+//   9. DetailedStatement     (synthetic Excel workbook of the carrier DetailedStatement layout with MVR charges, read by
+//      with MVR charges     the deterministic reader — no AI: lines at Gross Comm, MVR charges as agency-only adjustments,
+//                            exact reconciliation; matching, approval and posting split brokers on gross (50 % / 40 % / 30 %)
+//                            and post the MVR charges once, 100 % agency; wrong Summary totals and an unexplained deduction
+//                            are held as discrepancies and cannot be approved; everything reversed and discarded after)
+//  10. Customer & Policy    (Customer Folder Checklist and Policy Detail Export as .xlsx: every dev customer/policy, A–Z,
+//      Export                 active-only by policy status, policy numbers and IDs as text cells, no financial columns;
+//                             admin and staff allowed, buyer and no-role users refused; nothing written but the audit log)
 //   6. Stage 3C posting     (same statement: approval blocked until ambiguous/unreviewed lines are
 //                            resolved; staff cannot approve or post; approve; matching locked; concurrent
 //                            and repeated posting post exactly once; ledger entries, allocations, suspense,
@@ -37,10 +45,12 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { exportedCallables } from './lib/callables.mjs';
 import { getStorage } from 'firebase-admin/storage';
+import ExcelJS from 'exceljs';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { assertDevProjectNumber } from './lib/dev-guard.mjs';
 import { seedBook, writeStatement, LINES, EXPECTED_SUMMARY, PAYER_ID } from './lib/synthetic-3b.mjs';
 import * as BO from './lib/synthetic-buyout.mjs';
+import * as SX from './lib/synthetic-xlsx.mjs';
 
 const DEV = 'pioneer-2001-dev';
 const PROD = 'pioneer-285cf';
@@ -180,9 +190,11 @@ async function syntheticStatement(label) {
   return { bytes, fileName: `SMOKE-${run}.pdf`, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
 
-async function putFile(bucket, path, bytes) {
-  await getStorage().bucket(bucket).file(path).save(bytes, { contentType: 'application/pdf', resumable: false });
+async function putFile(bucket, path, bytes, contentType = 'application/pdf') {
+  await getStorage().bucket(bucket).file(path).save(bytes, { contentType, resumable: false });
 }
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const sha256hex = (b) => createHash('sha256').update(b).digest('hex');
 
 const readOk = (p) => p && (p.status === 'needs_review' || p.status === 'discrepancy') && p.lines === 3 && p.reconciled === true;
 const describe = (p) => p.status === 'extraction_failed' ? `extraction_failed: ${p.failure?.code} — ${p.failure?.message}` : `${p.status}, ${p.lines} lines, reconciled=${p.reconciled}`;
@@ -278,6 +290,188 @@ async function stage3b() {
   return { sid, ref, policiesBefore, linesBefore };
 }
 
+// ---------------------------------------------------------------- DetailedStatement with MVR charges (Option B)
+// Business rule (owner, PR #9): brokers are paid on GROSS commission; MVR chargebacks are agency-only.
+// Synthetic statement for SYN3B-MUTUAL, month 2025-09 (outside the Stage 3C report window). Every run reverses
+// its posting and discards its statements through the app's own callables, so dev ends net zero.
+const MVR_MONTH = '2025-09';
+function mvrWorkbook(nonce, { summaryNet = null, unexplained = false, mode = 'real', ambiguous = false } = {}) {
+  const r = (pol, name, type, gross, net, notes = '') => [202509, 'DEV001', name, pol, 'Commercial Auto', type, '09/01/2025', '09/01/2026', '09/03/2025', '01/01/0001',
+    gross * 10, gross ? 0.1 : 0, Math.round(gross * 90) / 100, gross, 'NY', 'Synthetic Mutual Insurance Co (TEST)', net, 12, 'Active', notes];
+  const labelled = mode === 'labelled';
+  // mode "real": as the carrier's actual export — the MVR charge is its own row with Gross Comm 0.00, a negative
+  // Net Due Agent and nothing saying "MVR"; the Summary prints it as "MVRChargeback". mode "labelled": the
+  // charge sits on the policy row with "MVR chargeback" in Notes, plus an MVR-labelled MVR-only row.
+  const rows = [
+    r('SYN-1001', 'Alpha Synthetic Trucking LLC', 'RN', 120, unexplained ? 110 : labelled ? 101.52 : 120, labelled ? 'MVR chargeback' : ''), // B50 50 %
+    r('SYN-1002', 'Beta Synthetic Cab Corp', 'EN', 50, 50),                    // B40 40 %
+    r('SYN-1006', 'Zeta Synthetic Logistics', 'CN', -45, -45),                 // per-policy 30 %, cancellation
+    r('0045678', 'Epsilon Synthetic Services', 'RN', 25, 25, `SMOKE ${nonce}`), // unassigned, leading zeros
+    labelled ? r('617738486', 'Delta Synthetic Limo', 'MVR', 0, -12.25, 'MVR fee') : r('', '', '', 0, -12.25),
+  ];
+  if (ambiguous) rows.push(r('', '', '', 0, -3.00)); // a second unlabelled deduction: cannot be attributed
+  const mvr = labelled ? -3073 : -1225 - (ambiguous ? 300 : 0);
+  const gross = 15000;
+  const net = rows.reduce((t, x) => t + Math.round(x[16] * 100), 0);
+  const summary = [['Summary', 'Current'], ['Commissions - Current', gross / 100], ['MVRChargeback', mvr / 100], ['Net Amount Due Agent', (summaryNet ?? net) / 100]];
+  return SX.sheetsWorkbook([{ name: 'Detailed', rows: [SX.MVR_HEAD, ...rows] }, { name: 'Summary', rows: summary }], { prefix: 'x', inline: true });
+}
+
+async function detailedMvrStage(cfg) {
+  summary('\n#### DetailedStatement with MVR chargebacks — deterministic reader, brokers on gross, MVR agency-only (synthetic)\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  await seedBook(db, FieldValue);
+  // Housekeeping: earlier runs' statements for this payer and month (reversed or held) are discarded first.
+  const old = (await db.collection('statements').where('payerId', '==', PAYER_ID).where('statementMonth', '==', MVR_MONTH).get()).docs
+    .filter((d) => ['needs_review', 'discrepancy', 'approved'].includes(d.get('status')) && Number(d.get('postedCents') ?? 0) === 0 && String(d.get('fileName') ?? '').startsWith('SMOKE-mvr'));
+  for (const d of old) {
+    if (d.get('status') === 'approved') await call('unapproveStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+    await call('discardStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+  }
+  const upload = async (label, bytes) => {
+    const n = randomUUID().slice(0, 8);
+    const r = await call('registerStatementUpload', { fileName: `SMOKE-mvr-${label}-${n}.xlsx`, sha256: sha256hex(bytes), size: bytes.length });
+    await putFile(cfg.storageBucket, r.uploadPath, bytes, XLSX_TYPE);
+    const p = await call('processStatement', { statementId: r.statementId, method: 'auto' });
+    return { sid: r.statementId, p, doc: (await db.collection('statements').doc(r.statementId).get()).data() };
+  };
+  const cleanup = [];
+  try {
+    // 1. Read the REAL export structure: deterministic reader, gross lines, the unlabelled MVR-only row
+    //    attributed through the Summary "MVRChargeback" total, exact reconciliation
+    const nonce = randomUUID().slice(0, 8);
+    const { sid, p, doc } = await upload('real', mvrWorkbook(nonce));
+    cleanup.push(sid);
+    const adj = doc.adjustments ?? [];
+    const lines = (await db.collection('statements').doc(sid).collection('lines').get()).docs.map((d) => d.data());
+    const recChecks = (doc.reconciliation?.checks ?? []).map((c) => `${c.key} ${$(c.statedCents)}/${$(c.extractedCents)} ${c.ok ? 'ok' : 'FAIL'}`).join('; ');
+    record('DetailedStatement (real export structure) read without AI and reconciled', doc.method === 'detailed-statement-v1' && p.status === 'needs_review' && p.reconciled === true && (doc.reconciliation?.errorCount ?? 1) === 0,
+      `${describe(p)}; method ${doc.method}; month ${doc.statementMonth}; ${recChecks}; errors ${doc.reconciliation?.errorCount}`);
+    const alpha = lines.find((l) => l.policyNumberRaw === 'SYN-1001');
+    record('Unlabelled Gross-0 MVR row → one agency-only adjustment (via Summary "MVRChargeback"), no policy line',
+      lines.length === 4 && lines.reduce((t, l) => t + l.paidCommissionCents, 0) === 15000 && alpha?.paidCommissionCents === 12000
+        && adj.length === 1 && adj[0].amountCents === -1225 && adj[0].source?.kind === 'mvr' && adj[0].source?.lineNo === null
+        && doc.sourceAccounting?.rows === 5 && doc.sourceAccounting?.lineRows === 4 && doc.sourceAccounting?.adjustmentOnlyRows === 1 && (doc.sourceAccounting?.rowsWithErrors ?? [1]).length === 0
+        && lines.some((l) => l.policyNumberRaw === '0045678') && doc.statementMonth === MVR_MONTH,
+      `${lines.length} lines, gross ${$(lines.reduce((t, l) => t + l.paidCommissionCents, 0))}; adjustments ${adj.map((a) => `${$(a.amountCents)} "${a.label}"`).join(', ')}; rows ${doc.sourceAccounting?.rows} = ${doc.sourceAccounting?.lineRows} lines + ${doc.sourceAccounting?.adjustmentOnlyRows} MVR-only`);
+
+    // 2. Matching and approval: brokers on gross
+    await call('runStatementMatching', { statementId: sid });
+    const pre = await call('checkStatementDuplicates', { statementId: sid });
+    for (const f of (pre.findings ?? []).filter((x) => !x.hard && !x.confirmed)) {
+      await call('setStatementClassification', { statementId: sid, classification: 'other' });
+      if (!f.other.classification) await call('setStatementClassification', { statementId: f.otherId, classification: 'other' });
+      await call('confirmSeparateStatement', { statementId: sid, otherStatementId: f.otherId, reason: 'smoke test: separate synthetic statement (dev only)' });
+    }
+    const ap = await call('approveStatement', { statementId: sid, note: 'smoke: DetailedStatement MVR' });
+    const want = { entries: 5, amountCents: 13775, brokerCents: 6650, agencyCents: 7125, adjustmentsCents: -1225 };
+    const apErr = Object.entries(want).filter(([k, v]) => ap.totals[k] !== v).map(([k, v]) => `${k} ${ap.totals[k]} ≠ ${v}`);
+    record('Approval plan: total = gross − MVR; broker share only from gross policy commission', ap.status === 'approved' && apErr.length === 0,
+      `${ap.totals.entries} entries, ${$(ap.totals.amountCents)}; broker ${$(ap.totals.brokerCents)}, agency ${$(ap.totals.agencyCents)}, adjustments ${$(ap.totals.adjustmentsCents)}${apErr.length ? ` — ${apErr.join('; ')}` : ''}`);
+
+    // 3. Post and inspect the ledger
+    await call('postStatement', { statementId: sid });
+    const entries = (await db.collection('ledger').where('statementId', '==', sid).get()).docs.map((d) => d.data()).filter((e) => !e.reversalOf);
+    const a = entries.find((e) => e.policyNumberRaw === 'SYN-1001');
+    const carrier = entries.filter((e) => e.level === 'carrier');
+    record('Ledger: policy split 50/50 on gross; MVR posted once, broker $0.00, 100 % agency, no policy',
+      entries.length === 5 && a?.amountCents === 12000 && a?.brokerShareBps === 5000 && a?.brokerCents === 6000 && a?.agencyCents === 6000
+        && carrier.length === 1 && carrier[0].amountCents === -1225 && carrier[0].brokerCents === 0 && carrier[0].agencyCents === -1225 && carrier[0].policyId === null && carrier[0].brokerShareBps === 0
+        && entries.filter((e) => e.level === 'policy').length === 4,
+      `policy ${$(a?.amountCents)} → broker ${$(a?.brokerCents)} @${(a?.brokerShareBps ?? 0) / 100}% / agency ${$(a?.agencyCents)}; MVR entries ${carrier.map((e) => `${$(e.amountCents)} (broker ${$(e.brokerCents)})`).join(', ')}; total ${$(entries.reduce((t, e) => t + e.amountCents, 0))}`);
+    await call('reverseStatementPosting', { statementId: sid, reason: 'smoke test: DetailedStatement cleanup' });
+    const net = (await db.collection('ledger').where('statementId', '==', sid).get()).docs.reduce((t, d) => t + d.get('amountCents'), 0);
+    record('Reversed: the synthetic posting nets to zero', net === 0, `net ${$(net)}`);
+    // Discard now: later uploads in this stage share its lines and would otherwise be reported as the same statement.
+    await call('discardStatement', { statementId: sid, reason: 'smoke test cleanup (dev only)' });
+
+    // 3b. The labelled form (MVR on the policy row, "MVR" text) still reads and reconciles
+    const lab = await upload('labelled', mvrWorkbook(randomUUID().slice(0, 8), { mode: 'labelled' }));
+    cleanup.push(lab.sid);
+    record('Labelled MVR rows still read and reconcile', lab.p.status === 'needs_review' && lab.p.reconciled === true && (lab.doc.adjustments ?? []).length === 2 && (lab.doc.adjustments ?? []).reduce((t, x) => t + x.amountCents, 0) === -3073,
+      `${describe(lab.p)}; adjustments ${(lab.doc.adjustments ?? []).map((x) => $(x.amountCents)).join(', ')}`);
+    await call('discardStatement', { statementId: lab.sid, reason: 'smoke test cleanup (dev only)' });
+
+    // 4. Inconsistent workbooks are held as discrepancies and cannot be approved (never guessed)
+    for (const [label, bytes, re] of [
+      ['badsummary', mvrWorkbook(randomUUID().slice(0, 8), { summaryNet: 13776 }), /Net agency payment/],
+      ['unexplained', mvrWorkbook(randomUUID().slice(0, 8), { unexplained: true }), /line error|Manual review|nothing on the row identifies/],
+      ['ambiguous', mvrWorkbook(randomUUID().slice(0, 8), { ambiguous: true }), /2 deductions are not identified.*Manual review/],
+    ]) {
+      const bad = await upload(label, bytes);
+      cleanup.push(bad.sid);
+      const blocked = await expectRejected(call('approveStatement', { statementId: bad.sid }));
+      const reasons = (bad.doc.reconciliation?.blockingReasons ?? []).join('; ');
+      record(`Inconsistent DetailedStatement (${label}) is a discrepancy and cannot be approved`, bad.p.status === 'discrepancy' && bad.p.reconciled === false && blocked.rejected && re.test(reasons),
+        `${describe(bad.p)}; approve refused: ${blocked.rejected}; ${reasons.slice(0, 200)}`);
+    }
+  } finally {
+    for (const id of cleanup) {
+      const st = (await db.collection('statements').doc(id).get()).get('status');
+      if (st === 'discarded') continue;
+      if (st === 'approved') await call('unapproveStatement', { statementId: id, reason: 'smoke test cleanup (dev only)' });
+      if (['needs_review', 'discrepancy', 'approved', 'extraction_failed'].includes(st)) await call('discardStatement', { statementId: id, reason: 'smoke test cleanup (dev only)' });
+    }
+    const left = (await Promise.all(cleanup.map((id) => db.collection('statements').doc(id).get()))).filter((d) => d.get('status') !== 'discarded').length;
+    record('Cleanup: synthetic DetailedStatement statements discarded via discardStatement', left === 0, `${cleanup.length} discarded, ${left} left`);
+  }
+}
+
+// ---------------------------------------------------------------- Customer & Policy Export (.xlsx)
+async function exportStage(cfg) {
+  summary('\n#### Customer & Policy Export (.xlsx) — every dev record, internal users only\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  const open = async (input, token) => {
+    const res = await call('exportBook', input, 1, token);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Buffer.from(res.fileBase64, 'base64'));
+    const ws = wb.worksheets[0]; const rows = []; const cells = [];
+    ws.eachRow({ includeEmpty: false }, (r) => { rows.push(r.values.slice(1)); const c = []; r.eachCell({ includeEmpty: true }, (x) => c.push(x)); cells.push(c); });
+    return { res, ws, rows, cells };
+  };
+  const clients = (await db.collection('clients').select('name', 'externalId').get()).docs.map((d) => ({ id: d.id, name: d.get('name'), externalId: d.get('externalId') }));
+  const policies = (await db.collection('policies').select('clientId', 'status', 'policyNumber').get()).docs.map((d) => ({ id: d.id, ...d.data() }));
+  const activeBy = new Map(); for (const p of policies) if ((p.status ?? 'active') === 'active') activeBy.set(p.clientId, (activeBy.get(p.clientId) ?? 0) + 1);
+  const ledgerBefore = (await db.collection('ledger').count().get()).data().count;
+  const coll = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
+
+  const all = await open({ format: 'folder_checklist', scope: 'all' }, ID_TOKEN);
+  const names = all.rows.slice(1).map((r) => r[1]);
+  record('Folder Checklist (all records, admin): every dev customer, A–Z, blank boxes',
+    all.rows.length - 1 === clients.length && JSON.stringify(all.rows[0]) === JSON.stringify(['No.', 'Customer Name', 'Customer ID', 'Active Policies', 'File Located', 'File Reviewed', 'Ready for Pioneer', 'Box Number'])
+      && JSON.stringify(names) === JSON.stringify([...names].sort(coll.compare)) && all.cells.slice(1).every((c) => typeof c[2].value === 'string' && c[2].numFmt === '@' && c.slice(4, 8).every((x) => x.value === null))
+      && all.ws.pageSetup.printTitlesRow === '1:1',
+    `${all.rows.length - 1} rows / ${clients.length} customer records; ${all.res.fileName}; ${(all.res.fileBase64.length * 0.75 / 1024).toFixed(0)} KB`);
+  const iota = (await db.collection('clients').doc('SYN3B-C-IOTA').get()).get('name');
+  const iotaRow = all.rows.find((r) => r[2] === 'SYN3B-C-IOTA');
+  record('Proper case in the export; the stored name is unchanged', iota === "IOTA O'NEIL SYNTHETIC AUTO BODY LLC" && iotaRow?.[1] === "Iota O'Neil Synthetic Auto Body LLC",
+    `stored "${iota}" → exported "${iotaRow?.[1]}"`);
+  const act = await open({ format: 'folder_checklist', scope: 'active' }, STAFF_TOKEN);
+  record('Folder Checklist (active only, staff): customers with at least one active POLICY, correct counts',
+    act.rows.length - 1 === activeBy.size && act.res.policies === [...activeBy.values()].reduce((a, b) => a + b, 0),
+    `${act.rows.length - 1} customers (expected ${activeBy.size}), ${act.res.policies} active policies`);
+  const pd = await open({ format: 'policy_detail', scope: 'all' }, STAFF_TOKEN);
+  const pda = await open({ format: 'policy_detail', scope: 'active' }, ID_TOKEN);
+  const activeCount = policies.filter((p) => (p.status ?? 'active') === 'active').length;
+  record('Policy Detail (all / active): every policy, numbers as text, active = active policies only',
+    pd.rows.length - 1 === policies.length && pda.rows.length - 1 === activeCount && pd.cells.slice(1).every((c) => typeof c[1].value === 'string' && c[1].numFmt === '@')
+      && JSON.stringify(pd.rows[0]) === JSON.stringify(['Customer Name', 'Policy Number', 'Carrier', 'Policy Type', 'Effective Date', 'Expiration Date', 'Policy Status', 'Broker'])
+      && pda.rows.slice(1).every((r) => r[6] === 'Active'),
+    `all ${pd.rows.length - 1}/${policies.length}; active ${pda.rows.length - 1}/${activeCount}`);
+  const text = JSON.stringify([all.rows[0], pd.rows[0]]);
+  record('No financial columns in either export', !/commission|premium|rate|share|compensation|amount/i.test(text), text.slice(0, 160));
+  const buyer = await adminIdToken(cfg.apiKey, 'ci-smoke-buyer', 'buyer');
+  const pioneer = await adminIdToken(cfg.apiKey, 'ci-smoke-pioneer', 'pioneer');
+  const denied = [];
+  for (const [who, tok] of [['buyer', buyer], ['pioneer', pioneer]]) denied.push([who, (await expectRejected(call('exportBook', { format: 'folder_checklist', scope: 'all' }, 1, tok))).rejected]);
+  record('Export refused for buyer and Pioneer roles (admin and staff only)', denied.every(([, r]) => r), denied.map(([w, r]) => `${w}: ${r ? 'refused' : 'ALLOWED'}`).join(', '));
+  const ledgerAfter = (await db.collection('ledger').count().get()).data().count;
+  const audits = (await db.collection('auditLog').where('action', '==', 'export_book').get()).docs.filter((d) => Date.now() - (d.get('at')?.toMillis?.() ?? 0) < 15 * 60_000).length;
+  record('Exports changed nothing but the audit log', ledgerAfter === ledgerBefore && audits >= 4, `ledger ${ledgerBefore} → ${ledgerAfter}; ${audits} recent export audit entries`);
+}
+
 // ---------------------------------------------------------------- Stage 3C posting
 const WINDOW = { start: '2025-11', end: '2026-10' }; // rolling 12 months ending with the synthetic statement month
 async function windowTotals() {
@@ -299,10 +493,15 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   // the same lines as this run's — in review, plus the upload smoke statements. Same-month statements are
   // compared by content, so those identical leftovers would (correctly) block approval. Discard them through
   // the app's own discardStatement (refuses anything approved or posted; audit-logged).
+  // A finished run ends with its statement re-approved (step 7); that one is returned to review first.
+  // Posted statements are never touched.
   const leftovers = (await db.collection('statements').where('payerId', '==', PAYER_ID).where('statementMonth', '==', '2026-10').get()).docs
-    .filter((d) => d.id !== sid && ['needs_review', 'discrepancy'].includes(d.get('status')) && Number(d.get('postedCents') ?? 0) === 0
+    .filter((d) => d.id !== sid && ['needs_review', 'discrepancy', 'approved'].includes(d.get('status')) && Number(d.get('postedCents') ?? 0) === 0
       && (d.get('synthetic') === true || String(d.get('fileName') ?? '').startsWith('SMOKE-')));
-  for (const d of leftovers) await call('discardStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+  for (const d of leftovers) {
+    if (d.get('status') === 'approved') await call('unapproveStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+    await call('discardStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+  }
   record('Housekeeping: earlier runs\' synthetic statements for this payer and month discarded', true, `${leftovers.length} discarded via discardStatement`);
 
   // 1. Approval is blocked while lines are ambiguous or unreviewed
@@ -636,13 +835,37 @@ try {
     // 4. A stored file is still a duplicate
     const r3 = await call('registerStatementUpload', { fileName: b.fileName, sha256: b.sha256, size: b.bytes.length });
     record('Stored file is still blocked as a duplicate', r3.duplicate === true, `duplicate=${r3.duplicate}`);
+
+    // 5. An Excel (.xlsx) statement as written by .NET exporters (x: prefixes, inline strings, no cell
+    //    references; text dates incl. 01/01/0001; Month End 202511) is read and extracted.
+    const nx = randomUUID().slice(0, 8);
+    const wbx = SX.detailedStatementWorkbook({ prefix: 'x', refs: false, inline: true, rows: 12, nonce: `SMOKE ${nx}` });
+    const rx = await call('registerStatementUpload', { fileName: `SMOKE-xlsx-${nx}.xlsx`, sha256: sha256hex(wbx.bytes), size: wbx.bytes.length });
+    await putFile(cfg.storageBucket, rx.uploadPath, wbx.bytes, XLSX_TYPE);
+    const px = await call('processStatement', { statementId: rx.statementId, method: 'auto' });
+    record('Excel statement (.NET export format, Detailed + Summary sheets) is read and extracted', px.status !== 'extraction_failed' && (px.lines ?? 0) >= 12,
+      `${describe(px)} (statement ${rx.statementId}; ${wbx.commission.toFixed(2)} commission on the Summary sheet)`);
+  }
+
+  // Files with an .xlsx name that are not .xlsx packages: refused with the specific reason (no AI call).
+  for (const [label, bytes, re] of [
+    ['old Excel 97–2003 (.xls)', SX.oleFile('Workbook', randomUUID()), /Excel 97–2003/],
+    ['web page (HTML) export', SX.htmlExport(randomUUID()), /web page/],
+  ]) {
+    const n = randomUUID().slice(0, 8);
+    const r = await call('registerStatementUpload', { fileName: `SMOKE-disguised-${n}.xlsx`, sha256: sha256hex(bytes), size: bytes.length });
+    await putFile(cfg.storageBucket, r.uploadPath, bytes, XLSX_TYPE);
+    const p = await call('processStatement', { statementId: r.statementId, method: 'auto' });
+    record(`A ${label} named .xlsx is refused with its specific reason`, p.status === 'extraction_failed' && p.failure?.code === 'wrong_type' && re.test(p.failure?.message ?? ''), describe(p));
   }
   // Stage 3B does not use Claude, so it runs even if the AI checks failed.
   let ctx3b = null;
   try { ctx3b = await stage3b(); } catch (err) { record('Stage 3B matching run', false, err instanceof Error ? err.message : String(err)); }
   if (ctx3b) { try { await stage3c(ctx3b); } catch (err) { record('Stage 3C posting run', false, err instanceof Error ? err.message : String(err)); } }
   try { await buyoutStage(); } catch (err) { record('Broker buyout run', false, err instanceof Error ? err.message : String(err)); }
+  try { await exportStage(cfg); } catch (err) { record('Customer & Policy Export run', false, err instanceof Error ? err.message : String(err)); }
   try { await duplicateStage(); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
+  try { await detailedMvrStage(cfg); } catch (err) { record('DetailedStatement MVR run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
 }

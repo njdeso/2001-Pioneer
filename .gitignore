@@ -19,3 +19,6 @@ exports/
 *.local
 .local-check/
 __pycache__/
+# Emulator-only secret values (CI writes a placeholder); never commit real secrets
+.secret.local
+**/.secret.local

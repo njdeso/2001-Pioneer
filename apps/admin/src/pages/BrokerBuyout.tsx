@@ -2,8 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { collection, collectionGroup, onSnapshot } from 'firebase/firestore';
 import {
   ADVANCE_FLAG_TEXT, ADVANCE_TEMPLATE_HEADERS, MATERIAL_ADVANCE_FLAGS, parseCsv, parseMoneyToCents, reviewPolicyAdvances, UNASSIGNED_BROKER_ID,
-  type AdvanceFlagCode, type AdvancePaymentType, type BrokerAdvance, type ParsedAdvanceRow, type Policy, type PolicyTerm,
-} from '@asm/shared';
+  type AdvanceFlagCode, type AdvancePaymentType, type BrokerAdvance, type ParsedAdvanceRow, type Policy, type PolicyTerm, displayName } from '@asm/shared';
 import { api, type AdvanceForm } from '../api';
 import { useAuth } from '../auth';
 import { useData } from '../data';
@@ -106,7 +105,7 @@ export function BrokerBuyoutPage() {
                 {shown.slice(0, 500).map(({ policy, r }) => (
                   <Fragment key={policy.id}>
                     <tr className="border-t border-slate-100 align-top">
-                      <td className="py-1.5 pr-3"><div className="font-medium">{clientById.get(policy.clientId)?.name ?? policy.clientId}</div><div className="font-mono text-xs text-slate-600">{policy.policyNumber} · {carrierById.get(policy.carrierId)?.name ?? ''}</div></td>
+                      <td className="py-1.5 pr-3"><div className="font-medium">{displayName(clientById.get(policy.clientId)?.name) || policy.clientId}</div><div className="font-mono text-xs text-slate-600">{policy.policyNumber} · {carrierById.get(policy.carrierId)?.name ?? ''}</div></td>
                       <td className="pr-3">{brokerById.get(policy.brokerId)?.name ?? policy.brokerId}<div className="text-xs text-slate-500">{(r.applicableShareBps / 100).toFixed(2)}%</div></td>
                       <td className="pr-3 text-xs">{r.term ? `${r.term.effectiveDate} → ${r.term.expirationDate}` : '—'}{r.term && <div className="text-slate-500">from {r.term.source === 'terms' ? 'term history' : 'policy dates'}</div>}</td>
                       <td className="pr-3 text-right"><Money cents={r.paidCents} /></td>

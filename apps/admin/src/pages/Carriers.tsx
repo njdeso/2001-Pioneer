@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { formatBps, formatMonth, monthlyTotals, sumCents, type Carrier } from '@asm/shared';
+import { formatBps, formatMonth, monthlyTotals, sumCents, type Carrier, displayName } from '@asm/shared';
 import { useData } from '../data';
 import { CarrierForm } from '../forms';
 import { api } from '../api';
@@ -135,7 +135,7 @@ export function CarrierDetailPage() {
           <DataTable rows={related} pageSize={10}
             columns={[
               { key: 'num', header: 'Policy #', render: (p) => <Link className="text-ink hover:underline" to={`/clients/${p.clientId}?policy=${p.id}`}>{p.policyNumber}</Link>, sort: (p) => p.policyNumber },
-              { key: 'client', header: 'Client', render: (p) => clientById.get(p.clientId)?.name ?? '—', sort: (p) => clientById.get(p.clientId)?.name ?? '' },
+              { key: 'client', header: 'Client', render: (p) => displayName(clientById.get(p.clientId)?.name) || '—', sort: (p) => clientById.get(p.clientId)?.name ?? '' },
               { key: 'type', header: 'Type', render: (p) => p.policyType || '—' },
               { key: 'broker', header: 'Broker', render: (p) => brokerById.get(p.brokerId)?.name ?? '—' },
               { key: 't12', header: 'T12', align: 'right', render: (p) => <Money cents={revenue?.byPolicy.get(p.id) ?? 0} />, sort: (p) => revenue?.byPolicy.get(p.id) ?? 0 },

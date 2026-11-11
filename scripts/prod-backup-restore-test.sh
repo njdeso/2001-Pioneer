@@ -21,14 +21,21 @@
 #      "BACKUP: VERIFIED BY RESTORE" only if everything is identical.
 # A mismatch usually means the app was used between the preflight and the export: run the preflight and the
 # backup again without using the app, then this test.
+#
+# Optional argument: the snapshot to compare with (default preflight-before.txt). After a deploy,
+#   bash scripts/prod-backup-restore-test.sh preflight-after.txt
+# compares the verified pre-deploy backup with the live after-deploy snapshot — every line the after
+# snapshot has, including ones an older baseline lacked (e.g. the coverage-terms fingerprint).
 set -euo pipefail
 PROJECT_ID="pioneer-285cf"
+REF="${1:-preflight-before.txt}"
+[[ "$REF" =~ ^preflight-(before|after)\.txt$ ]] || { echo "BACKUP: NOT VERIFIED — the reference must be preflight-before.txt or preflight-after.txt."; exit 1; }
 export CLOUDSDK_CORE_PROJECT="$PROJECT_ID"
 fail() { echo; echo "BACKUP: NOT VERIFIED — $1"; echo "Do not deploy. Send this output to Claude."; exit 1; }
 
 [ -f last-backup.txt ] || fail "last-backup.txt not found. Run 'bash scripts/prod-backup.sh' first, in this folder."
-[ -f preflight-before.txt ] || fail "preflight-before.txt not found."
-grep -q '^  FP-COMPLETE ' preflight-before.txt || fail "preflight-before.txt is incomplete (no FP-COMPLETE line). Run the preflight again."
+[ -f "$REF" ] || fail "${REF} not found."
+grep -q '^  FP-COMPLETE ' "$REF" || fail "${REF} is incomplete (no FP-COMPLETE line). Run the preflight again."
 BACKUP="$(cat last-backup.txt)"
 [[ "$BACKUP" =~ ^gs://${PROJECT_ID}-firestore-backups-us/firestore-backups/[0-9]{8}T[0-9]{6}Z$ ]] || fail "unexpected backup path: ${BACKUP}"
 
@@ -95,21 +102,24 @@ AUD_RESTORED="$(curl -fsS --max-time 60 --retry 2 -H "Authorization: Bearer ${TO
   -d '{"structuredAggregationQuery":{"structuredQuery":{"from":[{"collectionId":"auditLog"}]},"aggregations":[{"alias":"n","count":{}}]}}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["result"]["aggregateFields"]["n"]["integerValue"])')"
 
-echo; echo "== Restored copy vs preflight-before.txt (every line must be identical)"
+echo; echo "== Restored copy vs ${REF} (every line must be identical)"
 RESULT=OK
 while read -r line; do
   key="$(echo "$line" | awk '{print $1, $2}')"
   other="$(grep -F "  $key " restored-fingerprint.txt | head -1 | sed 's/^ *//' || true)"
   if [ "$line" = "$other" ]; then echo "  OK        $line"; else echo "  DIFFERENT preflight: $line"; echo "            restored:  ${other:-missing}"; RESULT=STOP; fi
-done < <(grep -E '^  (FP|TOTAL|NEW) ' preflight-before.txt | sed 's/^ *//')
-AUD_BEFORE="$(grep -E '^  auditLog +[0-9]+$' preflight-before.txt | awk '{print $2}' || true)"
-if [ "${AUD_BEFORE:-x}" = "$AUD_RESTORED" ]; then echo "  OK        auditLog ${AUD_RESTORED}"; else echo "  DIFFERENT auditLog preflight ${AUD_BEFORE:-?} restored ${AUD_RESTORED:-?}"; RESULT=STOP; fi
-[ "$(grep -cE '^  (FP|TOTAL|NEW) ' preflight-before.txt)" -gt 0 ] || { echo "  preflight-before.txt has no fingerprint lines"; RESULT=STOP; }
+done < <(grep -E '^  (FP|TOTAL|NEW) ' "$REF" | sed 's/^ *//')
+AUD_BEFORE="$(grep -E '^  auditLog +[0-9]+$' "$REF" | awk '{print $2}' || true)"
+if [ "${AUD_BEFORE:-x}" = "$AUD_RESTORED" ]; then echo "  OK        auditLog ${AUD_RESTORED}"
+elif [ "$REF" = "preflight-after.txt" ] && [[ "${AUD_BEFORE:-}" =~ ^[0-9]+$ ]] && [ "$AUD_BEFORE" -ge "${AUD_RESTORED:-0}" ]; then
+  echo "  INFO      auditLog backup ${AUD_RESTORED}, live after ${AUD_BEFORE} (audit entries are only ever added; viewing and checks add some)"
+else echo "  DIFFERENT auditLog ${REF} ${AUD_BEFORE:-?} restored ${AUD_RESTORED:-?}"; RESULT=STOP; fi
+[ "$(grep -cE '^  (FP|TOTAL|NEW) ' "$REF")" -gt 0 ] || { echo "  ${REF} has no fingerprint lines"; RESULT=STOP; }
 
 echo
 if [ "$RESULT" = OK ]; then
   echo "BACKUP: VERIFIED BY RESTORE — ${BACKUP}"
-  echo "Every fingerprinted collection, the ledger totals and the audit-log count of the restored copy match the preflight."
+  echo "Every fingerprinted collection, the ledger totals and the counts of the restored copy match ${REF}."
 else
-  fail "the restored copy differs from preflight-before.txt (see DIFFERENT above). If the app was used after the preflight, run the preflight, the backup and this test again without using the app."
+  fail "the restored copy differs from ${REF} (see DIFFERENT above). If the app was used after the preflight, run the preflight, the backup and this test again without using the app."
 fi

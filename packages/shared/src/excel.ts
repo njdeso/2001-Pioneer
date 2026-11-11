@@ -13,7 +13,7 @@ export interface ExcelSheet {
 }
 
 /** Numbers to text without binary floating-point artifacts (0.1 + 0.2 style). */
-function numberToText(n: number): string {
+export function numberToText(n: number): string {
   if (!Number.isFinite(n)) return '';
   if (Number.isInteger(n)) return Number.isSafeInteger(n) ? String(n) : n.toFixed(0);
   return String(Number(n.toPrecision(15)));

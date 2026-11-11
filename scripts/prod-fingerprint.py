@@ -137,6 +137,24 @@ def list_docs(path, show=False):
             return docs
 
 
+def group_docs(collection_id, parent_collection):
+    """Every document of a subcollection ID across the database (collection-group query, paged by name),
+    keeping only <parent_collection>/<id>/<collection_id>/<doc> — e.g. policies/*/terms/*."""
+    docs, last = [], None
+    while True:
+        q = {"from": [{"collectionId": collection_id, "allDescendants": True}], "orderBy": [{"field": {"fieldPath": "__name__"}, "direction": "ASCENDING"}], "limit": PAGE_SIZE}
+        if last:
+            q["startAt"] = {"values": [{"referenceValue": last}], "before": False}
+        rows = [r["document"] for r in request(f"{BASE}:runQuery", {"structuredQuery": q}) if "document" in r]
+        for d in rows:
+            parts = d["name"].split("/documents/", 1)[1].split("/")
+            if len(parts) == 4 and parts[0] == parent_collection and parts[2] == collection_id:
+                docs.append(d)
+        if len(rows) < PAGE_SIZE:
+            return docs
+        last = rows[-1]["name"]
+
+
 def count(collection_id, all_descendants=False):
     """Server-side count of a collection (or, with all_descendants, every subcollection with that ID)."""
     frm = {"collectionId": collection_id}
@@ -191,13 +209,17 @@ for f in led:
     status[s] = status.get(s, 0) + 1
 out("  TOTAL by-postingStatus       " + json.dumps(dict(sorted(status.items()))))
 
-# New in this release: must all be empty right after the deploy (nothing is created automatically).
-# Coverage terms: one server-side count over every 'terms' subcollection (policies/*/terms), instead of
-# one request per policy. It counts terms anywhere in the database, so it is at least as strict.
-progress("counting coverage terms and the new broker-buyout collections …")
-out(f"  NEW policy terms              {count('terms', all_descendants=True)}")
+# Coverage terms (content fingerprint + count) and the broker-buyout collections. The preflight's
+# after-check requires each to equal the baseline: a release must not create, change or delete any.
+progress("reading coverage terms (policies/*/terms) and counting the broker-buyout collections …")
+terms = group_docs("terms", "policies")
+fp("policy terms", terms)
+n_terms = count("terms", all_descendants=True)
+if n_terms != len(terms):
+    fail(f"coverage terms: the server count ({n_terms}) differs from the documents read ({len(terms)}).")
+out(f"  NEW policy terms              {n_terms}")
 for c in ["brokerAdvances", "advanceImports", "buyoutSettlements", "buyoutCounters", "buyoutConfig"]:
     out(f"  NEW {c:<25} {count(c)}")
 
-out(f"  FP-COMPLETE {len(COLLECTIONS) + 1} collections fingerprinted, {REQUESTS} requests, {REFRESHES} token refreshes, {time.monotonic() - STARTED:.0f}s")
+out(f"  FP-COMPLETE {len(COLLECTIONS) + 2} collections fingerprinted, {REQUESTS} requests, {REFRESHES} token refreshes, {time.monotonic() - STARTED:.0f}s")
 progress("done")

@@ -71,8 +71,8 @@ export function reconcileStatement(s: ExtractedStatement, opts: ReconcileOptions
   });
   const st = s.stated;
   const checks: ReconciliationCheck[] = [
-    check('commission', 'Paid commission (sum of lines)', st.commissionPayableCents, totals.commissionCents, true),
-    check('monthPayable', 'Total month commission payable', st.monthCommissionPayableCents ?? st.commissionPayableCents,
+    check('commission', s.checkLabels?.commission ?? 'Paid commission (sum of lines)', st.commissionPayableCents, totals.commissionCents, true),
+    check('monthPayable', s.checkLabels?.monthPayable ?? 'Total month commission payable', st.monthCommissionPayableCents ?? st.commissionPayableCents,
       totals.commissionCents + totals.adjustmentsCents, true),
   ];
   if (st.paymentReceivedCents !== null) checks.push(check('paymentReceived', 'Payment received (not revenue)', st.paymentReceivedCents, totals.paymentReceivedCents, true));
