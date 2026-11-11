@@ -54,7 +54,7 @@ jobs:
         run: node --test scripts/ledger-append-only.test.mjs
 
       - name: Production backup scripts fail closed and only verify by restore (fake gcloud, no Google access)
-        run: node --test scripts/prod-backup.test.mjs scripts/prod-backup-restore-test.test.mjs scripts/prod-fingerprint.test.mjs
+        run: node --test scripts/prod-backup.test.mjs scripts/prod-backup-restore-test.test.mjs scripts/prod-fingerprint.test.mjs scripts/prod-preflight-compare.test.mjs
 
       - name: npm run typecheck
         run: npm run typecheck
