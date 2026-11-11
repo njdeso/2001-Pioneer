@@ -26,6 +26,8 @@ export const ANTHROPIC_API_KEY = defineSecret('ANTHROPIC_API_KEY');
 /** processStatement runs for at most 540 s; a run older than this is treated as abandoned. */
 const STALE_PROCESSING_MS = 12 * 60 * 1000;
 const MAX_BYTES = 20 * 1024 * 1024;
+/** Rows (incl. sheet markers) the statement reader receives from one spreadsheet; more is refused, never truncated. */
+const TABLE_MAX_ROWS = 3000;
 const FILE_TYPES = { pdf: 'pdf', xlsx: 'xlsx', xlsm: 'xlsx', csv: 'csv' } as const;
 type FileType = 'pdf' | 'xlsx' | 'csv';
 
@@ -192,7 +194,9 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
       };
     }
     if (!rows.length) return { ...none, failure: { code: 'table_empty', message: `The ${type === 'csv' ? 'CSV file' : 'spreadsheet'} has no rows of data.` } };
-    aiInput = { kind: 'table', text: tableToText(rows), fileName };
+    // Never cut a statement short: the statement reader receives at most TABLE_MAX_ROWS rows.
+    if (rows.length > TABLE_MAX_ROWS) return { ...none, failure: { code: 'table_too_large', message: `The ${type === 'csv' ? 'CSV file' : 'spreadsheet'} has ${rows.length} rows; at most ${TABLE_MAX_ROWS} can be read in one statement. Split it (for example by month or line of business) and upload each part.`, detail: `${rows.length} rows` } };
+    aiInput = { kind: 'table', text: tableToText(rows, TABLE_MAX_ROWS), fileName };
   }
 
   if (!aiEnabled) {
