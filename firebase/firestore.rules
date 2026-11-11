@@ -30,8 +30,6 @@ service cloud.firestore {
       match /terms/{termId}        { allow read: if isStaff(); allow write: if false; }
     }
     match /settings/{id}           { allow read: if isStaff(); allow write: if false; }
-    // Physical (paper) file tracking per customer (internal staff only; written by setFileTracking).
-    match /fileTracking/{clientId} { allow read: if isStaff(); allow write: if false; }
     match /ledger/{id}             { allow read: if isStaff(); allow write: if false; }
     match /statements/{id}         { allow read: if isStaff(); allow write: if false;
       match /lines/{lineId}        { allow read: if isStaff(); allow write: if false; }

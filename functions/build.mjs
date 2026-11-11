@@ -15,6 +15,7 @@ await build({
   external: ['firebase-admin', 'firebase-admin/*', 'firebase-functions', 'firebase-functions/*', 'pdfjs-dist', 'pdfjs-dist/*', 'exceljs'],
   alias: {
     '@asm/shared/pdf': fileURLToPath(new URL('../packages/shared/src/pdfText.ts', import.meta.url)),
+    '@asm/shared/excel-write': fileURLToPath(new URL('../packages/shared/src/excelWrite.ts', import.meta.url)),
     '@asm/shared/excel': fileURLToPath(new URL('../packages/shared/src/excelRead.ts', import.meta.url)),
     '@asm/shared': fileURLToPath(new URL('../packages/shared/src/index.ts', import.meta.url)),
   },

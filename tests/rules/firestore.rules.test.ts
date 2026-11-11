@@ -42,7 +42,6 @@ beforeEach(async () => {
     await setDoc(doc(db, 'buyoutSettlements/SYN-S1/policyRows/SYN-P1'), { brokerId: 'SYN-B1', netContributionCents: 33904 });
     await setDoc(doc(db, 'buyoutCounters/2027-01-15'), { lastVersion: 1 });
     await setDoc(doc(db, 'buyoutConfig/current'), { plannedClosingDate: '2027-01-15', closingDateConfirmed: false });
-    await setDoc(doc(db, 'fileTracking/SYN-C1'), { fileReviewed: true, reviewStatus: 'reviewed', boxNumber: '007', transferDate: '2026-12-01' });
   });
 });
 
@@ -164,21 +163,6 @@ describe('policy coverage terms', () => {
     await assertFails(setDoc(doc(admin(), 'policies/SYN-P1/terms/2025-07-02'), { status: 'cancelled' }, { merge: true }));
     await assertFails(deleteDoc(doc(admin(), 'policies/SYN-P1/terms/2025-07-02')));
     await assertFails(setDoc(doc(staff(), 'policies/SYN-P1/terms/2026-07-03'), { effectiveDate: '2026-07-03' }));
-  });
-});
-
-describe('physical file tracking (internal only)', () => {
-  it('admin and staff can read it; buyer-like roles, users without a role and signed-out users cannot', async () => {
-    await assertSucceeds(getDoc(doc(admin(), 'fileTracking/SYN-C1')));
-    await assertSucceeds(getDocs(collection(staff(), 'fileTracking')));
-    await assertFails(getDoc(doc(buyerLike(), 'fileTracking/SYN-C1')));
-    await assertFails(getDoc(doc(noRole(), 'fileTracking/SYN-C1')));
-    await assertFails(getDoc(doc(anon(), 'fileTracking/SYN-C1')));
-  });
-  it('is written only by the server (setFileTracking), never from the browser', async () => {
-    await assertFails(setDoc(doc(admin(), 'fileTracking/SYN-C1'), { boxNumber: '008' }, { merge: true }));
-    await assertFails(setDoc(doc(staff(), 'fileTracking/SYN-C2'), { fileReviewed: false }));
-    await assertFails(deleteDoc(doc(admin(), 'fileTracking/SYN-C1')));
   });
 });
 

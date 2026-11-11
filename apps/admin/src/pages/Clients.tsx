@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { collection, doc, onSnapshot } from 'firebase/firestore';
-import { checkTerms, searchBook, termEnd, TERM_STATUSES, TERM_STATUS_LABELS, FILE_REVIEW_STATUSES, FILE_REVIEW_STATUS_LABELS, type FileReviewStatus, type PolicyTerm, type TermStatus } from '@asm/shared';
-import { BookExportButton, canExportBook } from './BookExport';
+import { collection, onSnapshot } from 'firebase/firestore';
+import { checkTerms, searchBook, termEnd, TERM_STATUSES, TERM_STATUS_LABELS, type PolicyTerm, type TermStatus } from '@asm/shared';
+import { BookExportButton } from './BookExport';
 import { db } from '../firebase';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { CLASSIFICATION_LABELS, LEDGER_CLASSIFICATIONS, formatBps, formatMonth, parseMoneyToCents, type Client, type LedgerClassification, type LedgerEntry, type Policy } from '@asm/shared';
@@ -110,8 +110,6 @@ export function ClientDetailPage() {
         {list.length > 0 && <p className="mb-2 text-xs text-slate-500">Click a policy to open its details, coverage terms (renewals, earlier terms, cancellation) and commission history.</p>}
         <DataTable rows={list} columns={columns} onRowClick={(p) => setParams({ policy: p.id })} empty="No policies yet." />
       </Card>
-
-      <FileTrackingSection clientId={client.id} />
 
       {editing && <ClientForm open onClose={() => setEditing(false)} client={client} />}
       {policyForm && <PolicyForm open onClose={() => setPolicyForm(null)} client={client} policy={policyForm.policy} />}
@@ -327,52 +325,3 @@ function TermForm({ policy, term, onClose }: { policy: Policy; term: PolicyTerm 
   );
 }
 
-interface FileTrackingDoc { fileReviewed?: boolean; reviewStatus?: FileReviewStatus; boxNumber?: string; transferDate?: string | null }
-
-/** Optional physical (paper) file tracking. Stored separately (fileTracking/{clientId}); the client record is not changed. */
-function FileTrackingSection({ clientId }: { clientId: string }) {
-  const { role } = useAuth();
-  const [cur, setCur] = useState<FileTrackingDoc | null | undefined>(undefined);
-  const [form, setForm] = useState<{ fileReviewed: boolean; reviewStatus: FileReviewStatus; boxNumber: string; transferDate: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => onSnapshot(doc(db, 'fileTracking', clientId), (s) => setCur(s.exists() ? (s.data() as FileTrackingDoc) : null), () => setCur(null)), [clientId]);
-  const canEdit = canExportBook(role);
-  const edit = () => setForm({ fileReviewed: cur?.fileReviewed ?? false, reviewStatus: cur?.reviewStatus ?? 'not_started', boxNumber: cur?.boxNumber ?? '', transferDate: cur?.transferDate ?? '' });
-  const save = async () => {
-    if (!form) return;
-    setBusy(true); setError(null);
-    try {
-      await api.setFileTracking({ clientId, fileReviewed: form.fileReviewed, reviewStatus: form.reviewStatus, boxNumber: form.boxNumber.trim(), transferDate: form.transferDate || null });
-      setForm(null);
-    } catch (e) { setError(e instanceof Error ? e.message : 'Save failed'); } finally { setBusy(false); }
-  };
-  return (
-    <Card title="Physical file tracking (optional)" actions={canEdit && !form ? <Button size="sm" variant="secondary" onClick={edit}>{cur ? 'Edit' : 'Add'}</Button> : undefined}>
-      {!form && (cur ? (
-        <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-          <div><dt className="text-xs text-slate-500">File reviewed</dt><dd>{cur.fileReviewed ? 'Yes' : 'No'}</dd></div>
-          <div><dt className="text-xs text-slate-500">Review status</dt><dd>{cur.reviewStatus ? FILE_REVIEW_STATUS_LABELS[cur.reviewStatus] : '—'}</dd></div>
-          <div><dt className="text-xs text-slate-500">Box number</dt><dd className="font-mono">{cur.boxNumber || '—'}</dd></div>
-          <div><dt className="text-xs text-slate-500">Transfer date</dt><dd>{cur.transferDate || '—'}</dd></div>
-        </dl>
-      ) : <p className="text-sm text-slate-500">{cur === undefined ? 'Loading…' : 'Not tracked yet.'}</p>)}
-      {form && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-            <Field label="File reviewed">
-              <Select value={form.fileReviewed ? 'yes' : 'no'} onChange={(e) => setForm({ ...form, fileReviewed: e.target.value === 'yes' })} options={[{ value: 'no', label: 'No' }, { value: 'yes', label: 'Yes' }]} />
-            </Field>
-            <Field label="Review status">
-              <Select value={form.reviewStatus} onChange={(e) => setForm({ ...form, reviewStatus: e.target.value as FileReviewStatus })} options={FILE_REVIEW_STATUSES.map((s) => ({ value: s, label: FILE_REVIEW_STATUS_LABELS[s] }))} />
-            </Field>
-            <Field label="Box number"><TextInput value={form.boxNumber} maxLength={40} onChange={(e) => setForm({ ...form, boxNumber: e.target.value })} /></Field>
-            <Field label="Transfer date"><TextInput type="date" value={form.transferDate} onChange={(e) => setForm({ ...form, transferDate: e.target.value })} /></Field>
-          </div>
-          <ErrorNote message={error} />
-          <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setForm(null)}>Cancel</Button><Button disabled={busy} onClick={() => void save()}>{busy ? 'Saving…' : 'Save'}</Button></div>
-        </div>
-      )}
-    </Card>
-  );
-}

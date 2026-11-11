@@ -5,16 +5,19 @@ import { useAuth } from '../auth';
 import { Button, Card, ErrorNote, Modal, PageHeader } from '../ui';
 
 /**
- * Customer & Policy Export. The file is built on the server from EVERY customer and policy record (not the
- * rows on screen) and only for internal users (admin, staff). It contains no commission, premium, broker
- * compensation or acquisition-financial figures. Not part of the Due Diligence Package.
+ * Customer & Policy Export: Customer Folder Checklist and Policy Detail Export, as Excel workbooks built on
+ * the server from EVERY customer and policy record (not the rows on screen), for internal users only
+ * (admin, staff). No commission, premium, broker compensation or acquisition-financial figures.
  */
 
 /** Internal roles allowed to export. Must match EXPORT_ROLES in functions/src/callables/exports.ts. */
 export const canExportBook = (role: string | null) => role === 'admin' || role === 'staff';
 
-function download(name: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+function download(name: string, base64: string) {
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
   const a = document.createElement('a');
   a.href = url; a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -27,10 +30,9 @@ const Choice = ({ name, value, checked, onChange, title, children }: { name: str
   </label>
 );
 
-export function BookExportForm({ onDone }: { onDone?: () => void }) {
-  const [format, setFormat] = useState<'customer_summary' | 'policy_detail'>('customer_summary');
-  const [scope, setScope] = useState<'all' | 'active'>('active');
-  const [includeFileTracking, setTracking] = useState(false);
+export function BookExportForm() {
+  const [format, setFormat] = useState<'folder_checklist' | 'policy_detail'>('folder_checklist');
+  const [scope, setScope] = useState<'active' | 'all'>('active');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [last, setLast] = useState<BookExportResponse | null>(null);
@@ -38,10 +40,9 @@ export function BookExportForm({ onDone }: { onDone?: () => void }) {
   const run = async () => {
     setBusy(true); setError(null);
     try {
-      const r = await api.exportBook({ format, scope, includeFileTracking });
-      download(r.fileName, r.csv);
+      const r = await api.exportBook({ format, scope });
+      download(r.fileName, r.fileBase64);
       setLast(r);
-      onDone?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed');
     } finally { setBusy(false); }
@@ -50,37 +51,38 @@ export function BookExportForm({ onDone }: { onDone?: () => void }) {
   return (
     <div className="space-y-4">
       <div>
-        <div className="mb-1 text-xs font-medium text-slate-600">Customers</div>
+        <div className="mb-1 text-xs font-medium text-slate-600">Export</div>
         <div className="grid gap-2 sm:grid-cols-2">
-          <Choice name="scope" value="active" checked={scope === 'active'} onChange={() => setScope('active')} title="Active customers only">Customers whose status is Active, with all their policies.</Choice>
-          <Choice name="scope" value="all" checked={scope === 'all'} onChange={() => setScope('all')} title="All customers">Active and inactive customers.</Choice>
+          <Choice name="format" value="folder_checklist" checked={format === 'folder_checklist'} onChange={() => setFormat('folder_checklist')} title="Customer Folder Checklist">
+            One row per customer, A–Z: name, customer ID, number of active policies, and blank boxes for File Located, File Reviewed, Ready for Pioneer and Box Number. Prints on letter paper with the header on every page.
+          </Choice>
+          <Choice name="format" value="policy_detail" checked={format === 'policy_detail'} onChange={() => setFormat('policy_detail')} title="Policy Detail Export">
+            One row per policy: customer name, policy number, carrier, policy type, effective and expiration dates, policy status and broker.
+          </Choice>
         </div>
       </div>
       <div>
-        <div className="mb-1 text-xs font-medium text-slate-600">Format</div>
+        <div className="mb-1 text-xs font-medium text-slate-600">Records</div>
         <div className="grid gap-2 sm:grid-cols-2">
-          <Choice name="format" value="customer_summary" checked={format === 'customer_summary'} onChange={() => setFormat('customer_summary')} title="Customer Summary">One row per customer: ID, status, broker, policy count, policy numbers, carriers, types, earliest effective and latest expiration.</Choice>
-          <Choice name="format" value="policy_detail" checked={format === 'policy_detail'} onChange={() => setFormat('policy_detail')} title="Policy Detail">One row per policy: customer, policy number, carrier, type, effective and expiration dates, status, broker. Customers without policies get one row.</Choice>
+          <Choice name="scope" value="active" checked={scope === 'active'} onChange={() => setScope('active')} title="Active only">
+            Based on policy status: the checklist lists customers with at least one active policy; the policy export lists active policies only.
+          </Choice>
+          <Choice name="scope" value="all" checked={scope === 'all'} onChange={() => setScope('all')} title="All records">Every customer, or every policy, whatever its status.</Choice>
         </div>
       </div>
-      <label className="flex items-start gap-2 text-sm">
-        <input type="checkbox" checked={includeFileTracking} onChange={(e) => setTracking(e.target.checked)} className="mt-0.5" />
-        <span><span className="font-medium text-slate-800">Include physical file tracking</span>
-          <span className="block text-xs text-slate-500">Adds File Reviewed, Review Status, Box Number and Transfer Date (entered on each customer's page).</span></span>
-      </label>
       <p className="text-xs text-slate-500">
-        Every matching record is exported, not only the customers shown on screen. Sorted alphabetically by customer. CSV for Microsoft Excel; policy numbers and IDs are kept as text (leading zeros, no scientific notation).
-        No commission, premium, broker compensation or acquisition financial data is included. Internal use only — not for the Due Diligence Package. Each export is recorded in the audit log.
+        Excel workbook (.xlsx). Every matching record is included, not only the customers shown on screen. Policy numbers and IDs are stored as text, so leading zeros are kept.
+        No commission, premium, broker compensation or acquisition financial data. Internal use only; each export is recorded in the audit log.
       </p>
       <ErrorNote message={error} />
       {last && (
         <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-          Downloaded <span className="font-mono">{last.fileName}</span>: {last.customers.toLocaleString()} customers, {last.policies.toLocaleString()} policies, {last.rows.toLocaleString()} rows
-          {' '}(of {last.totalClientRecords.toLocaleString()} customer and {last.totalPolicyRecords.toLocaleString()} policy records).
-          {last.orphanPolicies > 0 && <span className="block text-amber-800">{last.orphanPolicies} policy record(s) refer to a customer that no longer exists; they are listed at the end of the Policy Detail file.</span>}
+          Downloaded <span className="font-mono">{last.fileName}</span>: {last.subtitle}
+          {' '}(from {last.totalClientRecords.toLocaleString()} customer and {last.totalPolicyRecords.toLocaleString()} policy records).
+          {last.orphanPolicies > 0 && <span className="block text-amber-800">{last.orphanPolicies} policy record(s) refer to a customer that no longer exists; they are listed at the end as "(customer record missing)".</span>}
         </div>
       )}
-      <div className="flex justify-end"><Button disabled={busy} onClick={() => void run()}>{busy ? 'Preparing…' : 'Export CSV'}</Button></div>
+      <div className="flex justify-end"><Button disabled={busy} onClick={() => void run()}>{busy ? 'Preparing…' : 'Download Excel file'}</Button></div>
     </div>
   );
 }
