@@ -32,6 +32,7 @@ The owner confirmed this business rule.
 | Each transaction row | One statement line. Its paid commission is **Gross Comm**. Broker splits are worked out from it. |
 | Net Due Agent below Gross Comm on a row, identified as MVR (MVR column, or "MVR" on the row) | **One** statement adjustment for the difference. It is carrier level and 100 % agency: broker 0, no policy. |
 | A row that is only an MVR charge (no Gross Comm) | Only that adjustment. No policy line is created. |
+| **The carrier's actual export:** a row with Gross Comm 0.00, a negative Net Due Agent and no "MVR" on it, plus a Summary **MVRChargeback** total | Treated as the MVR charge **only if** it is the only unexplained deduction on the sheet, has no commission, and equals the Summary MVR amount not already covered by rows labelled MVR. It then becomes one agency-only adjustment, with no policy line. |
 | A carrier total or subtotal row | Checked against the rows above it. Not counted again. |
 
 These rules always hold:
@@ -54,7 +55,12 @@ as a **discrepancy**, and approval and posting are blocked.
    row.
 5. Each MVR charge is recorded once. If the Summary prints an MVR total, it must match.
 
-The reader rejects the following rather than guessing:
+The reader rejects the following rather than guessing. Totals that reconcile are never evidence on their own:
+
+- two or more unexplained deductions, which produce one statement-level "manual review" message with each row flagged
+- an unlabelled deduction that differs from the Summary MVR amount
+- an unlabelled deduction on a row that has commission
+- an unlabelled deduction when the Summary prints no MVR total
 
 - a Net/Gross difference that is not identified as MVR
 - a positive MVR amount (a refund or reversal)
@@ -104,5 +110,5 @@ The report:
 - **Check 8a**: which column was used for each role.
 - **Check 8b**: what happened to every row.
 - **Check 8c**: totals and MVR charges.
-- **Check 8d**: the reconciliation results.
+- **Check 8d**: the reconciliation results, with errors grouped as one line per distinct problem. Checks that fail only because of a row problem are marked "consequence" and are not counted as separate problems.
 - **Check 8e**: a simulated broker/agency split using a made-up 50 % share.

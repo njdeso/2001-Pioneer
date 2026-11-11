@@ -16,6 +16,12 @@ import type { ExtractedLine, ExtractedStatement, LineIssue, SourceAccounting, St
  *     (identified by an MVR column or "MVR" on the row). It becomes ONE statement-level adjustment:
  *     carrier level, 100 % agency, never split with a broker and never a policy commission;
  *   - a row that is only an MVR charge (no Gross Comm) becomes only that adjustment, no line;
+ *   - the carrier's real export prints the MVR charge as a row with Gross Comm 0.00 and a negative Net Due
+ *     Agent and NO "MVR" on the row; the Summary sheet carries the amount as "MVRChargeback". Such a row is an
+ *     MVR charge only if it is the ONLY unexplained deduction on the sheet, it has no commission, and its
+ *     amount is exactly the Summary MVR total not already accounted for by rows that say "MVR". Anything
+ *     else (two unexplained deductions, a different amount, a deduction on a commission row, no Summary MVR
+ *     total) is held for manual review — totals that happen to reconcile are never evidence on their own;
  *   - the plain "Comm" column is ignored (its meaning is not defined by the carrier).
  * Reconciliation (exact to the cent, enforced by reconcileStatement and the checks below):
  *   Σ Gross Comm                    = Summary "Commissions - Current"
@@ -42,7 +48,7 @@ const ROLE_PATTERNS: Record<Role, RegExp> = {
   comm: /^comm(ission)?s?$/,
   monthEnd: /^month end(ing)?( date)?$/,
   policy: /^pol(icy)?( (number|num|no|nbr))?( #)?$|^pol(icy)? ?#$/,
-  insured: /^(named )?insured( name)?$|^(customer|client)( name)?$|^name$/,
+  insured: /^(named )?insured( name)?$|^(customer|client|account|policy ?holder|ins)( name)?$|^name$/,
   transType: /^trans(action)? ?(type|code|desc|description)?$|^(type|activity)$/,
   effDate: /^(pol(icy)? )?eff(ective)?( date| dt)?$/,
   premium: /^(written |trans(action)? )?prem(ium)?( amount| amt)?$/,
@@ -140,7 +146,8 @@ export function summaryPairs(rows: string[][]): { label: string; cents: Cents }[
 
 const SUMMARY_COMMISSIONS = /^commissions? (current|this (month|period))$/;
 const SUMMARY_NET = /^net (amount )?due (to )?agent( current)?$/;
-const SUMMARY_MVR = /(^| )mvrs?( |$)/;
+/** Any Summary label naming MVR charges: "MVRChargeback", "MVR Chargeback", "MVR Charges", "MVR Fees"… */
+const SUMMARY_MVR = /mvr/;
 
 /** One Summary total by label; null if absent; an error if printed more than once with different amounts. */
 function summaryTotal(pairs: { label: string; cents: Cents }[], re: RegExp): { cents: Cents | null; error: string | null } {
@@ -177,6 +184,11 @@ export function readDetailedStatement(sheets: Sheet[]): DetailedReadResult {
   }
   const col = (r: Role) => cols[r]?.index ?? -1;
   const cell = (row: string[], r: Role) => (col(r) >= 0 ? (row[col(r)] ?? '').trim() : '');
+  // A policy-number column that is empty on every row is the wrong column: one clear refusal, not one error per row.
+  const withGross = detailed.rows.slice(hi + 1).filter((r) => (money(r[col('gross')]).cents ?? 0) !== 0);
+  if (withGross.length && withGross.every((r) => !cell(r, 'policy'))) {
+    return { kind: 'incomplete', code: 'detailed_policy_empty', message: `This looks like a carrier DetailedStatement, but the policy-number column "${cols.policy!.header}" is empty on every commission row. It was not read.`, detail: `headers: ${header.map((h, i) => `${i + 1}. ${h}`).join(' | ')}` };
+  }
 
   const issues: LineIssue[] = [];
   const lines: ExtractedLine[] = [];
@@ -193,6 +205,51 @@ export function readDetailedStatement(sheets: Sheet[]): DetailedReadResult {
   const textCols = header.map((_, j) => j).filter((j) => ![col('insured'), col('policy'), col('gross'), col('net'), col('comm'), col('premium')].includes(j));
   const rawOf = (row: string[]) => header.map((h, j) => `${h}=${row[j] ?? ''}`).join(' | ');
 
+  // ---- Summary totals (read first: the Summary MVR total can identify an unlabelled MVR row) ----
+  const pairs = summaryPairs(summary.rows);
+  const sc = summaryTotal(pairs, SUMMARY_COMMISSIONS);
+  const sn = summaryTotal(pairs, SUMMARY_NET);
+  const sm = summaryTotal(pairs, SUMMARY_MVR);
+  for (const [t, name] of [[sc, 'Commissions - Current'], [sn, 'Net Amount Due Agent']] as const) {
+    if (t.error) issues.push({ level: 'error', code: 'summary_ambiguous', text: `Summary: ${t.error}` });
+    else if (t.cents === null) issues.push({ level: 'error', code: 'summary_missing', text: `Summary sheet: "${name}" total not found` });
+  }
+  if (sm.error) issues.push({ level: 'error', code: 'summary_ambiguous', text: `Summary: ${sm.error}` });
+  const smLabel = sm.cents !== null ? pairs.find((p) => SUMMARY_MVR.test(norm(p.label)))!.label : '';
+
+  // ---- Pre-scan: which rows carry a deduction (Net < Gross), and which of those say they are MVR ----
+  const isTotalRow = (row: string[]) => !cell(row, 'policy') && row.some((v, j) => j !== col('gross') && j !== col('net') && /^(grand |sub ?)?totals?:?$/i.test(v.trim()));
+  const mvrText = (row: string[]) => textCols.some((j) => j !== col('mvr') && /\bm\.?v\.?r\.?s?\b|motor vehicle (record|report)/i.test(row[j] ?? ''));
+  const mvrCol = (row: string[]) => { const v = cols.mvr ? money(row[col('mvr')]) : { cents: null, bad: false }; return v.cents !== null && v.cents !== 0; };
+  type Facts = { sheetRow: number; grossC: number; diff: number; labelled: boolean; readable: boolean };
+  const facts: Facts[] = [];
+  data.forEach((row, k) => {
+    if (isTotalRow(row)) return;
+    const g = money(row[col('gross')]), n = money(row[col('net')]);
+    facts.push({ sheetRow: firstDataRow + k, grossC: g.cents ?? 0, diff: (n.cents ?? 0) - (g.cents ?? 0), labelled: mvrText(row) || mvrCol(row), readable: !g.bad && !n.bad });
+  });
+  const labelledMvr = facts.filter((f) => f.labelled && f.diff < 0).reduce((t, f) => t + f.diff, 0);
+  const unexplained = facts.filter((f) => f.diff !== 0 && !f.labelled);
+  // The Summary MVR total (sign as a deduction) still to be accounted for after the labelled MVR rows.
+  const summaryMvrLeft = sm.cents !== null ? -Math.abs(sm.cents) - labelledMvr : null;
+  let attributedRow: number | null = null;
+  let attributionProblem: string | null = null;
+  if (unexplained.length) {
+    const rowsTxt = unexplained.map((f) => `row ${f.sheetRow} (${fmt(f.diff)}${f.grossC !== 0 ? ` on a commission of ${fmt(f.grossC)}` : ', no commission'})`).join(', ');
+    if (summaryMvrLeft === null || summaryMvrLeft === 0) {
+      attributionProblem = null; // reported row by row as net_differs below
+    } else if (unexplained.length > 1) {
+      attributionProblem = `${unexplained.length} deductions are not identified on their rows: ${rowsTxt}. The Summary "${smLabel}" total (${fmt(sm.cents!)}) cannot be attributed to one of them, so none is treated as an MVR charge. Manual review is needed.`;
+    } else {
+      const f = unexplained[0];
+      if (!f.readable) attributionProblem = null;
+      else if (f.grossC !== 0) attributionProblem = `Row ${f.sheetRow}: a deduction of ${fmt(f.diff)} sits on a commission row (Gross Comm ${fmt(f.grossC)}). An unlabelled deduction is treated as the Summary "${smLabel}" charge only when the row has no commission. Manual review is needed.`;
+      else if (f.diff !== summaryMvrLeft) attributionProblem = `Row ${f.sheetRow}: the deduction ${fmt(f.diff)} is not the Summary "${smLabel}" amount still unaccounted for (${fmt(summaryMvrLeft)}). Manual review is needed.`;
+      else attributedRow = f.sheetRow;
+    }
+  }
+  if (attributionProblem) issues.push({ level: 'error', code: 'mvr_attribution', text: attributionProblem });
+
   data.forEach((row, k) => {
     const sheetRow = firstDataRow + k;
     const rowIssues: LineIssue[] = [];
@@ -207,7 +264,7 @@ export function readDetailedStatement(sheets: Sheet[]): DetailedReadResult {
     const policy = cell(row, 'policy');
 
     // Carrier total / subtotal row: no policy, labelled "total"; verified against the rows above, not counted.
-    if (!policy && row.some((v, j) => j !== col('gross') && j !== col('net') && /^(grand |sub ?)?totals?:?$/i.test(v.trim()))) {
+    if (isTotalRow(row)) {
       totalRows++;
       const sg = runningGross.reduce((a, b) => a + b, 0), sn = runningNet.reduce((a, b) => a + b, 0);
       if ((g.cents !== null && g.cents !== sg) || (n.cents !== null && n.cents !== sn)) {
@@ -227,13 +284,17 @@ export function readDetailedStatement(sheets: Sheet[]): DetailedReadResult {
     const diff = netC - grossC;
     const mvrCell = cols.mvr ? money(row[col('mvr')]) : { cents: null, bad: false };
     const byColumn = mvrCell.cents !== null && mvrCell.cents !== 0;
-    const byText = textCols.some((j) => j !== col('mvr') && /\bm\.?v\.?r\.?s?\b|motor vehicle (record|report)/i.test(row[j] ?? ''));
-    const isMvr = byColumn || byText;
+    const byText = mvrText(row);
+    const bySummary = sheetRow === attributedRow; // the single unlabelled, commission-free deduction = Summary MVR total
+    const isMvr = byColumn || byText || bySummary;
     let mvrCents: Cents | null = null;
 
     if (mvrCell.bad) rowIssues.push({ level: 'error', code: 'bad_amount', text: `Row ${sheetRow}: MVR amount "${row[col('mvr')]}" could not be read` });
     if (diff !== 0) {
-      if (!isMvr) {
+      if (!isMvr && attributionProblem) {
+        // Already explained once at statement level (mvr_attribution); the row is flagged, not re-described.
+        rowIssues.push({ level: 'error', code: 'unexplained_deduction', text: `Row ${sheetRow}: unexplained deduction ${fmt(diff)} — see the statement-level message` });
+      } else if (!isMvr) {
         rowIssues.push({ level: 'error', code: 'net_differs', text: `Row ${sheetRow}: Net Due Agent is ${fmt(netC)} but Gross Comm is ${fmt(grossC)} (difference ${fmt(diff)}), and nothing on the row identifies the difference as an MVR charge. Only MVR charges are handled; confirm what this deduction is.` });
       } else if (diff > 0) {
         rowIssues.push({ level: 'error', code: 'mvr_positive', text: `Row ${sheetRow}: the MVR difference increases the payment (${fmt(diff)}). An MVR refund or reversal is not handled automatically; confirm how it should be recorded.` });
@@ -243,6 +304,7 @@ export function readDetailedStatement(sheets: Sheet[]): DetailedReadResult {
         mvrCents = diff;
         if (byColumn) identifiedBy.add(`"${cols.mvr!.header}" column`);
         if (byText) identifiedBy.add('"MVR" text on the row');
+        if (bySummary) identifiedBy.add(`the Summary "${smLabel}" total (single unlabelled deduction, no commission)`);
       }
     } else if (byColumn) {
       rowIssues.push({ level: 'error', code: 'mvr_column_mismatch', text: `Row ${sheetRow}: the MVR column shows ${fmt(mvrCell.cents!)} but Net Due Agent equals Gross Comm (${fmt(grossC)}), so the charge is not deducted on this row` });
@@ -300,17 +362,6 @@ export function readDetailedStatement(sheets: Sheet[]): DetailedReadResult {
   if (m && +m[2] >= 1 && +m[2] <= 12) statementMonth = `${m[1]}-${m[2]}`;
   else issues.push({ level: 'error', code: 'month_end', text: meValues.length > 1 ? `Rows have different Month End values (${meValues.map((v) => v || '(blank)').join(', ')}); one statement must cover one month` : `Month End "${only ?? ''}" is not a YYYYMM month` });
 
-  // ---- Summary totals ----
-  const pairs = summaryPairs(summary.rows);
-  const sc = summaryTotal(pairs, SUMMARY_COMMISSIONS);
-  const sn = summaryTotal(pairs, SUMMARY_NET);
-  const sm = summaryTotal(pairs, SUMMARY_MVR);
-  for (const [t, name] of [[sc, 'Commissions - Current'], [sn, 'Net Amount Due Agent']] as const) {
-    if (t.error) issues.push({ level: 'error', code: 'summary_ambiguous', text: `Summary: ${t.error}` });
-    else if (t.cents === null) issues.push({ level: 'error', code: 'summary_missing', text: `Summary sheet: "${name}" total not found` });
-  }
-  if (sm.error) issues.push({ level: 'error', code: 'summary_ambiguous', text: `Summary: ${sm.error}` });
-
   // ---- Independent checks (reconcileStatement repeats the two Summary checks on the stored lines) ----
   const lineTotal = lines.reduce((s, l) => s + (l.paidCommissionCents ?? 0), 0);
   const checks: DetailedReport['checks'] = [
@@ -322,10 +373,17 @@ export function readDetailedStatement(sheets: Sheet[]): DetailedReadResult {
     { key: 'adjustment_once', label: 'Each MVR charge recorded exactly once', ok: new Set(adjustments.map((a) => a.source!.sheetRow)).size === adjustments.length },
   ];
   if (sm.cents !== null) checks.push({ key: 'mvr_vs_summary', label: 'MVR adjustments = Summary MVR total', ok: Math.abs(sm.cents) === Math.abs(mvrTotal), expectedCents: -Math.abs(sm.cents), actualCents: mvrTotal });
+  // Row-level money problems (an unexplained or invalid deduction, an unreadable amount) make the derived
+  // whole-statement checks fail too. Those are consequences, not separate problems: they stay in the report
+  // (marked) but are not added as further errors. reconcileStatement still blocks on the totals.
+  const rowMoneyCodes = new Set(['net_differs', 'unexplained_deduction', 'mvr_positive', 'mvr_column_mismatch', 'mvr_in_gross', 'bad_amount', 'mvr_attribution']);
+  const rowMoneyProblem = [...issues, ...lines.flatMap((l) => l.issues)].some((i) => i.level === 'error' && rowMoneyCodes.has(i.code));
+  const derived = new Set(['net_vs_summary', 'row_identity', 'mvr_vs_summary']);
   for (const ch of checks) {
     if (ch.ok) continue;
     // Missing Summary totals are already reported above; do not repeat them.
     if ((ch.key === 'gross_vs_summary' && sc.cents === null) || ((ch.key === 'net_vs_summary' || ch.key === 'net_column') && sn.cents === null)) continue;
+    if (rowMoneyProblem && derived.has(ch.key)) { ch.detail = `${ch.detail ? `${ch.detail}; ` : ''}consequence of the row problem(s) above`; continue; }
     issues.push({ level: 'error', code: `chk_${ch.key}`, text: `${ch.label}: ${ch.detail ?? `expected ${fmt(ch.expectedCents ?? 0)}, found ${fmt(ch.actualCents ?? 0)}`}` });
   }
 

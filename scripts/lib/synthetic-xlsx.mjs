@@ -120,14 +120,16 @@ export function sheetsWorkbook(sheets, { prefix = '', inline = false } = {}) {
  * A DetailedStatement with MVR chargebacks (fictional data): 20 columns incl. an ambiguous "Comm" column
  * (deliberately NOT gross), Gross Comm and Net Due Agent; MVR charges appear as Net Due Agent < Gross Comm
  * on the affected row, with "MVR" in Trans Type (or a separate MVR-only row with no commission).
- *   mvr: [{ row: <0-based data row>, cents: <positive charge>, only?: true (an MVR-only row inserted there) }]
+ *   mvr: [{ row: <0-based data row>, cents: <positive charge>, only?: true (an MVR-only row inserted there),
+ *           unlabelled?: true (that row as the real export prints it: Gross Comm 0, no "MVR" anywhere) }]
+ *   mvrLabel: the Summary label for the MVR total (the real export: "MVRChargeback")
  *   negatives: data-row indexes made cancellations (negative premium and commission)
  *   summary: overrides { commissions, net, mvr } in cents (null = omit the label)
  * Returns { sheets, bytes, grossCents, mvrCents, netCents, rows }.
  */
 export const MVR_HEAD = ['Month End', 'Agency', 'Insured Name', 'Policy Number', 'Line', 'Trans Type', 'Eff Date', 'Exp Date', 'Trans Date', 'Cancel Date',
   'Written Premium', 'Comm Rate', 'Comm', 'Gross Comm', 'State', 'Company', 'Net Due Agent', 'Term', 'Status', 'Notes'];
-export function mvrStatement({ rows = 94, mvr = [{ row: 10, cents: 18480 }], negatives = [3, 40], summary = {}, monthEnd = 202511, nonce = '', prefix = '', inline = false, mutate } = {}) {
+export function mvrStatement({ rows = 94, mvr = [{ row: 10, cents: 18480 }], negatives = [3, 40], summary = {}, monthEnd = 202511, nonce = '', prefix = '', inline = false, mutate, mvrLabel = 'MVR Charges' } = {}) {
   const data = [];
   for (let i = 0; i < rows; i++) {
     const neg = negatives.includes(i);
@@ -139,7 +141,10 @@ export function mvrStatement({ rows = 94, mvr = [{ row: 10, cents: 18480 }], neg
   }
   // MVR charges, highest row first so inserted rows do not shift later ones
   for (const m of [...mvr].sort((a, b) => b.row - a.row)) {
-    if (m.only) {
+    if (m.only && m.unlabelled) {
+      // As the carrier's real export prints it: Gross Comm 0.00, a negative Net Due Agent, nothing saying "MVR".
+      data.splice(m.row, 0, [monthEnd, 'SYN-001', m.blankIdentity ? '' : `Synthetic Insured ADJ ${m.row}`, m.blankIdentity ? '' : `00${String(9500 + m.row)}`, '', m.transType ?? '', '01/01/0001', '01/01/0001', '11/30/2025', '01/01/0001', 0, 0, 0, 0, 'NY', 'Synthetic Mutual', -m.cents / 100, '', '', '']);
+    } else if (m.only) {
       data.splice(m.row, 0, [monthEnd, 'SYN-001', `Synthetic Insured MVR ${m.row}`, `00${String(9000 + m.row)}`, 'Personal Auto', 'MVR', '', '', '11/05/2025', '01/01/0001', '', '', '', '', 'NY', 'Synthetic Mutual', -m.cents / 100, '', 'Active', 'MVR fee']);
     } else {
       const r = data[m.row];
@@ -154,7 +159,7 @@ export function mvrStatement({ rows = 94, mvr = [{ row: 10, cents: 18480 }], neg
   const summaryRows = [['Summary', 'Current', 'Year to Date'], ['Written Premium - Current', sum(10) / 100]];
   // Year-to-date figures sit to the right of the current ones, as on carrier summaries.
   if (s.commissions !== null) summaryRows.push(['Commissions - Current', s.commissions / 100, (s.commissions * 11) / 100]);
-  if (s.mvr !== null && s.mvr !== undefined) summaryRows.push(['MVR Charges', s.mvr / 100, (s.mvr * 3) / 100]);
+  if (s.mvr !== null && s.mvr !== undefined) summaryRows.push([mvrLabel, s.mvr / 100, (s.mvr * 3) / 100]);
   if (s.net !== null) summaryRows.push(['Net Amount Due Agent', s.net / 100, (s.net * 11) / 100]);
   const sheets = [{ name: 'Detailed', rows: [MVR_HEAD, ...data] }, { name: 'Summary', rows: summaryRows }];
   return { sheets, bytes: sheetsWorkbook(sheets, { prefix, inline }), grossCents, mvrCents, netCents, rows: data };

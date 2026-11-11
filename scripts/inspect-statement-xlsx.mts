@@ -241,7 +241,26 @@ if (det.kind === 'not_this_layout') {
   const allIssues = [...st.issues, ...st.lines.flatMap((l) => l.issues.map((i) => ({ ...i, text: `line ${l.lineNo}: ${i.text}` })))];
   const errs = allIssues.filter((i) => i.level === 'error');
   const warns = allIssues.filter((i) => i.level === 'warning');
-  const col = (r: string) => (rp.columns[r] ? `"${rp.columns[r].header}" (column ${rp.columns[r].index + 1})` : '(none)');
+  /** 2,3,4,7 → "rows 2–4, 7" */
+  function ranges(ns: number[]): string {
+    const out: string[] = []; let a = ns[0], b = ns[0];
+    for (const n of [...ns.slice(1), NaN]) { if (n === b + 1) { b = n; continue; } out.push(a === b ? `${a}` : `${a}–${b}`); a = b = n; }
+    return `row${ns.length > 1 ? 's' : ''} ${out.join(', ')}`;
+  }
+  // One line per distinct problem (code), with how many rows/lines it affects — not one line per row.
+  function grouped(title: string, list: { code: string; text: string }[]): string[] {
+    if (!list.length) return [];
+    const by = new Map<string, { code: string; text: string }[]>();
+    for (const i of list) by.set(i.code, [...(by.get(i.code) ?? []), i]);
+    const out = [`${title}: ${by.size} distinct problem(s), ${list.length} message(s)`];
+    for (const [code, xs] of by) {
+      const where = xs.map((x) => (/Row (\d+)/.exec(x.text) ? `row ${/Row (\d+)/.exec(x.text)![1]}` : /^line (\d+)/.exec(x.text) ? `line ${/^line (\d+)/.exec(x.text)![1]}` : null)).filter(Boolean);
+      out.push(`  ${code} × ${xs.length}${where.length > 1 ? ` (${where.length > 12 ? `${where.slice(0, 12).join(', ')}, …` : where.join(', ')})` : ''}: ${xs[0].text}`);
+    }
+    return out;
+  }
+  const filled = (r: string) => (rp.columns[r] ? prod!.sheets.find((x) => x.name === rp.sheet)!.rows.slice(rp.headerRow).filter((row) => (row[rp.columns[r].index] ?? '').trim() !== '').length : 0);
+  const col = (r: string) => (rp.columns[r] ? `"${rp.columns[r].header}" (column ${rp.columns[r].index + 1}${['policy', 'insured'].includes(r) ? `, filled on ${filled(r)} of ${acc.rows} rows` : ''})` : '(none)');
   const mvrAdj = st.adjustments.filter((a) => a.source?.kind === 'mvr');
   report('INFO', '8a. Layout recognized: DetailedStatement (deterministic reader, no AI)', [
     `sheets: "${rp.sheet}" (header at row ${rp.headerRow}) and "${rp.summarySheet}"`,
@@ -255,7 +274,7 @@ if (det.kind === 'not_this_layout') {
     `policy commission lines: ${acc.lineRows} (${st.lines.filter((l) => (l.paidCommissionCents ?? 0) < 0).length} negative, ${st.lines.filter((l) => l.transactionType === 'cancellation').length} cancellations)`,
     `MVR-only rows (adjustment, no line): ${acc.adjustmentOnlyRows}; verified total rows (not counted again): ${acc.totalRows}`,
     `${acc.rows} = ${acc.lineRows} + ${acc.adjustmentOnlyRows} + ${acc.totalRows}: ${acc.lineRows + acc.adjustmentOnlyRows + acc.totalRows === acc.rows ? 'every row used once — none omitted' : 'MISMATCH'}`,
-    `rows rejected (with errors, block approval): ${acc.rowsWithErrors.length ? acc.rowsWithErrors.join(', ') : 'none'}`,
+    `rows rejected (with errors, block approval): ${acc.rowsWithErrors.length ? `${acc.rowsWithErrors.length} — ${ranges(acc.rowsWithErrors)} (causes grouped in 8d)` : 'none'}`,
     `identical rows (all kept): ${acc.identicalRowGroups.length ? acc.identicalRowGroups.map((g) => g.join(' & ')).join('; ') : 'none'}`,
   ].join('\n'));
   report('INFO', '8c. Commission and the MVR adjustment', [
@@ -270,8 +289,8 @@ if (det.kind === 'not_this_layout') {
   report(rec.reconciled ? 'PASS' : 'FAIL', '8d. Reconciliation (exact to the cent; approval and posting are blocked unless all pass)', [
     ...rec.checks.map((c) => `${c.ok ? 'ok  ' : 'FAIL'} ${c.label}: ${c.statedCents === null ? 'carrier total not found' : `carrier ${money(c.statedCents)}, statement ${money(c.extractedCents)}`}`),
     ...rp.checks.filter((c) => !['gross_vs_summary', 'net_vs_summary'].includes(c.key)).map((c) => `${c.ok ? 'ok  ' : 'FAIL'} ${c.label}${c.detail ? ` (${c.detail})` : ''}`),
-    ...(errs.length ? [`errors (${errs.length}):`, ...errs.slice(0, 15).map((e) => `  ${e.code}: ${e.text}`)] : []),
-    ...(warns.length ? [`warnings (${warns.length}, do not block):`, ...warns.slice(0, 10).map((e) => `  ${e.code}: ${e.text}`)] : []),
+    ...grouped('errors (block approval)', errs),
+    ...grouped('warnings (do not block)', warns),
   ].join('\n'));
 
   // SIMULATED allocation: every line matched to a made-up policy owned by a made-up broker at 50 %.
@@ -295,7 +314,8 @@ if (det.kind === 'not_this_layout') {
     for (const e of plan.entries.filter((x) => x.level === 'carrier')) out.push(`agency-only adjustment entry "${label(e.note)}": ${money(e.amountCents)} → broker ${money(e.brokerCents)}, agency ${money(e.agencyCents)}`);
     out.push(`whole statement: ${plan.entries.length} entries, total ${money(plan.totals.amountCents)} = test broker ${money(plan.totals.brokerCents)} + agency ${money(plan.totals.agencyCents)}; balanced: ${plan.balanced}`);
     const brokerOk = plan.entries.filter((x) => x.level === 'carrier').every((x) => x.brokerCents === 0);
-    report(plan.balanced && brokerOk ? 'PASS' : 'FAIL', '8e. Simulated broker / agency allocation', out.join('\n'));
+    if (!rec.reconciled) out.unshift('(the statement does not reconcile — this simulation only shows how the rows would split; it could not be approved or posted)');
+    report(!(plan.balanced && brokerOk) ? 'FAIL' : rec.reconciled ? 'PASS' : 'INFO', '8e. Simulated broker / agency allocation', out.join('\n'));
   } catch (e) {
     report('INFO', '8e. Simulated broker / agency allocation', `not simulated: ${e instanceof Error ? e.message : String(e)}`);
   }

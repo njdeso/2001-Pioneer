@@ -167,7 +167,8 @@ test('a double-counted MVR charge cannot reconcile', () => {
 
 test('an unexplained Net/Gross difference, a positive MVR, or an MVR inside Gross Comm is rejected, never guessed', () => {
   // Deduction with no MVR identification
-  let f = mvrStatement({ mvr: [], mutate: (d: (string | number)[][]) => { d[4][16] = Math.round((d[4][13] as number) * 100 - 700) / 100; } });
+  // (no Summary MVR total, so nothing can identify it)
+  let f = mvrStatement({ mvr: [], summary: { mvr: null }, mutate: (d: (string | number)[][]) => { d[4][16] = Math.round((d[4][13] as number) * 100 - 700) / 100; } });
   let s = read(f).s;
   assert.ok(s.lines[4].issues.some((i) => i.code === 'net_differs' && i.level === 'error'));
   assert.equal(reconcileStatement(s).reconciled, false);
@@ -295,4 +296,141 @@ test('broker buyout cannot see agency-only MVR charges: the buyout engine does n
   }
   const callable = readFileSync(new URL('../../../functions/src/callables/buyout.ts', import.meta.url), 'utf8');
   assert.ok(!/collection\('(ledger|statements)'\)/.test(callable), 'the buyout callable never reads the ledger or statements');
+});
+
+// ---- The carrier's REAL structure (PR #9 real-workbook finding): the MVR charge is its own row with
+// Gross Comm 0.00 and Net Due Agent −184.80, nothing on the row says "MVR", and the Summary prints
+// "MVRChargeback −184.80". Fictional rows, real figures.
+
+/** 93 commission rows totalling 7,057.02 + the unlabelled MVR-only row (row 95 of the sheet). */
+function realStructure(o: { summary?: Record<string, number | null>; extra?: { row: number; cents: number; only?: boolean; unlabelled?: boolean }[]; blankIdentity?: boolean } = {}): Fixture {
+  return mvrStatement({
+    rows: 93, negatives: [3, 40], mvrLabel: 'MVRChargeback',
+    mvr: [{ row: 93, cents: 18480, only: true, unlabelled: true, blankIdentity: o.blankIdentity }, ...(o.extra ?? [])],
+    summary: o.summary ?? {},
+    mutate: (data: (string | number)[][]) => {
+      const tx = data.filter((r) => r[13] !== 0 || r[16] === r[13]);
+      // Keep any labelled MVR deduction (net − gross) while fixing the gross amounts.
+      const keep = (r: (string | number)[]) => Math.round((r[16] as number) * 100) - Math.round((r[13] as number) * 100);
+      tx.forEach((r, i) => { const d = keep(r); const g = [3, 40].includes(i) ? -5000 : 7600; r[13] = g / 100; r[16] = (g + d) / 100; });
+      const others = tx.slice(0, -1).reduce((t, r) => t + Math.round((r[13] as number) * 100), 0);
+      const last = tx[tx.length - 1]; const d = keep(last); last[13] = (705702 - others) / 100; last[16] = (Math.round((last[13] as number) * 100) + d) / 100;
+    },
+  });
+}
+
+test('REAL STRUCTURE: unlabelled MVR-only row = Summary "MVRChargeback" → 93 policy lines + 1 agency-only MVR adjustment, no errors', () => {
+  for (const blankIdentity of [false, true]) {
+    const f = realStructure({ blankIdentity });
+    assert.equal(f.rows.length, 94); assert.equal(f.grossCents, 705702); assert.equal(f.mvrCents, -18480); assert.equal(f.netCents, 687222);
+    const { s, r } = read(f);
+    assert.equal(s.lines.length, 93, 'no policy commission line for the Gross Comm 0.00 MVR row');
+    assert.equal(s.adjustments.length, 1);
+    const a = s.adjustments[0];
+    assert.equal(a.amountCents, -18480);
+    assert.equal(a.source!.sheetRow, 95, 'the 94th data row is sheet row 95');
+    assert.equal(a.source!.lineNo, null);
+    assert.match(a.label, /^MVR chargeback \(Detailed row 95/);
+    assert.deepEqual(r.mvr.identifiedBy, ['the Summary "MVRChargeback" total (single unlabelled deduction, no commission)']);
+    assert.equal(r.summary.mvrCents, -18480);
+    assert.deepEqual(s.sourceAccounting, { sheet: 'Detailed', rows: 94, lineRows: 93, adjustmentOnlyRows: 1, totalRows: 0, rowsWithErrors: [], identicalRowGroups: [] });
+    assert.ok(r.checks.every((c) => c.ok), JSON.stringify(r.checks.filter((c) => !c.ok)));
+    assert.deepEqual(errors(s), []);
+    const rec = reconcileStatement(s);
+    assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+    assert.equal(rec.errorCount, 0);
+    assert.deepEqual(rec.checks.map((c) => [c.key, c.statedCents, c.extractedCents]), [['commission', 705702, 705702], ['monthPayable', 687222, 687222]]);
+    assert.equal(rec.totals.commissionCents - 18480, 687222, '7,057.02 − 184.80 = 6,872.22');
+  }
+});
+
+test('REAL STRUCTURE posting at 50 %: brokers share gross only; the MVR adjustment is broker $0.00, agency −$184.80', () => {
+  const { s } = read(realStructure());
+  const policies: MatchPolicy[] = s.lines.map((l, i) => ({ id: `P${i}`, clientId: `C${i}`, carrierId: 'MUT', wholesalerId: null, brokerId: 'B50', status: 'active', policyNumber: l.policyNumberRaw }));
+  const ctx = prepareMatchContext({ payerId: 'MUT', policies, clients: s.lines.map((l, i) => ({ id: `C${i}`, name: l.insuredName })), brokers: [{ id: 'UNASSIGNED', shareBps: 0 }, { id: 'B50', shareBps: 5000 }] });
+  const lines: PostingLine[] = s.lines.map((l) => { const pl = { id: String(l.lineNo).padStart(5, '0'), lineNo: l.lineNo, policyNumberRaw: l.policyNumberRaw, insuredName: l.insuredName, paidCommissionCents: l.paidCommissionCents, transactionType: l.transactionType, effectiveDate: l.effectiveDate } as PostingLine; return { ...pl, match: autoMatchLine(pl, ctx) }; });
+  const plan = buildPostingPlan({ id: 'SYN', status: 'needs_review', payerId: 'MUT', payerKind: 'carrier', statementMonth: s.statementMonth, statementDate: null, adjustments: s.adjustments, postedCents: 0, postingSeq: 0, matching: { stale: false, balanced: true } }, lines);
+  const mvr = plan.entries.filter((e) => e.level === 'carrier');
+  assert.equal(mvr.length, 1);
+  assert.deepEqual([mvr[0].amountCents, mvr[0].brokerCents, mvr[0].agencyCents, mvr[0].policyId], [-18480, 0, -18480, null]);
+  assert.equal(plan.entries.filter((e) => e.level === 'policy').length, 93);
+  assert.equal(plan.totals.amountCents, 687222);
+  const brokerFromGross = plan.entries.filter((e) => e.level === 'policy').reduce((t, e) => t + e.brokerCents, 0);
+  assert.equal(plan.totals.brokerCents, brokerFromGross);
+  assert.equal(plan.totals.agencyCents, 687222 - brokerFromGross);
+});
+
+test('mixed: a labelled MVR row plus one unlabelled MVR-only row are both attributed when they add up to the Summary total', () => {
+  const { s, r } = read(realStructure({ extra: [{ row: 10, cents: 1000 }] }));
+  assert.deepEqual(s.adjustments.map((a) => a.amountCents).sort((a, b) => a - b), [-18480, -1000]);
+  assert.equal(r.summary.mvrCents, -19480);
+  assert.equal(reconcileStatement(s).reconciled, true);
+});
+
+test('two unlabelled deductions: ambiguous — ONE statement-level message, each row flagged, no cascade, approval blocked', () => {
+  // Second commission-free deduction of 15.20; together they still equal the Summary MVR total.
+  const { s, r } = read(realStructure({ extra: [{ row: 20, cents: 1520, only: true, unlabelled: true }] }));
+  assert.equal(s.adjustments.length, 0, 'neither is treated as MVR');
+  const stmtErrors = s.issues.filter((i) => i.level === 'error');
+  assert.deepEqual(stmtErrors.map((i) => i.code), ['mvr_attribution'], 'one statement-level error, not derived total errors');
+  assert.match(stmtErrors[0].text, /2 deductions are not identified on their rows: row 22 .*, row 96 .*cannot be attributed to one of them.*Manual review/);
+  const flagged = s.lines.filter((l) => l.issues.some((i) => i.code === 'unexplained_deduction'));
+  assert.equal(flagged.length, 2);
+  assert.deepEqual(s.sourceAccounting!.rowsWithErrors.length, 2);
+  assert.ok(!errors(s).includes('chk_net_vs_summary') && !errors(s).includes('chk_row_identity') && !errors(s).includes('chk_mvr_vs_summary'));
+  assert.ok(r.checks.find((c) => c.key === 'row_identity')!.detail!.includes('consequence'));
+  const rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, false);
+  assert.ok(rec.blockingReasons.some((b) => /Manual review/.test(b)));
+});
+
+test('unlabelled deduction whose amount is not the Summary MVR total, or that sits on a commission row, or with no Summary MVR: never treated as MVR', () => {
+  // amount differs from Summary MVRChargeback
+  let s = read(realStructure({ summary: { mvr: -18400 } })).s;
+  assert.deepEqual(s.issues.filter((i) => i.level === 'error').map((i) => i.code), ['mvr_attribution']);
+  assert.match(s.issues[0].text, /not the Summary "MVRChargeback" amount still unaccounted for/);
+  assert.equal(s.adjustments.length, 0);
+  assert.equal(reconcileStatement(s).reconciled, false);
+  // no Summary MVR total at all: the row is reported on its own (net_differs), totals reconciling is not evidence
+  s = read(realStructure({ summary: { mvr: null } })).s;
+  assert.ok(errors(s).includes('net_differs'));
+  assert.equal(s.adjustments.length, 0);
+  assert.equal(reconcileStatement(s).reconciled, false);
+  // the deduction is on a commission row (no MVR text), Summary MVR present
+  s = read(mvrStatement({ mvr: [], mvrLabel: 'MVRChargeback', mutate: (d: (string | number)[][]) => { d[4][16] = Math.round((d[4][13] as number) * 100 - 700) / 100; } })).s;
+  assert.ok(errors(s).includes('mvr_attribution'));
+  assert.match(s.issues.find((i) => i.code === 'mvr_attribution')!.text, /sits on a commission row/);
+  assert.equal(reconcileStatement(s).reconciled, false);
+});
+
+test('REAL STRUCTURE with incorrect Summary totals: blocked with one specific reason each', () => {
+  const base = realStructure();
+  let s = read(realStructure({ summary: { commissions: base.grossCents + 1 } })).s;
+  let rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, false);
+  assert.deepEqual(errors(s), ['chk_gross_vs_summary']);
+  assert.ok(rec.blockingReasons.some((b) => /Gross policy commission/.test(b)));
+  s = read(realStructure({ summary: { net: base.netCents + 1 } })).s;
+  rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, false);
+  assert.deepEqual(errors(s).sort(), ['chk_net_column', 'chk_net_vs_summary']);
+  assert.ok(rec.blockingReasons.some((b) => /Net agency payment/.test(b)));
+  s = read(realStructure({ summary: { net: null } })).s;
+  assert.ok(errors(s).includes('summary_missing'));
+  assert.equal(reconcileStatement(s).reconciled, false);
+});
+
+test('a policy-number column empty on every row is refused once, not reported as one error per row', () => {
+  const f = mvrStatement();
+  f.sheets[0].rows.slice(1).forEach((r) => { r[3] = ''; });
+  const res = readDetailedStatement(asText(f.sheets));
+  assert.equal(res.kind, 'incomplete');
+  assert.equal((res as { code: string }).code, 'detailed_policy_empty');
+});
+
+test('Summary MVR labels: "MVRChargeback", "MVR Chargeback", "MVR Fees" are all read as the MVR total', () => {
+  for (const label of ['MVRChargeback', 'MVR Chargeback', 'MVR Fees']) {
+    const f = mvrStatement({ mvrLabel: label });
+    assert.equal(read(f).r.summary.mvrCents, f.mvrCents, label);
+  }
 });

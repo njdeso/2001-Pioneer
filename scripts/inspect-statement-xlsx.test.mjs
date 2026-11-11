@@ -43,7 +43,10 @@ test('three commission columns with an UNEXPLAINED deduction on every row: read 
   const r = run(f);
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /FAIL  8b\. Every transaction accounted for/);
-  assert.match(r.stdout, /net_differs: .*nothing on the row identifies the difference as an MVR charge/);
+  // 94 rows with the same problem are ONE grouped cause, not 94 separate findings.
+  assert.match(r.stdout, /errors \(block approval\): 2 distinct problem\(s\), 95 message\(s\)/);
+  assert.match(r.stdout, /net_differs × 94 \(row 2, row 3, .*nothing on the row identifies the difference as an MVR charge/);
+  assert.match(r.stdout, /rows rejected \(with errors, block approval\): 94 — rows 2–95 \(causes grouped in 8d\)/);
   assert.match(r.stdout, /FAIL  8d\. Reconciliation/);
   assert.match(r.stdout, /"Comm": total .* = Summary "Gross Commission"/);
   assert.match(r.stdout, /"Gross Comm": total .* = Summary "Gross Commission"/);
@@ -87,4 +90,34 @@ test('an MVR workbook whose Summary does not match is refused by the reader (FAI
   assert.equal(r.status, 1);
   assert.match(r.stdout, /FAIL  8d\. Reconciliation/);
   assert.match(r.stdout, /FAIL Net agency payment/);
+});
+
+test('REAL STRUCTURE (unlabelled MVR-only row, Summary "MVRChargeback"): 93 lines + 1 agency-only MVR, all checks pass', () => {
+  const f = join(mkdtempSync(join(tmpdir(), 'insp-')), 'DetailedStatement20261110.xlsx');
+  writeFileSync(f, mvrStatement({ rows: 93, mvrLabel: 'MVRChargeback', mvr: [{ row: 93, cents: 18480, only: true, unlabelled: true }], prefix: 'x', inline: true }).bytes);
+  const r = run(f);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  for (const line of [
+    /transactions read \(data rows\): 94\n {6}policy commission lines: 93/,
+    /MVR-only rows \(adjustment, no line\): 1/,
+    /94 = 93 \+ 1 \+ 0: every row used once — none omitted/,
+    /rows rejected \(with errors, block approval\): none/,
+    /total MVR chargebacks -\$184\.80 — identified by the Summary "MVRChargeback" total \(single unlabelled deduction, no commission\)/,
+    /Detailed row 95: -\$184\.80 — MVR-only row, no policy line/,
+    /PASS  8d\. Reconciliation/,
+    /"MVR chargeback \(Detailed row 95, policy hidden\)": -\$184\.80 → broker \$0\.00, agency -\$184\.80/,
+    /PASS  8e\. Simulated/,
+  ]) assert.match(r.stdout, line);
+  assert.doesNotMatch(r.stdout, /errors \(block approval\)/);
+});
+
+test('two unlabelled deductions: FAIL with one grouped problem per cause (no cascade of row messages)', () => {
+  const f = join(mkdtempSync(join(tmpdir(), 'insp-')), 'amb.xlsx');
+  writeFileSync(f, mvrStatement({ rows: 93, mvrLabel: 'MVRChargeback', mvr: [{ row: 93, cents: 18480, only: true, unlabelled: true }, { row: 20, cents: 1520, only: true, unlabelled: true }] }).bytes);
+  const r = run(f);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /errors \(block approval\): 2 distinct problem\(s\), 3 message\(s\)/);
+  assert.match(r.stdout, /mvr_attribution × 1: 2 deductions are not identified on their rows/);
+  assert.match(r.stdout, /unexplained_deduction × 2 \(row 22, row 96\)/);
+  assert.match(r.stdout, /consequence of the row problem\(s\) above/);
 });
