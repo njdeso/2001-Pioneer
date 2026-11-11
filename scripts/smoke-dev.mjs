@@ -41,6 +41,7 @@ import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { assertDevProjectNumber } from './lib/dev-guard.mjs';
 import { seedBook, writeStatement, LINES, EXPECTED_SUMMARY, PAYER_ID } from './lib/synthetic-3b.mjs';
 import * as BO from './lib/synthetic-buyout.mjs';
+import * as SX from './lib/synthetic-xlsx.mjs';
 
 const DEV = 'pioneer-2001-dev';
 const PROD = 'pioneer-285cf';
@@ -180,9 +181,11 @@ async function syntheticStatement(label) {
   return { bytes, fileName: `SMOKE-${run}.pdf`, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
 
-async function putFile(bucket, path, bytes) {
-  await getStorage().bucket(bucket).file(path).save(bytes, { contentType: 'application/pdf', resumable: false });
+async function putFile(bucket, path, bytes, contentType = 'application/pdf') {
+  await getStorage().bucket(bucket).file(path).save(bytes, { contentType, resumable: false });
 }
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const sha256hex = (b) => createHash('sha256').update(b).digest('hex');
 
 const readOk = (p) => p && (p.status === 'needs_review' || p.status === 'discrepancy') && p.lines === 3 && p.reconciled === true;
 const describe = (p) => p.status === 'extraction_failed' ? `extraction_failed: ${p.failure?.code} — ${p.failure?.message}` : `${p.status}, ${p.lines} lines, reconciled=${p.reconciled}`;
@@ -636,6 +639,28 @@ try {
     // 4. A stored file is still a duplicate
     const r3 = await call('registerStatementUpload', { fileName: b.fileName, sha256: b.sha256, size: b.bytes.length });
     record('Stored file is still blocked as a duplicate', r3.duplicate === true, `duplicate=${r3.duplicate}`);
+
+    // 5. An Excel (.xlsx) statement as written by .NET exporters (x: prefixes, inline strings, no cell
+    //    references; text dates incl. 01/01/0001; Month End 202511) is read and extracted.
+    const nx = randomUUID().slice(0, 8);
+    const wbx = SX.detailedStatementWorkbook({ prefix: 'x', refs: false, inline: true, rows: 12, nonce: `SMOKE ${nx}` });
+    const rx = await call('registerStatementUpload', { fileName: `SMOKE-xlsx-${nx}.xlsx`, sha256: sha256hex(wbx.bytes), size: wbx.bytes.length });
+    await putFile(cfg.storageBucket, rx.uploadPath, wbx.bytes, XLSX_TYPE);
+    const px = await call('processStatement', { statementId: rx.statementId, method: 'auto' });
+    record('Excel statement (.NET export format, Detailed + Summary sheets) is read and extracted', px.status !== 'extraction_failed' && (px.lines ?? 0) >= 12,
+      `${describe(px)} (statement ${rx.statementId}; ${wbx.commission.toFixed(2)} commission on the Summary sheet)`);
+  }
+
+  // Files with an .xlsx name that are not .xlsx packages: refused with the specific reason (no AI call).
+  for (const [label, bytes, re] of [
+    ['old Excel 97–2003 (.xls)', SX.oleFile('Workbook', randomUUID()), /Excel 97–2003/],
+    ['web page (HTML) export', SX.htmlExport(randomUUID()), /web page/],
+  ]) {
+    const n = randomUUID().slice(0, 8);
+    const r = await call('registerStatementUpload', { fileName: `SMOKE-disguised-${n}.xlsx`, sha256: sha256hex(bytes), size: bytes.length });
+    await putFile(cfg.storageBucket, r.uploadPath, bytes, XLSX_TYPE);
+    const p = await call('processStatement', { statementId: r.statementId, method: 'auto' });
+    record(`A ${label} named .xlsx is refused with its specific reason`, p.status === 'extraction_failed' && p.failure?.code === 'wrong_type' && re.test(p.failure?.message ?? ''), describe(p));
   }
   // Stage 3B does not use Claude, so it runs even if the AI checks failed.
   let ctx3b = null;

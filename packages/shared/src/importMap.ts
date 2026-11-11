@@ -85,6 +85,9 @@ function iso(y: number, m: number, d: number): IsoDate | null {
   return isIsoDate(s) ? s : null;
 }
 
+/** Four-digit years before this are placeholders for "no date" (01/01/0001 in many agency/carrier exports). */
+const MIN_REAL_YEAR = 1900;
+
 function year2(y: number): number {
   return y < 100 ? (y < 70 ? 2000 + y : 1900 + y) : y;
 }
@@ -99,10 +102,14 @@ export function parseFlexibleDate(input: string): IsoDate | null | { error: stri
   if (!s) return null;
   let m: RegExpExecArray | null;
   if ((m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[T\s].*)?$/.exec(s))) {
+    if (+m[1] < MIN_REAL_YEAR) return null; // e.g. 0001-01-01: an exporter's "no date" placeholder
     return iso(+m[1], +m[2], +m[3]) ?? { error: `Invalid date "${s}"` };
   }
   if ((m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})(?:\s.*)?$/.exec(s))) {
-    return iso(year2(+m[3]), +m[1], +m[2]) ?? { error: `Invalid date "${s}"` };
+    // A four-digit year is used as written (0001 is not 2001); only two-digit years are expanded.
+    const y = m[3].length === 4 ? +m[3] : year2(+m[3]);
+    if (y < MIN_REAL_YEAR) return null; // e.g. 01/01/0001: an exporter's "no date" placeholder
+    return iso(y, +m[1], +m[2]) ?? { error: `Invalid date "${s}"` };
   }
   if ((m = /^(\d{1,2})[-\s]([A-Za-z]{3,9})\.?[-\s,]+(\d{2}|\d{4})$/.exec(s))) {
     const mo = MONTHS[m[2].slice(0, 4).toLowerCase()] ?? MONTHS[m[2].slice(0, 3).toLowerCase()];

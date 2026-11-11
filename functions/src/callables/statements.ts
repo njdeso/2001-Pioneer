@@ -6,7 +6,7 @@ import { getStorage } from 'firebase-admin/storage';
 import type { DocumentData, DocumentReference } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import {
-  DEFAULT_AI_MODEL, AI_PROMPT_VERSION, TRAVELERS_PL_PARSER, extractWithClaude, isTravelersPlStatement, normalizeName,
+  DEFAULT_AI_MODEL, AI_PROMPT_VERSION, TRAVELERS_PL_PARSER, extractWithClaude, isTravelersPlStatement, normalizeName, sniffError, sniffSpreadsheet,
   parseCsv, parseTravelersPl, reconcileStatement, tableToText,
   type ExtractedStatement, type ExtractionMethod,
   type DupLine,
@@ -118,6 +118,8 @@ interface RunOutcome {
 interface FailureInfo {
   code: string;
   message: string;
+  /** Technical detail (parser message, sheet list …) shown under the message for support. */
+  detail?: string;
   httpStatus?: number;
   errorType?: string | null;
   apiMessage?: string | null;
@@ -171,12 +173,25 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
     try {
       if (type === 'csv') rows = parseCsv(new TextDecoder('utf-8').decode(buf));
       else {
-        const { readXlsx } = await import('@asm/shared/excel');
-        rows = (await readXlsx(new Uint8Array(buf))).flatMap((s) => [[`# Sheet: ${s.name}`], ...s.rows]);
+        const { readXlsxDetailed } = await import('@asm/shared/excel');
+        const r = await readXlsxDetailed(new Uint8Array(buf));
+        // Which reader succeeded, and why exceljs did not (if it did not): no document content is logged.
+        logger.info('Spreadsheet read', { fileName, reader: r.reader, exceljsError: r.exceljsError, sheets: r.allSheets, rows: r.sheets.map((s) => ({ name: s.name, rows: s.rows.length })) });
+        rows = r.sheets.flatMap((s) => [[`# Sheet: ${s.name}`], ...s.rows]);
       }
-    } catch {
-      return { ...none, failure: { code: 'table_unreadable', message: 'The spreadsheet could not be read.' } };
+    } catch (err) {
+      // A specific, actionable reason (old .xls, encrypted, HTML export, damaged, no visible data, …).
+      const e = err as { name?: string; code?: string; message?: string; detail?: string };
+      const specific = e?.name === 'SpreadsheetError' && typeof e.code === 'string';
+      logger.warn('Spreadsheet unreadable', { fileName, type, code: specific ? e.code : 'unexpected', detail: specific ? e.detail : String(e?.message ?? err).slice(0, 300) });
+      return {
+        ...none,
+        failure: specific
+          ? { code: e.code!, message: e.message!, detail: e.detail ?? '' }
+          : { code: 'table_unreadable', message: `The ${type === 'csv' ? 'CSV file' : 'spreadsheet'} could not be read: ${String(e?.message ?? err).slice(0, 200)}`, detail: '' },
+      };
     }
+    if (!rows.length) return { ...none, failure: { code: 'table_empty', message: `The ${type === 'csv' ? 'CSV file' : 'spreadsheet'} has no rows of data.` } };
     aiInput = { kind: 'table', text: tableToText(rows), fileName };
   }
 
@@ -296,7 +311,11 @@ export const processStatement = onCall(
         }
         if (!magicOk(type, buf)) {
           await incoming.delete({ ignoreNotFound: true });
-          return await fail('wrong_type', `The file is not a valid ${type.toUpperCase()}.`);
+          // Name what the file really is (old .xls, encrypted workbook, HTML/XML export, CSV …). The code stays
+          // 'wrong_type' so the corrected file can be uploaded into the same record.
+          const sniff = type === 'xlsx' ? sniffSpreadsheet(new Uint8Array(buf)) : null;
+          const specific = sniff ? sniffError(sniff.kind, sniff.detail) : null;
+          return await fail('wrong_type', specific?.message ?? `The file is not a valid ${type.toUpperCase()}.`, {}, specific ? { detail: `${specific.code}: ${specific.detail}` } : {});
         }
         originalPath = `statements/${statementId}/original.${type}`;
         await incoming.copy(bucket.file(originalPath), { preconditionOpts: { ifGenerationMatch: 0 } });

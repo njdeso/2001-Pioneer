@@ -98,8 +98,6 @@ test('reads a real .xlsx workbook: title row, dates, currency, formulas, rich te
   assert.equal(table.headers[m.line!], 'Pers/Comm');
 });
 
-test('a non-xlsx file gives a clear error', async (t) => {
-  const ExcelJS = await loadExcelJs();
-  if (!ExcelJS) { t.skip('exceljs is not installed in this environment'); return; }
-  await assert.rejects(() => readXlsx(new TextEncoder().encode('not a workbook')), /could not be read as an \.xlsx/);
+test('a non-xlsx file gives a specific error', async () => {
+  await assert.rejects(() => readXlsx(new TextEncoder().encode('not a workbook')), /plain text .*not an Excel workbook/);
 });

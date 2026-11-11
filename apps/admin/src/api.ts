@@ -136,4 +136,4 @@ export const api = {
     call<{ policyIds: string[]; brokerId: string }, { moved: number }>('reassignPolicies', { policyIds, brokerId }),
 };
 
-export interface StatementFailure { code: string; message: string; httpStatus?: number; errorType?: string | null; apiMessage?: string | null; requestId?: string | null }
+export interface StatementFailure { code: string; message: string; detail?: string; httpStatus?: number; errorType?: string | null; apiMessage?: string | null; requestId?: string | null }

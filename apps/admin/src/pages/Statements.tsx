@@ -51,7 +51,7 @@ interface StatementDoc {
   extractedCommissionCents?: Cents;
   postedCents?: Cents;
   pendingCents?: Cents;
-  failure?: { code: string; message: string; httpStatus?: number; errorType?: string | null; requestId?: string | null } | null;
+  failure?: { code: string; message: string; detail?: string; httpStatus?: number; errorType?: string | null; requestId?: string | null } | null;
   discardReason?: string;
   matching?: MatchingInfo | null;
   createdAt?: { toDate?: () => Date };
@@ -356,6 +356,12 @@ export function StatementReviewPage() {
             </div>
           )}
           {stmt.failure.code.startsWith('ai_') && <div className="mt-1 text-xs">Use <Link className="underline" to="/settings">Settings → Test AI connection</Link> to check the key and model before retrying.</div>}
+          {(stmt.failure.code.startsWith('xlsx_') || stmt.failure.code.startsWith('table_') || stmt.failure.code === 'wrong_type') && (
+            <div className="mt-1 text-xs">
+              <span className="font-mono">{stmt.failure.code}</span>{stmt.failure.detail ? <span className="font-mono"> · {stmt.failure.detail}</span> : null}
+              <div className="mt-1">{stmt.failure.code === 'wrong_type' ? 'Upload the corrected file again; it goes into this same statement.' : 'Retry reads the same stored file again. If the file itself needs fixing (saved as .xlsx, password removed, sheet unhidden), discard this statement and upload the corrected file.'}</div>
+            </div>
+          )}
           <div className="mt-2 flex gap-2">
             <Button size="sm" disabled={busy} onClick={() => void act(() => api.processStatement(stmt.id, 'auto'))}>Retry</Button>
             <Button size="sm" variant="secondary" disabled={busy} onClick={() => void act(() => api.processStatement(stmt.id, 'ai'))}>Retry with AI</Button>

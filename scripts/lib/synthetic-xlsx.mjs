@@ -1,0 +1,83 @@
+// Synthetic spreadsheet fixtures (fictional insureds and policies), built byte by byte so no Excel
+// library is needed: a "DetailedStatement"-style workbook (Detailed + Summary sheets, text dates
+// including the 01/01/0001 placeholder, Month End 202511), as Excel writes it or as .NET / Open XML SDK
+// exporters write it (x: prefixes, no cell references, inline strings), plus disguised non-.xlsx files.
+// Used by packages/shared/test/xlsx-read.test.ts and the dev smoke test.
+import { deflateRawSync } from 'node:zlib';
+
+const CRC = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = CRC[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+
+/** A minimal ZIP (deflate) from { path: text }. */
+export function zip(files) {
+  const parts = []; const central = []; let off = 0;
+  for (const [name, text] of Object.entries(files)) {
+    const raw = Buffer.from(text, 'utf8'); const comp = deflateRawSync(raw); const nm = Buffer.from(name, 'utf8'); const crc = crc32(raw);
+    const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x800, 6); lh.writeUInt16LE(8, 8); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(raw.length, 22); lh.writeUInt16LE(nm.length, 26);
+    const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x800, 8); ch.writeUInt16LE(8, 10); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(raw.length, 24); ch.writeUInt16LE(nm.length, 28); ch.writeUInt32LE(off, 42);
+    parts.push(lh, nm, comp); central.push(ch, nm); off += 30 + nm.length + comp.length;
+  }
+  const cd = Buffer.concat(central); const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16);
+  return new Uint8Array(Buffer.concat([...parts, cd, end]));
+}
+
+export const HEAD = ['Month End', 'Agency', 'Insured Name', 'Policy Number', 'Line', 'Trans Type', 'Eff Date', 'Exp Date', 'Trans Date', 'Cancel Date',
+  'Written Premium', 'Comm Rate', 'Comm Amount', 'Producer', 'State', 'Company', 'Bill Type', 'Term', 'Status', 'Notes'];
+export const detailRows = (n = 94, nonce = '') => Array.from({ length: n }, (_, i) => [202511, 'SYN-001', `Synthetic Insured ${i + 1} & Co`, `SYN${String(100000 + i)}`, i % 2 ? 'Personal Auto' : 'Homeowners', 'RN',
+  `0${(i % 9) + 1}/01/2025`, `0${(i % 9) + 1}/01/2026`, '11/03/2025', '01/01/0001', 1000 + i * 10.5, 0.12, Math.round((1000 + i * 10.5) * 12) / 100, 'P01', 'NY', 'Synthetic Mutual', 'DB', 12, 'Active', i === 0 ? nonce : '']);
+
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const colName = (i) => String.fromCharCode(65 + i);
+
+/** A DetailedStatement-like workbook. Summary totals equal the Detailed sheet's sums (it reconciles). */
+export function detailedStatementWorkbook({ prefix = '', refs = true, inline = false, hiddenDetailed = false, rows = 94, nonce = '' } = {}) {
+  const x = prefix ? `${prefix}:` : '';
+  const ns = prefix ? `xmlns:${prefix}="http://schemas.openxmlformats.org/spreadsheetml/2006/main"` : 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+  const strings = []; const sIdx = (s) => { let k = strings.indexOf(s); if (k < 0) { strings.push(s); k = strings.length - 1; } return k; };
+  const cell = (v, r, c, style) => {
+    const ref = refs ? ` r="${colName(c)}${r}"` : '';
+    const s = style !== undefined ? ` s="${style}"` : '';
+    if (typeof v === 'number') return `<${x}c${ref}${s}><${x}v>${v}</${x}v></${x}c>`;
+    if (v === '') return '';
+    if (inline) return `<${x}c${ref} t="inlineStr"><${x}is><${x}t>${esc(v)}</${x}t></${x}is></${x}c>`;
+    return `<${x}c${ref} t="s"><${x}v>${sIdx(v)}</${x}v></${x}c>`;
+  };
+  const data = detailRows(rows, nonce);
+  const premium = Math.round(data.reduce((t, r) => t + r[10] * 100, 0)) / 100;
+  const commission = Math.round(data.reduce((t, r) => t + r[12] * 100, 0)) / 100;
+  const sheetXml = (rs) => `<?xml version="1.0" encoding="UTF-8"?><${x}worksheet ${ns}><${x}sheetData>${rs.map((row, ri) =>
+    `<${x}row r="${ri + 1}">${row.map((v, ci) => cell(v, ri + 1, ci)).join('')}</${x}row>`).join('')}</${x}sheetData></${x}worksheet>`;
+  // Summary: one date-formatted numeric cell (serial 45962 = 2025-11-01) to exercise date styles.
+  const summary = `<?xml version="1.0" encoding="UTF-8"?><${x}worksheet ${ns}><${x}sheetData>`
+    + `<${x}row r="1">${cell('Total Written Premium', 1, 0)}${cell(premium, 1, 1)}</${x}row>`
+    + `<${x}row r="2">${cell('Total Commission', 2, 0)}${cell(commission, 2, 1)}</${x}row>`
+    + `<${x}row r="3">${cell('Statement Date', 3, 0)}${cell(45962, 3, 1, 1)}</${x}row>`
+    + `</${x}sheetData></${x}worksheet>`;
+  const files = {
+    '[Content_Types].xml': '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+    '_rels/.rels': '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+    'xl/workbook.xml': `<?xml version="1.0"?><${x}workbook ${ns} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><${x}sheets>`
+      + `<${x}sheet name="Detailed" sheetId="1" r:id="rId1"${hiddenDetailed ? ' state="hidden"' : ''}/><${x}sheet name="Summary" sheetId="2" r:id="rId2"${hiddenDetailed ? ' state="hidden"' : ''}/></${x}sheets></${x}workbook>`,
+    'xl/_rels/workbook.xml.rels': '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+      + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet2.xml"/>'
+      + '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>'
+      + '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
+    'xl/worksheets/sheet1.xml': sheetXml([HEAD, ...data]),
+    'xl/worksheets/sheet2.xml': summary,
+    'xl/styles.xml': `<?xml version="1.0"?><${x}styleSheet ${ns}><${x}numFmts count="1"><${x}numFmt numFmtId="164" formatCode="mm/dd/yyyy"/></${x}numFmts><${x}cellXfs count="2"><${x}xf numFmtId="0"/><${x}xf numFmtId="164" applyNumberFormat="1"/></${x}cellXfs></${x}styleSheet>`,
+  };
+  files['xl/sharedStrings.xml'] = `<?xml version="1.0"?><${x}sst ${ns} count="${strings.length}" uniqueCount="${strings.length}">${strings.map((s) => `<${x}si><${x}t>${esc(s)}</${x}t></${x}si>`).join('')}</${x}sst>`;
+  return { bytes: zip(files), premium, commission };
+}
+
+/** An old Excel 97–2003 (.xls / OLE) or encrypted-Office container header, as seen in disguised files. */
+export function oleFile(marker = 'Workbook', nonce = '') {
+  return new Uint8Array(Buffer.concat([Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]), Buffer.alloc(500), Buffer.from(marker, 'utf16le'), Buffer.alloc(100), Buffer.from(nonce)]));
+}
+
+/** A web-page export (HTML table) — what many portals produce as "Excel". */
+export function htmlExport(nonce = '') {
+  return new TextEncoder().encode(`<html><head><meta charset="utf-8"></head><body><!-- ${nonce} --><table><tr><td>Policy Number</td><td>Comm Amount</td></tr><tr><td>SYN100000</td><td>120.00</td></tr></table></body></html>`);
+}

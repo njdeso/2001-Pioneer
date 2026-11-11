@@ -238,3 +238,13 @@ test('a new client whose only rows fail is not created', () => {
   assert.equal(plan.summary.clientsNew, 0);
   assert.equal(plan.rows[0].clientAction, 'none');
 });
+
+test('placeholder dates such as 01/01/0001 are blank, not 2001-01-01; four-digit years are used as written', () => {
+  assert.equal(parseFlexibleDate('01/01/0001'), null);
+  assert.equal(parseFlexibleDate('0001-01-01'), null);
+  assert.equal(parseFlexibleDate('1/1/1899'), null);
+  assert.equal(parseFlexibleDate('01/01/2001'), '2001-01-01');
+  assert.equal(parseFlexibleDate('1/1/01'), '2001-01-01', 'two-digit years still expand');
+  assert.equal(parseFlexibleDate('12/31/1999'), '1999-12-31');
+  assert.equal(parseFlexibleDate('11/3/2025'), '2025-11-03');
+});
