@@ -1,4 +1,7 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { collection, onSnapshot } from 'firebase/firestore';
+import { checkTerms, searchBook, termEnd, TERM_STATUSES, TERM_STATUS_LABELS, type PolicyTerm, type TermStatus } from '@asm/shared';
+import { db } from '../firebase';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { CLASSIFICATION_LABELS, LEDGER_CLASSIFICATIONS, formatBps, formatMonth, parseMoneyToCents, type Client, type LedgerClassification, type LedgerEntry, type Policy } from '@asm/shared';
 import { api } from '../api';
@@ -10,7 +13,9 @@ import { Badge, Button, Card, DataTable, Empty, ErrorNote, Field, Modal, Money, 
 export function ClientsPage() {
   const { clients, policies, brokerById, revenue } = useData();
   const [adding, setAdding] = useState(false);
+  const [query, setQuery] = useState('');
   const navigate = useNavigate();
+  const search = useMemo(() => searchBook(clients, policies, query, (c) => brokerById.get(c.brokerId)?.name ?? ''), [clients, policies, query, brokerById]);
 
   const perClient = useMemo(() => {
     const m = new Map<string, { count: number; t12: number }>();
@@ -31,6 +36,15 @@ export function ClientsPage() {
     { key: 't12', header: 'T12 commission', align: 'right', render: (c) => <Money cents={perClient.get(c.id)?.t12 ?? 0} />, sort: (c) => perClient.get(c.id)?.t12 ?? 0 },
     { key: 'status', header: 'Status', render: (c) => (c.status === 'active' ? <Badge tone="green">Active</Badge> : <Badge>Inactive</Badge>), sort: (c) => c.status },
   ];
+  // Searching by policy number: show which policy matched; clicking opens that policy directly.
+  const policyHits = (id: string) => search.policiesFor(id);
+  if (query && clients.some((c) => policyHits(c.id).length)) {
+    columns.splice(1, 0, { key: 'hit', header: 'Matching policy', render: (c) => <span className="font-mono text-xs">{policyHits(c.id).map((p) => p.policyNumber).join(', ') || '—'}</span> });
+  }
+  const openClient = (c: Client) => {
+    const hits = policyHits(c.id);
+    navigate(hits.length === 1 ? `/clients/${c.id}?policy=${hits[0].id}` : `/clients/${c.id}`);
+  };
 
   return (
     <div>
@@ -40,8 +54,8 @@ export function ClientsPage() {
           <Button onClick={() => setAdding(true)}>Add client</Button>
         </>} />
       <Card>
-        <DataTable rows={clients} columns={columns} onRowClick={(c) => navigate(`/clients/${c.id}`)}
-          searchText={(c) => `${c.name} ${brokerById.get(c.brokerId)?.name ?? ''}`} initialSort={{ key: 'name', dir: 'asc' }}
+        <DataTable rows={clients} columns={columns} onRowClick={openClient}
+          matches={(c) => search.matchesClient(c)} onFilterChange={setQuery} searchPlaceholder="Search customer or policy number…" initialSort={{ key: 'name', dir: 'asc' }}
           empty="No clients yet. Import your client list (Phase 2) or add one by hand." />
       </Card>
       {adding && <ClientForm open onClose={() => setAdding(false)} onSaved={(id) => navigate(`/clients/${id}`)} />}
@@ -91,6 +105,7 @@ export function ClientDetailPage() {
       </div>
 
       <Card title="Policies">
+        {list.length > 0 && <p className="mb-2 text-xs text-slate-500">Click a policy to open its details, coverage terms (renewals, earlier terms, cancellation) and commission history.</p>}
         <DataTable rows={list} columns={columns} onRowClick={(p) => setParams({ policy: p.id })} empty="No policies yet." />
       </Card>
 
@@ -132,6 +147,7 @@ function PolicyDetail({ policy, onClose, onEdit }: { policy: Policy; onClose: ()
       <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
         {rows.map(([k, v]) => <div key={k} className="flex justify-between gap-3 border-b border-slate-100 py-1"><dt className="text-slate-500">{k}</dt><dd className="text-right">{v}</dd></div>)}
       </dl>
+      <PolicyTerms policy={policy} canEdit={isAdmin} />
       <h3 className="mb-2 mt-5 text-sm font-semibold text-ink">Commission history (posted ledger)</h3>
       {entries.length === 0 ? (
         <p className="text-sm text-slate-500">No commission posted for this policy in the snapshot window yet.</p>
@@ -217,6 +233,91 @@ function ReverseEntryForm({ entry, onClose }: { entry: LedgerEntry; onClose: () 
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="secondary" onClick={onClose}>Cancel</Button>
         <Button variant="danger" disabled={busy || reason.trim().length < 3} onClick={() => { setBusy(true); api.reverseLedgerEntry(entry.id, reason).then(onClose, (e) => { setError(e instanceof Error ? e.message : 'Failed'); setBusy(false); }); }}>Reverse</Button>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Coverage-term history of ONE policy record: several consecutive terms under the same policy number
+ * (renewals, an earlier expired term, a cancelled term) without a second policy or client record.
+ * Statement lines are assigned to a term from their effective date when the dates decide it.
+ */
+function PolicyTerms({ policy, canEdit }: { policy: Policy; canEdit: boolean }) {
+  const [terms, setTerms] = useState<PolicyTerm[]>([]);
+  const [editing, setEditing] = useState<PolicyTerm | 'new' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => onSnapshot(collection(db, 'policies', policy.id, 'terms'),
+    (snap) => setTerms(snap.docs.map((d) => ({ ...(d.data() as PolicyTerm), id: d.id, policyId: policy.id })).sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate))),
+    (e) => setError(e.message)), [policy.id]);
+  const problems = checkTerms(terms);
+  return (
+    <div className="mt-5">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-ink">Coverage terms</h3>
+        {canEdit && <Button size="sm" variant="secondary" onClick={() => setEditing('new')}>Add term</Button>}
+      </div>
+      <ErrorNote message={error} />
+      {terms.length === 0 ? (
+        <p className="text-xs text-slate-500">No term history recorded. The policy’s own dates ({policy.effectiveDate ?? '?'} → {policy.expirationDate ?? '?'}) are its current term. Add terms to record renewals, earlier terms or a cancellation under this same policy number.</p>
+      ) : (
+        <table className="min-w-full text-sm">
+          <thead><tr className="text-left text-xs uppercase text-slate-500"><th className="py-1">Effective</th><th>Scheduled expiration</th><th>Cancelled</th><th>Coverage ends</th><th>Status</th><th /></tr></thead>
+          <tbody>{terms.map((t) => (
+            <tr key={t.id} className="border-t border-slate-100">
+              <td className="py-1">{t.effectiveDate}</td><td>{t.scheduledExpirationDate}</td><td>{t.cancellationDate ?? '—'}</td><td>{termEnd(t)}</td>
+              <td><Badge tone={t.status === 'active' ? 'green' : t.status === 'cancelled' ? 'red' : undefined}>{t.status}</Badge></td>
+              <td className="text-right">{canEdit && <Button size="sm" variant="ghost" onClick={() => setEditing(t)}>Edit</Button>}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+      {problems.map((p) => <p key={p.code + p.termIds.join()} className={p.severity === 'error' ? 'mt-1 text-xs text-red-700' : 'mt-1 text-xs text-amber-700'}>{p.message}</p>)}
+      {editing && <TermForm policy={policy} term={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
+    </div>
+  );
+}
+
+function TermForm({ policy, term, onClose }: { policy: Policy; term: PolicyTerm | null; onClose: () => void }) {
+  const [effectiveDate, setEffective] = useState(term?.effectiveDate ?? '');
+  const [scheduledExpirationDate, setExpiration] = useState(term?.scheduledExpirationDate ?? '');
+  const [cancellationDate, setCancelled] = useState(term?.cancellationDate ?? '');
+  const [status, setStatus] = useState<TermStatus>((term?.status as TermStatus) ?? 'expired');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  async function save() {
+    setBusy(true); setError(null); setFieldErrors({});
+    try {
+      await api.savePolicyTerm({ policyId: policy.id, originalTermId: term?.id ?? null, note, term: { effectiveDate, scheduledExpirationDate, cancellationDate: status === 'cancelled' ? cancellationDate || null : null, status, note } });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save');
+      if (e instanceof Error && 'fieldErrors' in e) setFieldErrors((e as { fieldErrors: Record<string, string> }).fieldErrors);
+    } finally { setBusy(false); }
+  }
+  async function remove() {
+    if (!term || !window.confirm(`Remove the term starting ${term.effectiveDate}?`)) return;
+    setBusy(true); setError(null);
+    try { await api.removePolicyTerm({ policyId: policy.id, termId: term.id, note }); onClose(); } catch (e) { setError(e instanceof Error ? e.message : 'Could not remove'); } finally { setBusy(false); }
+  }
+  return (
+    <Modal open title={`${term ? 'Edit' : 'Add'} coverage term — policy ${policy.policyNumber}`} onClose={onClose}>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Effective date" error={fieldErrors['term.effectiveDate']}><TextInput type="date" value={effectiveDate} onChange={(e) => setEffective(e.target.value)} /></Field>
+        <Field label="Scheduled expiration" error={fieldErrors['term.scheduledExpirationDate']}><TextInput type="date" value={scheduledExpirationDate} onChange={(e) => setExpiration(e.target.value)} /></Field>
+        <Field label="Status"><Select value={status} onChange={(e) => setStatus(e.target.value as TermStatus)} options={TERM_STATUSES.map((s) => ({ value: s, label: TERM_STATUS_LABELS[s] }))} /></Field>
+        <Field label="Actual cancellation date" error={fieldErrors['term.cancellationDate']} hint={status === 'cancelled' ? 'Required for a cancelled term' : 'Only for a cancelled term'}>
+          <TextInput type="date" value={cancellationDate} disabled={status !== 'cancelled'} onChange={(e) => setCancelled(e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Where do these dates come from? (required; kept in the audit log)" className="mt-3" error={fieldErrors.note}><TextInput value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Travelers cancellation notice dated 8/13/2026" /></Field>
+      <p className="mt-2 text-xs text-slate-500">The policy record (number, current dates and status) is not changed. Terms may not overlap; only the latest term can be active.</p>
+      <ErrorNote message={error} />
+      <div className="mt-4 flex justify-between gap-2">
+        <div>{term && <Button variant="ghost" disabled={busy || note.trim().length < 3} onClick={() => void remove()}>Remove term…</Button>}</div>
+        <div className="flex gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={busy || note.trim().length < 3 || !effectiveDate || !scheduledExpirationDate} onClick={() => void save()}>{busy ? 'Saving…' : 'Save term'}</Button></div>
       </div>
     </Modal>
   );

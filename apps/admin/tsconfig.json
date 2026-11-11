@@ -24,6 +24,9 @@
       ],
       "@asm/shared/excel": [
         "../../packages/shared/src/excelRead.ts"
+      ],
+      "@asm/shared/buyout-reports": [
+        "../../packages/shared/src/buyout/render.ts"
       ]
     }
   },

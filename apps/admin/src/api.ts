@@ -1,6 +1,8 @@
 import type { AiDiagnosis, LineMatch, MatchSummary, PostingPlan } from '@asm/shared';
 import { httpsCallable } from 'firebase/functions';
-import { classifyProbe, describeCallableError, PROBE_SAFE_FUNCTIONS, type ProbeResult } from '@asm/shared';
+import { classifyProbe, describeCallableError, PROBE_SAFE_FUNCTIONS, type ProbeResult, type BrokerAdvanceInput, type ParsedAdvanceRow } from '@asm/shared';
+
+export type AdvanceForm = BrokerAdvanceInput;
 import type {
   BrokerInput, CarrierInput, ClientInput, ImportOptionsInput, ImportPlanSummary, ImportRecordInput, Message, PolicyInput, SettingsInput,
 } from '@asm/shared';
@@ -73,6 +75,21 @@ export const api = {
   saveClient: (data: ClientInput, id?: string, applyBrokerToPolicies = false) =>
     call<{ id?: string; data: ClientInput; applyBrokerToPolicies: boolean }, { id: string; policiesMoved: number }>(
       'saveClient', { id, data, applyBrokerToPolicies }),
+  recordBrokerAdvance: (input: { advance: AdvanceForm; note: string }) => call<typeof input, { id: string }>('recordBrokerAdvance', input),
+  correctBrokerAdvance: (input: { advanceId: string; advance: AdvanceForm; note: string }) => call<typeof input, { id: string; voided: string }>('correctBrokerAdvance', input),
+  voidBrokerAdvance: (input: { advanceId: string; note: string }) => call<typeof input, { voided: string }>('voidBrokerAdvance', input),
+  stageAdvanceImport: (input: { fileName: string; fileHash: string; headers: string[]; rows: string[][] }) =>
+    call<typeof input, { importId: string; counts: { rows: number; ok: number; errors: number; warnings: number }; totalOkCents: number; rows: ParsedAdvanceRow[] }>('stageAdvanceImport', input),
+  commitAdvanceImport: (input: { importId: string; note: string }) => call<typeof input, { created: number; already: boolean }>('commitAdvanceImport', input),
+  discardAdvanceImport: (input: { importId: string }) => call<typeof input, { discarded: string }>('discardAdvanceImport', input),
+  saveBuyoutConfig: (input: { plannedClosingDate: string | null; closingDateConfirmed: boolean; note: string }) => call<typeof input, { ok: true }>('saveBuyoutConfig', input),
+  createBuyoutSnapshot: (input: { closingDate: string; note: string }) => call<typeof input, { id: string; version: number; finalizable: boolean; blockers: string[] }>('createBuyoutSnapshot', input, 300_000),
+  addBuyoutAdjustment: (input: { snapshotId: string; brokerId: string; amountCents: number; reason: string }) => call<typeof input, { finalizable: boolean; blockers: string[] }>('addBuyoutAdjustment', input),
+  removeBuyoutAdjustment: (input: { snapshotId: string; adjustmentId: string; reason: string }) => call<typeof input, { finalizable: boolean; blockers: string[] }>('removeBuyoutAdjustment', input),
+  setBuyoutSnapshotState: (input: { snapshotId: string; to: 'draft' | 'reviewed' | 'finalized' | 'discarded'; note: string }) => call<typeof input, { state: string }>('setBuyoutSnapshotState', input, 120_000),
+  savePolicyTerm: (input: { policyId: string; originalTermId: string | null; term: { effectiveDate: string; scheduledExpirationDate: string; cancellationDate: string | null; status: string; note: string }; note: string }) =>
+    call<typeof input, { termId: string; warnings: { message: string }[] }>('savePolicyTerm', input),
+  removePolicyTerm: (input: { policyId: string; termId: string; note: string }) => call<typeof input, { removed: string }>('removePolicyTerm', input),
   savePolicy: (data: PolicyInput, id?: string) =>
     call<{ id?: string; data: PolicyInput }, { id: string }>('savePolicy', { id, data }),
   stageImport: (fileName: string, fileHash: string, options: ImportOptionsInput, records: ImportRecordInput[]) =>
@@ -95,7 +112,8 @@ export const api = {
     call<{ model?: string; skipRequest: boolean }, AiDiagnosis>('checkAiConnection', { model, skipRequest }, 120_000),
   runStatementMatching: (statementId: string, includeManual = false) =>
     call<{ statementId: string; includeManual: boolean }, MatchSummary & { changed: number; keptManual: number }>('runStatementMatching', { statementId, includeManual }, 300_000),
-  setLineMatch: (input: { action: 'assign'; statementId: string; lineId: string; policyId: string; note?: string } | { action: 'unmatch' | 'auto'; statementId: string; lineId: string; note?: string }) =>
+  setLineMatch: (input: { action: 'assign'; statementId: string; lineId: string; policyId: string; note?: string } | { action: 'unmatch' | 'auto'; statementId: string; lineId: string; note?: string }
+    | { action: 'historical'; statementId: string; lineId: string; clientId: string | null; insuredName: string; policyNumber: string; carrierId: string | null; policyStatus: 'cancelled' | 'expired' | 'unknown'; attributedBrokerId: string | null; note: string }) =>
     call<typeof input, { match: LineMatch; summary: MatchSummary }>('setLineMatch', input),
   approveStatement: (statementId: string, confirmNotDuplicate = false, note = '') =>
     call<{ statementId: string; confirmNotDuplicate: boolean; note: string }, { status: string; totals: PostingPlan['totals'] }>('approveStatement', { statementId, confirmNotDuplicate, note }),

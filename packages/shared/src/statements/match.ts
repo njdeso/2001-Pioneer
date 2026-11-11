@@ -3,6 +3,8 @@ import { normalizePolicyNumber, nameVariants } from '../normalize.js';
 import { brokerSplit } from '../aggregate.js';
 import { UNASSIGNED_BROKER_ID } from '../schemas.js';
 import type { ExtractedLine, StatementAdjustment } from './types.js';
+import { personEvidence } from './personName.js';
+import { resolveTerm, termEnd, type PolicyTerm, type TermResolution } from '../terms.js';
 
 /**
  * Stage 3B — commission matching. Pure functions, shared by the server (which stores results)
@@ -44,6 +46,7 @@ export type MatchReason =
   | 'policy_not_active'
   | 'manual'
   | 'manually_unmatched'
+  | 'historical_policy'           // a person identified it as a past (cancelled/expired) policy not in the book
   | 'carrier_differs';            // manual match to a policy outside the statement's payer
 
 export const MATCH_REASON_TEXT: Record<MatchReason, string> = {
@@ -63,6 +66,7 @@ export const MATCH_REASON_TEXT: Record<MatchReason, string> = {
   policy_not_active: 'The policy is not active',
   manual: 'Matched manually',
   manually_unmatched: 'Marked unmatched manually',
+  historical_policy: 'Identified by a person as a past policy (cancelled or expired) that is not in the book',
   carrier_differs: 'Policy belongs to a different carrier than the statement',
 };
 
@@ -99,6 +103,47 @@ export interface LineMatch {
   policyNumberKey: string | null;
   nameEvidence: NameEvidence;
   engineVersion: string;
+  /** Set when a person identified the line as commission on a past policy that is not in the book. */
+  historical?: HistoricalAttribution | null;
+  /** Matched lines: the coverage term of the policy the line belongs to, when the dates decide it. */
+  term?: MatchedTerm | null;
+  termResolution?: TermResolution;
+}
+
+export interface MatchedTerm { termId: string; effectiveDate: string; endDate: string; status: string }
+
+/**
+ * Add the coverage term to a MATCHED line (never changes the policy, amounts or status of the match).
+ * Terms come from policies/{policyId}/terms. Lines without a match keep no term.
+ */
+export function withTerm<M extends LineMatch>(m: M, lineEffectiveDate: string | null | undefined, terms: PolicyTerm[] | undefined): M {
+  // Firestore rejects undefined values: an unmatched line has no termResolution field at all.
+  if (m.status !== 'matched' || !m.policyId) { const { termResolution: _r, ...rest } = m; return { ...rest, term: null } as M; }
+  const { term, resolution } = resolveTerm(lineEffectiveDate, terms ?? []);
+  return { ...m, term: term ? { termId: term.id, effectiveDate: term.effectiveDate, endDate: termEnd(term), status: term.status } : null, termResolution: resolution };
+}
+
+export const HISTORICAL_POLICY_STATUSES = ['cancelled', 'expired', 'unknown'] as const;
+export type HistoricalPolicyStatus = (typeof HISTORICAL_POLICY_STATUSES)[number];
+
+/**
+ * A person's record of the original policy behind a historical commission line (a cancelled or expired
+ * policy that was never imported into the active book). It is information only:
+ *   - the line still posts to suspense (no policy, 100 % agency): no total, split or export changes;
+ *   - clientId links it to an EXISTING customer (e.g. one with other active policies) without adding
+ *     the policy to the book;
+ *   - attributedBrokerId is internal reporting attribution only. It never creates broker-buyout
+ *     eligibility (buyoutEligible is always false) and is never set automatically.
+ */
+export interface HistoricalAttribution {
+  clientId: string | null;
+  insuredName: string;
+  policyNumber: string;
+  carrierId: string | null;
+  policyStatus: HistoricalPolicyStatus;
+  attributedBrokerId: string | null;
+  buyoutEligible: false;
+  note: string;
 }
 
 // ---------------------------------------------------------------------------- inputs
@@ -166,7 +211,16 @@ const zeroKeyEligible = (k: string) => /^\d+$/.test(k) && stripZeros(k).length >
 
 function tokens(n: string): Set<string> { return new Set(n.split(' ').filter((w) => w.length > 0)); }
 
-/** Compare a printed insured name with a client name and/or named insured. Order-insensitive. */
+/**
+ * Compare a printed insured name with a client name and/or named insured. Order-insensitive.
+ *
+ * Word overlap first ("SMITH JOHN" = "John Smith"). Then person-name rules (personName.ts) for people
+ * printed as "LAST,F", "LAST FIRST M" or joint insureds: the same surname with compatible given names
+ * ("BIONDI,D" ~ "Dana Biondi", "AUGUSTINE WILLIAM A" ~ "William & Joelle Augustine") is PARTIAL support
+ * — never strong, so it can only confirm a policy already found by number and carrier, never pick
+ * between several. The same surname with conflicting given names ("SMITH JOHN A" vs "Mary A Smith") is
+ * no support, even when the words overlap.
+ */
 export function nameEvidence(printed: string, ...targets: (string | undefined | null)[]): NameEvidence {
   const lineVariants = nameVariants(printed);
   if (!lineVariants.length) return 'unknown';
@@ -184,6 +238,9 @@ export function nameEvidence(printed: string, ...targets: (string | undefined | 
       best = Math.max(best, union ? inter / union : 0);
     }
   }
+  const people = targets.filter((t): t is string => !!t).map((t) => personEvidence(printed, t));
+  if (people.includes('compatible')) return 'partial';
+  if (people.includes('conflict')) return 'none';
   return best >= 0.5 ? 'partial' : 'none';
 }
 

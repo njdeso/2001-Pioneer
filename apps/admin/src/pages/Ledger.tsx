@@ -232,7 +232,7 @@ export function LedgerPage() {
                     <tr key={e.id} className={cx('border-t border-slate-100', e.reversalOf && 'bg-slate-50')}>
                       <td className="py-1 pr-3">{formatMonth(e.statementPeriod)}</td>
                       <td className="pr-3 font-mono text-[11px]">{e.id}</td>
-                      <td className="pr-3">{e.reversalOf ? 'Reversal' : e.level === 'suspense' ? 'Suspense' : e.level === 'carrier' ? 'Adjustment' : e.sourceType === 'retained' ? 'Retained' : 'Commission'}</td>
+                      <td className="pr-3">{e.reversalOf ? 'Reversal' : e.historical ? 'Past policy (suspense)' : e.level === 'suspense' ? 'Suspense' : e.level === 'carrier' ? 'Adjustment' : e.sourceType === 'retained' ? 'Retained' : 'Commission'}</td>
                       <td className="pr-3">{e.policyNumberRaw || (e.policyId ? policyById.get(e.policyId)?.policyNumber : '') || '—'}<div className="text-xs text-slate-500">{e.insuredName}</div></td>
                       <td className="pr-3">{company(e.payerId)}</td>
                       <td className="pr-3">{e.brokerId ? brokerName(e.brokerId) : '—'}{typeof e.brokerShareBps === 'number' ? <span className="text-xs text-slate-500"> {formatBps(e.brokerShareBps)}{e.brokerShareSource === 'policy' ? ' (policy)' : ''}</span> : null}</td>

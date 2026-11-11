@@ -9,6 +9,7 @@ export default defineConfig({
     alias: [
       { find: /^@asm\/shared$/, replacement: fileURLToPath(new URL('../../packages/shared/src/index.ts', import.meta.url)) },
       { find: /^@asm\/shared\/excel$/, replacement: fileURLToPath(new URL('../../packages/shared/src/excelRead.ts', import.meta.url)) },
+      { find: /^@asm\/shared\/buyout-reports$/, replacement: fileURLToPath(new URL('../../packages/shared/src/buyout/render.ts', import.meta.url)) },
     ],
   },
   build: {

@@ -1,7 +1,9 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import {
-  clientInput, normalizeName, normalizePolicyNumber, policyInput, policyKey, searchTokens,
+  checkTerms, clientInput, normalizeName, normalizePolicyNumber, policyInput, policyKey, policyTermInput, searchTokens, termIdFor,
+  type PolicyTerm,
 } from '@asm/shared';
+import { z } from 'zod';
 import { audit, db, diff, idParam, meta, mustExist, parse, requireRole } from '../lib/core.js';
 
 export const saveClient = onCall(async (req) => {
@@ -83,7 +85,7 @@ export const savePolicy = onCall(async (req) => {
     const keyRef = db.collection('policyKeys').doc(key);
     const keySnap = await tx.get(keyRef);
     if (keySnap.exists && keySnap.get('policyId') !== ref.id) {
-      throw new HttpsError('already-exists', 'This carrier already has a policy with that number.', {
+      throw new HttpsError('already-exists', 'This carrier already has a policy with that number. To record another coverage term (a renewal or an earlier term), open that policy and add a term instead of creating a second policy.', {
         fieldErrors: { policyNumber: 'Duplicate for this carrier' },
         existingPolicyId: keySnap.get('policyId'),
       });
@@ -142,5 +144,84 @@ export const reassignPolicies = onCall(async (req) => {
       changes,
     });
     return { moved: Object.keys(changes).length };
+  });
+});
+
+// --------------------------------------------------------------------------- coverage terms
+
+const termIdRe = /^\d{4}-\d{2}-\d{2}$/;
+const termSaveInput = z.object({
+  policyId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  /** The term being edited (its effective date), or null to add a term. */
+  originalTermId: z.string().regex(termIdRe).nullable().default(null),
+  term: policyTermInput,
+  note: z.string().trim().min(3, 'A note is required: where these dates come from').max(500),
+});
+
+/**
+ * Add or edit one coverage term of a policy (policies/{id}/terms/{effectiveDate}). The policy record
+ * itself (its number, current dates and status) is not changed. The whole term history is checked:
+ * no overlaps, one active term at most and only as the latest. Changing a term's effective date (its
+ * ID) is refused once posted commission refers to the term.
+ */
+export const savePolicyTerm = onCall(async (req) => {
+  const actor = requireRole(req);
+  const input = parse(termSaveInput, req.data);
+  const policyRef = db.collection('policies').doc(input.policyId);
+  const newId = termIdFor(input.term.effectiveDate);
+  return db.runTransaction(async (tx) => {
+    const [pSnap, termsSnap] = await Promise.all([tx.get(policyRef), tx.get(policyRef.collection('terms'))]);
+    if (!pSnap.exists) throw new HttpsError('not-found', 'Policy not found.');
+    const existing = termsSnap.docs.map((d) => ({ ...(d.data() as Omit<PolicyTerm, 'id' | 'policyId'>), id: d.id, policyId: input.policyId }));
+    const original = input.originalTermId ? existing.find((t) => t.id === input.originalTermId) : undefined;
+    if (input.originalTermId && !original) throw new HttpsError('not-found', 'That term no longer exists. Reload and try again.');
+    if (!input.originalTermId && existing.some((t) => t.id === newId)) throw new HttpsError('already-exists', `This policy already has a term starting ${newId}. Edit that term instead.`);
+    if (original && original.id !== newId) {
+      if (existing.some((t) => t.id === newId)) throw new HttpsError('already-exists', `This policy already has a term starting ${newId}.`);
+      const used = await tx.get(db.collection('ledger').where('policyId', '==', input.policyId).where('termId', '==', original.id).limit(1));
+      if (!used.empty) throw new HttpsError('failed-precondition', 'Posted commission refers to this term, so its effective date cannot change. Add a separate term instead.');
+    }
+    const next = [...existing.filter((t) => t.id !== input.originalTermId), { ...input.term, id: newId, policyId: input.policyId }];
+    const problems = checkTerms(next);
+    const errors = problems.filter((p) => p.severity === 'error');
+    if (errors.length) throw new HttpsError('invalid-argument', errors.map((e) => e.message).join(' '), { problems: errors });
+    const data = { ...input.term, policyId: input.policyId, policyNumber: pSnap.get('policyNumber'), carrierId: pSnap.get('carrierId') };
+    if (original && original.id !== newId) tx.delete(policyRef.collection('terms').doc(original.id));
+    tx.set(policyRef.collection('terms').doc(newId), { ...data, ...meta(actor, !original || original.id !== newId) }, { merge: !!original && original.id === newId });
+    audit(tx, actor, {
+      action: original ? 'policy_term_update' : 'policy_term_create',
+      entityType: 'policyTerm', entityId: `${input.policyId}/${newId}`,
+      summary: `${original ? 'Updated' : 'Added'} term ${newId} → ${input.term.scheduledExpirationDate} (${input.term.status}${input.term.cancellationDate ? `, cancelled ${input.term.cancellationDate}` : ''}) on policy ${String(pSnap.get('policyNumber'))} — ${input.note}`,
+      changes: diff(original as unknown as Record<string, unknown> | undefined, { ...input.term }),
+    });
+    return { termId: newId, warnings: problems.filter((p) => p.severity === 'warning') };
+  });
+});
+
+const termRemoveInput = z.object({
+  policyId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  termId: z.string().regex(termIdRe),
+  note: z.string().trim().min(3, 'A note is required').max(500),
+});
+
+/** Remove a coverage term entered by mistake. Refused once posted commission refers to it. */
+export const removePolicyTerm = onCall(async (req) => {
+  const actor = requireRole(req);
+  const input = parse(termRemoveInput, req.data);
+  const ref = db.collection('policies').doc(input.policyId).collection('terms').doc(input.termId);
+  return db.runTransaction(async (tx) => {
+    const [snap, used] = await Promise.all([
+      tx.get(ref),
+      tx.get(db.collection('ledger').where('policyId', '==', input.policyId).where('termId', '==', input.termId).limit(1)),
+    ]);
+    if (!snap.exists) throw new HttpsError('not-found', 'Term not found.');
+    if (!used.empty) throw new HttpsError('failed-precondition', 'Posted commission refers to this term, so it cannot be removed. Correct its dates or status instead.');
+    tx.delete(ref);
+    audit(tx, actor, {
+      action: 'policy_term_remove', entityType: 'policyTerm', entityId: `${input.policyId}/${input.termId}`,
+      summary: `Removed term ${input.termId} (${String(snap.get('status'))}) — ${input.note}`,
+      changes: diff(snap.data() as Record<string, unknown>, {}),
+    });
+    return { removed: input.termId };
   });
 });

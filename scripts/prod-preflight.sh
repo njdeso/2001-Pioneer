@@ -15,8 +15,10 @@
 #   - record counts: clients, policies, statements, statement lines (collection group),
 #     statement fingerprints, audit log
 #   - stored statement PDFs (objects under statements/ in the default bucket)
-#   - every statement's status, month, failure code and whether its original PDF is stored,
-#     so the October and April records can be found
+#   - every statement's status, month, failure code and whether its original PDF is stored
+#   - content fingerprints (SHA-256 of every document) of clients, policies, statements, statement lines
+#     (incl. matching decisions), ledger, settings…; ledger totals; and the new collections' counts.
+#     "after" requires every fingerprint and total to be IDENTICAL and the new collections to be empty.
 set -euo pipefail
 PROJECT_ID="pioneer-285cf"
 LABEL="${1:-before}"
@@ -25,11 +27,13 @@ export CLOUDSDK_CORE_PROJECT="$PROJECT_ID"
 OUT="preflight-${LABEL}.txt"
 TOKEN="$(gcloud auth print-access-token)"
 H=(-H "Authorization: Bearer ${TOKEN}" -H "x-goog-user-project: ${PROJECT_ID}" -H "Content-Type: application/json")
+# Every request has a time limit and retries temporary failures, so the preflight fails instead of hanging.
+CURL=(curl -fsS --max-time 60 --retry 2 --retry-delay 3 --retry-connrefused)
 FS="https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents"
 
 count() { # $1 collection id, $2 "true" for collection group
   local scope=""; [ "${2:-}" = "true" ] && scope=',"allDescendants":true'
-  curl -fsS "${H[@]}" -X POST "${FS}:runAggregationQuery" \
+  "${CURL[@]}" "${H[@]}" -X POST "${FS}:runAggregationQuery" \
     -d "{\"structuredAggregationQuery\":{\"structuredQuery\":{\"from\":[{\"collectionId\":\"$1\"${scope}}]},\"aggregations\":[{\"alias\":\"n\",\"count\":{}}]}}" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["result"]["aggregateFields"]["n"]["integerValue"])'
 }
@@ -38,7 +42,7 @@ count() { # $1 collection id, $2 "true" for collection group
   echo "2001-Pioneer production snapshot (${LABEL}) — $(date -u +%FT%TZ) — project ${PROJECT_ID}"
   echo
   echo "== Functions (name, region, state)"
-  curl -fsS "${H[@]}" "https://cloudfunctions.googleapis.com/v2/projects/${PROJECT_ID}/locations/-/functions?pageSize=200" | python3 -c '
+  "${CURL[@]}" "${H[@]}" "https://cloudfunctions.googleapis.com/v2/projects/${PROJECT_ID}/locations/-/functions?pageSize=200" | python3 -c '
 import json,sys,collections
 fs=json.load(sys.stdin).get("functions",[])
 regions=collections.Counter()
@@ -58,7 +62,7 @@ print("  CHECK:", "OK - all us-central1" if fs and not bad else ("WARNING - func
   unset PFX
   echo
   echo "== AI settings (settings/app)"
-  curl -fsS "${H[@]}" "${FS}/settings/app" | python3 -c '
+  "${CURL[@]}" "${H[@]}" "${FS}/settings/app" | python3 -c '
 import json,sys
 f=json.load(sys.stdin).get("fields",{})
 v=lambda k: list(f.get(k,{}).values())[0] if k in f else None
@@ -85,7 +89,7 @@ else:
   done
   echo
   echo "== Statements (month, status, failure, original stored, file)"
-  curl -fsS "${H[@]}" -X POST "${FS}:runQuery" \
+  "${CURL[@]}" "${H[@]}" -X POST "${FS}:runQuery" \
     -d '{"structuredQuery":{"from":[{"collectionId":"statements"}],"select":{"fields":[{"fieldPath":"statementMonth"},{"fieldPath":"status"},{"fieldPath":"failure"},{"fieldPath":"originalPath"},{"fieldPath":"fileName"}]},"limit":500}}' \
     | python3 -c '
 import json,sys
@@ -100,12 +104,20 @@ for m,s,fl,o,fn,i in sorted(rows):
     print("  {:<8} {:<18} {:<16} stored:{:<4} {}  [{}]".format(m, s, fl, o, fn, i))
 print("  total: {}".format(len(rows)))'
 
+  echo; echo "== Content fingerprints, ledger totals, new collections (read-only; see scripts/prod-fingerprint.py)"
+  echo "  (progress is shown below while it reads; with ~1,500 policies this takes a few minutes)"
+  if ! timeout 1500 python3 -u scripts/prod-fingerprint.py "$PROJECT_ID" "$TOKEN"; then
+    echo "  PREFLIGHT FAILED: the content fingerprint did not complete (see FINGERPRINT FAILED above, or it hit the"
+    echo "  25-minute limit). Nothing was changed. This snapshot cannot be used; run the preflight again."
+    exit 1
+  fi
+
   echo; echo "== Browser access: CORS preflight (OPTIONS only; no function code runs, nothing changes)"
   echo "   204 = callable from the web app. 403 = NOT callable from the browser (no public invoker): the"
   echo "   web app shows 'Could not reach the server function'. 404 = not deployed (expected before the release"
   echo "   for the 8 new Stage 3B/3C functions)."
   for f in $(node scripts/lib/callables.mjs); do
-    c="$(curl -s -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://2001-pioneer.netlify.app' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' "https://us-central1-${PROJECT_ID}.cloudfunctions.net/${f}")"
+    c="$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X OPTIONS -H 'Origin: https://2001-pioneer.netlify.app' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' "https://us-central1-${PROJECT_ID}.cloudfunctions.net/${f}")"
     case "$c" in 204) note="ok";; 403) note="NOT CALLABLE FROM THE BROWSER";; 404) note="not deployed";; *) note="check";; esac
     printf '  %-26s %s %s\n' "$f" "$c" "$note"
   done
@@ -114,11 +126,28 @@ print("  total: {}".format(len(rows)))'
 if [ "$LABEL" = "after" ] && [ -f preflight-before.txt ]; then
   echo; echo "== Comparison with preflight-before.txt (counts must not go down)"
   for k in clients policies statements statementKeys carriers brokers ledger "statement lines"; do
-    b="$(grep -E "^  ${k} +[0-9]+$" preflight-before.txt | awk '{print $NF}')"; a="$(grep -E "^  ${k} +[0-9]+$" preflight-after.txt | awk '{print $NF}')"
+    b="$(grep -E "^  ${k} +[0-9]+$" preflight-before.txt | awk '{print $NF}' || true)"; a="$(grep -E "^  ${k} +[0-9]+$" preflight-after.txt | awk '{print $NF}' || true)"
     flag="OK"; [ -n "$b" ] && [ -n "$a" ] && [ "$a" -lt "$b" ] && flag="DECREASED — stop and investigate"
     printf '  %-16s before %-6s after %-6s %s\n' "$k" "${b:-?}" "${a:-?}" "$flag"
   done
-  b="$(grep -E 'statements/: [0-9]+ objects' preflight-before.txt | grep -oE '[0-9]+ objects' | head -1)"; a="$(grep -E 'statements/: [0-9]+ objects' preflight-after.txt | grep -oE '[0-9]+ objects' | head -1)"
+  b="$(grep -E 'statements/: [0-9]+ objects' preflight-before.txt | grep -oE '[0-9]+ objects' | head -1 || true)"; a="$(grep -E 'statements/: [0-9]+ objects' preflight-after.txt | grep -oE '[0-9]+ objects' | head -1 || true)"
   echo "  stored PDFs      before ${b:-?}  after ${a:-?}"
+  echo; echo "== Exact comparison: every record and financial total must be IDENTICAL; new collections must be 0"
+  RESULT=OK
+  for f in preflight-before.txt preflight-after.txt; do
+    grep -q '^  FP-COMPLETE ' "$f" || { echo "  INCOMPLETE $f has no FP-COMPLETE line (its fingerprint did not finish)"; RESULT=STOP; }
+  done
+  while read -r line; do
+    key="$(echo "$line" | awk '{print $1, $2}')"
+    [ "$(echo "$line" | awk '{print $1}')" = "NEW" ] && continue
+    other="$(grep -F "  $key " preflight-after.txt | head -1 | sed 's/^ *//' || true)"
+    if [ "$line" = "$other" ]; then echo "  OK        $line"; else echo "  CHANGED   before: $line"; echo "            after:  ${other:-missing}"; RESULT=STOP; fi
+  done < <(grep -E '^  (FP|TOTAL) ' preflight-before.txt | sed 's/^ *//')
+  while read -r line; do
+    n="$(echo "$line" | awk '{print $NF}')"
+    if [ "$n" = "0" ]; then echo "  OK        $line"; else echo "  NOT EMPTY $line"; RESULT=STOP; fi
+  done < <(grep -E '^  NEW ' preflight-after.txt | sed 's/^ *//')
+  echo; [ "$RESULT" = OK ] && echo "RESULT: OK - production records and financial totals are unchanged; nothing was created automatically." \
+    || echo "RESULT: STOP - a record or total changed, or a new collection is not empty. Do not continue; send this output to Claude."
 fi
 echo; echo "Saved to ${OUT}. Nothing in ${PROJECT_ID} was changed."

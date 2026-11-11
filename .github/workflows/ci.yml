@@ -53,6 +53,9 @@ jobs:
       - name: Ledger and posted statements are append-only (smoke, seed, functions)
         run: node --test scripts/ledger-append-only.test.mjs
 
+      - name: Production backup scripts fail closed and only verify by restore (fake gcloud, no Google access)
+        run: node --test scripts/prod-backup.test.mjs scripts/prod-backup-restore-test.test.mjs scripts/prod-fingerprint.test.mjs
+
       - name: npm run typecheck
         run: npm run typecheck
 

@@ -120,6 +120,16 @@ function divRoundHalfEven(numerator: bigint, denominator: bigint): bigint {
   return negative ? -q : q;
 }
 
+/**
+ * cents × numerator / denominator, computed exactly in integers and rounded once, half-even.
+ * Used for exact calendar-day ratios (e.g. advance × remaining days / term days).
+ */
+export function mulDivHalfEven(cents: Cents, numerator: number, denominator: number): Cents {
+  assertCents(cents);
+  if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator)) throw new MoneyError('Ratio terms must be integers');
+  return Number(divRoundHalfEven(BigInt(cents) * BigInt(numerator), BigInt(denominator)));
+}
+
 /** cents × bps / 10,000, rounded once, half-even. */
 export function applyBasisPoints(cents: Cents, bps: BasisPoints): Cents {
   assertCents(cents);

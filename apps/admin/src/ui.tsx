@@ -163,13 +163,17 @@ export interface Column<T> {
 }
 
 export function DataTable<T extends { id: string }>({
-  rows, columns, onRowClick, searchText, pageSize = 25, empty = 'Nothing here yet.', initialSort, selectable, selected, onSelectedChange,
+  rows, columns, onRowClick, searchText, matches, searchPlaceholder = 'Filter…', onFilterChange, pageSize = 25, empty = 'Nothing here yet.', initialSort, selectable, selected, onSelectedChange,
 }: {
   rows: T[];
   columns: Column<T>[];
   onRowClick?: (row: T) => void;
   /** When provided, a filter box appears and rows are filtered by this text. */
   searchText?: (row: T) => string;
+  /** Custom filter (instead of searchText): gets the trimmed, lower-cased query. */
+  matches?: (row: T, query: string) => boolean;
+  searchPlaceholder?: string;
+  onFilterChange?: (query: string) => void;
   pageSize?: number;
   empty?: string;
   initialSort?: { key: string; dir: 'asc' | 'desc' };
@@ -183,7 +187,7 @@ export function DataTable<T extends { id: string }>({
 
   const filtered = useMemo(() => {
     const f = filter.trim().toLowerCase();
-    const base = f && searchText ? rows.filter((r) => searchText(r).toLowerCase().includes(f)) : rows;
+    const base = !f ? rows : matches ? rows.filter((r) => matches(r, f)) : searchText ? rows.filter((r) => searchText(r).toLowerCase().includes(f)) : rows;
     if (!sort) return base;
     const col = columns.find((c) => c.key === sort.key);
     if (!col?.sort) return base;
@@ -193,7 +197,7 @@ export function DataTable<T extends { id: string }>({
       const r = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true });
       return sort.dir === 'asc' ? r : -r;
     });
-  }, [rows, filter, sort, columns, searchText]);
+  }, [rows, filter, sort, columns, searchText, matches]);
 
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const current = Math.min(page, pages - 1);
@@ -209,9 +213,9 @@ export function DataTable<T extends { id: string }>({
 
   return (
     <div>
-      {searchText && (
+      {(searchText || matches) && (
         <div className="mb-3">
-          <TextInput placeholder="Filter…" value={filter} onChange={(e) => { setFilter(e.target.value); setPage(0); }} className="max-w-xs" />
+          <TextInput placeholder={searchPlaceholder} aria-label={searchPlaceholder} value={filter} onChange={(e) => { setFilter(e.target.value); setPage(0); onFilterChange?.(e.target.value.trim().toLowerCase()); }} className="max-w-sm" />
         </div>
       )}
       <div className="overflow-x-auto rounded-md border border-slate-200">

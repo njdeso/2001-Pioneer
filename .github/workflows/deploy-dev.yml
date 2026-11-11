@@ -166,6 +166,24 @@ jobs:
               printf '%-26s %s %s\n' "$f" "$code" "$(head -c 110 /tmp/b | tr '\n' ' ')"
             done
             echo '```'
+            echo "### Isolation from production (read-only, dev-side evidence only; no request is made to any other project)"
+            echo '```'
+            echo "Functions: the Firebase project and bucket each deployed function is bound to (FIREBASE_CONFIG):"
+            for f in $(gcloud functions list --project "$P" --regions us-central1 --format='value(name.basename())' 2>/dev/null); do
+              svc=$(echo "$f" | tr 'A-Z' 'a-z')
+              cfg=$(gcloud run services describe "$svc" --project "$P" --region us-central1 --format=json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const env=j.spec.template.spec.containers[0].env||[];const fc=env.find(e=>e.name==="FIREBASE_CONFIG");const gp=env.find(e=>e.name==="GCLOUD_PROJECT");const c=fc?JSON.parse(fc.value):{};console.log(`project=${c.projectId??"?"} bucket=${c.storageBucket??"?"} GCLOUD_PROJECT=${gp?gp.value:"?"}`)}catch(e){console.log("unreadable")}})')
+              printf '  %-26s %s\n' "$f" "$cfg"
+            done
+            echo "Web app registered in $P (keys not printed):"
+            npx firebase apps:sdkconfig WEB --project dev 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const m=s.match(/\{[\s\S]*\}/);if(!m){console.log("  not available");return}const c=JSON.parse(m[0]);for(const k of ["projectId","authDomain","storageBucket","messagingSenderId"])console.log(`  ${k}: ${c[k]}`)})'
+            echo "Firestore database:"
+            gcloud firestore databases describe --database='(default)' --project "$P" --format='value(name,locationId,type)' 2>&1 | sed 's/^/  /'
+            echo "Authentication (Identity Platform config: authorized sign-in domains):"
+            TOKEN=$(gcloud auth print-access-token)
+            curl -s -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $P" "https://identitytoolkit.googleapis.com/admin/v2/projects/$P/config" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);console.log(`  config name: ${j.name}`);console.log(`  authorizedDomains: ${(j.authorizedDomains||[]).join(", ")}`)}catch{console.log("  not available")}})'
+            echo "Roles held by the deploy service account in $P:"
+            gcloud projects get-iam-policy "$P" --flatten=bindings --filter="bindings.members:serviceAccount:$DEV_SA" --format='value(bindings.role)' 2>&1 | sed 's/^/  /'
+            echo '```'
             echo "### Browser-style check of EVERY deployed function: CORS preflight from the dev site, then POST"
             echo '```'
             ORIGIN=https://deploy-dev--2001-pioneer.netlify.app
@@ -184,6 +202,13 @@ jobs:
             gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"savesettings\" AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
               --format='table(timestamp, severity, httpRequest.requestMethod, httpRequest.status, httpRequest.requestSize, httpRequest.responseSize, textPayload, jsonPayload.message)' 2>&1 | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | head -60
             echo '```'
+            echo "### Function errors (severity ERROR or worse) in the last 3 hours"
+            echo '```'
+            SINCE3=$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)
+            gcloud logging read "resource.type=\"cloud_run_revision\" AND severity>=ERROR AND timestamp>=\"$SINCE3\"" --project "$P" --limit 15 \
+              --format='value(timestamp, resource.labels.service_name, textPayload, jsonPayload.message, jsonPayload.error.message)' 2>&1 \
+              | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}/<email>/g' | cut -c1-900 | head -40
+            echo '```'
             echo "### HTTP 404 responses since $SINCE"
             echo '```'
             gcloud logging read "httpRequest.status=404 AND timestamp>=\"$SINCE\"" --project "$P" --limit 40 \
@@ -196,7 +221,7 @@ jobs:
             echo '```'
             echo "### Web app builds (public pages, read-only GET): Firebase project, region and functions in the bundle"
             echo '```'
-            for site in deploy-dev--2001-pioneer deploy-preview-4--2001-pioneer deploy-preview-3--2001-pioneer; do
+            for site in deploy-dev--2001-pioneer deploy-preview-6--2001-pioneer; do
               base="https://$site.netlify.app"
               code=$(curl -s -o /tmp/index.html -w '%{http_code}' "$base/")
               js=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' /tmp/index.html | head -1)
@@ -206,7 +231,8 @@ jobs:
                 echo "  projectId values: $(grep -oE 'projectId:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
                 echo "  authDomain:       $(grep -oE 'authDomain:"[^"]*"' /tmp/b.js | sort -u | tr '\n' ' ')"
                 echo "  deploy context:   $(grep -oE '"(deploy-preview|branch-deploy|production)"' /tmp/b.js | sort -u | tr '\n' ' ')"
-                for k in pioneer-2001-dev us-central1 cloudfunctions.net approveStatement postStatement runStatementMatching 'Due Diligence Package' 'Ties to the Dashboard'; do
+                echo "  built from commit: $(grep -oE '[0-9a-f]{40}' /tmp/b.js | sort -u | tr '\n' ' ')"
+                for k in pioneer-2001-dev us-central1 cloudfunctions.net approveStatement postStatement runStatementMatching 'Coverage terms' 'Add term' savePolicyTerm 'Broker Buyout' createBuyoutSnapshot 'Search customer or policy'; do
                   printf '  %-24s %s\n' "$k" "$(grep -oF "$k" /tmp/b.js | wc -l)"
                 done
               fi
@@ -214,6 +240,12 @@ jobs:
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           npx tsx scripts/diagnose-dev.mts dev
+          # Self-test of the production preflight's read-only fingerprint script, against DEV only.
+          echo "### Fingerprint self-test (scripts/prod-fingerprint.py, read-only, ${DEV_PROJECT_ID})" | tee -a "$GITHUB_STEP_SUMMARY"
+          timeout 1500 python3 -u scripts/prod-fingerprint.py "$DEV_PROJECT_ID" "$(gcloud auth print-access-token)" | tee /tmp/fp1.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          timeout 1500 python3 -u scripts/prod-fingerprint.py "$DEV_PROJECT_ID" "$(gcloud auth print-access-token)" > /tmp/fp2.txt
+          grep -q '^  FP-COMPLETE ' /tmp/fp1.txt || { echo "::error::Fingerprint self-test did not complete"; exit 1; }
+          if diff -q <(grep -v FP-COMPLETE /tmp/fp1.txt) <(grep -v FP-COMPLETE /tmp/fp2.txt) >/dev/null; then echo "Fingerprint self-test: two consecutive reads are identical (deterministic)" | tee -a "$GITHUB_STEP_SUMMARY"; else echo "::error::Fingerprint self-test: two reads differ"; diff /tmp/fp1.txt /tmp/fp2.txt; exit 1; fi
 
       - name: Audit-only or diagnose run — nothing deployed, seeded or changed
         if: steps.cfg.outputs.ready == 'true' && steps.cfg.outputs.deploy != 'true'
