@@ -73,7 +73,7 @@ test('the attribution is part of the approval fingerprint (changing it after app
 });
 
 test('readiness: a past-policy line counts as reviewed and is called out', () => {
-  const r = postingReadiness(stmt, lines(true), { duplicateAcknowledged: false, otherPostedSameMonth: [] });
+  const r = postingReadiness(stmt, lines(true), { duplicates: [] });
   assert.equal(r.ready, true, JSON.stringify(r.blockers));
   assert.ok(r.warnings.some((w) => w.code === 'historical' && w.lineNos.includes(2)));
   assert.ok(r.warnings.some((w) => w.code === 'suspense'));

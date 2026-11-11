@@ -1,3 +1,4 @@
+import type { DuplicateFinding } from './duplicates.js';
 import type { BasisPoints, Cents } from '../money.js';
 import type { LedgerClassification } from '../types.js';
 import { UNASSIGNED_BROKER_ID } from '../schemas.js';
@@ -64,7 +65,7 @@ export interface PostingStatement {
 export type ReadinessCode =
   | 'not_reconciled' | 'wrong_status' | 'no_payer' | 'no_month' | 'already_posted' | 'matching_not_run'
   | 'matching_stale' | 'matching_unbalanced' | 'lines_not_matched_yet' | 'lines_ambiguous'
-  | 'lines_unmatched_unreviewed' | 'possible_duplicate' | 'too_many_entries' | 'nothing_to_post';
+  | 'lines_unmatched_unreviewed' | 'possible_duplicate' | 'duplicate_statement' | 'too_many_entries' | 'nothing_to_post';
 
 export interface Readiness {
   ready: boolean;
@@ -75,11 +76,20 @@ export interface Readiness {
 const asMatch = (m: PostingLine['match']): LineMatch | null => (m && m.status !== 'not_started' ? (m as LineMatch) : null);
 const hasCommission = (l: PostingLine) => typeof l.paidCommissionCents === 'number' && l.paidCommissionCents !== 0;
 
+export interface DuplicateGateOpts {
+  /** Same-payer, same-month findings from assessDuplicates (computed on the server for approval and posting). */
+  duplicates?: DuplicateFinding[];
+  /** An approval given before pairwise confirmation existed, with the old "not a duplicate" acknowledgement.
+   *  Satisfies unconfirmed separate/overlapping findings only — never an identical / same-statement one. */
+  legacyDuplicateAcknowledged?: boolean;
+}
+
 /**
- * Can this statement be approved and posted? `duplicateAcknowledged` is the owner's explicit
- * confirmation that a flagged possible duplicate is a separate statement.
+ * Can this statement be approved and posted? Same-month statements from the payer are judged by
+ * statements/duplicates.ts: identical / same-statement content always blocks; anything else needs an
+ * owner's recorded "separate statement" confirmation.
  */
-export function postingReadiness(stmt: PostingStatement, lines: PostingLine[], opts: { duplicateAcknowledged?: boolean; otherPostedSameMonth?: string[] } = {}): Readiness {
+export function postingReadiness(stmt: PostingStatement, lines: PostingLine[], opts: DuplicateGateOpts = {}): Readiness {
   const blockers: Readiness['blockers'] = [];
   const warnings: Readiness['warnings'] = [];
   const nos = (pred: (l: PostingLine) => boolean) => lines.filter(pred).map((l) => l.lineNo);
@@ -103,8 +113,13 @@ export function postingReadiness(stmt: PostingStatement, lines: PostingLine[], o
   if (ambiguous.length) blockers.push({ code: 'lines_ambiguous', message: `${ambiguous.length} ambiguous line(s): match each one or mark it unmatched.`, lineNos: ambiguous });
   if (unreviewed.length) blockers.push({ code: 'lines_unmatched_unreviewed', message: `${unreviewed.length} unmatched line(s) not yet reviewed: match each one, or mark it unmatched to post it to suspense.`, lineNos: unreviewed });
 
-  if ((stmt.possibleDuplicateOf || opts.otherPostedSameMonth?.length) && !opts.duplicateAcknowledged) {
-    blockers.push({ code: 'possible_duplicate', message: `Another statement from this carrier for ${stmt.statementMonth ?? 'this month'} exists${opts.otherPostedSameMonth?.length ? ' and is posted' : ''}. Confirm this is a separate statement, not a duplicate.` });
+  const dups = opts.duplicates ?? [];
+  for (const d of dups.filter((x) => x.hard)) {
+    blockers.push({ code: 'duplicate_statement', message: `Same statement as "${d.other.fileName || d.otherId}" (${d.other.status}): ${d.sharedLines} of ${d.thisLines} lines are identical. It cannot be posted twice — discard one of them.` });
+  }
+  const unconfirmed = dups.filter((x) => !x.hard && !x.confirmed);
+  if (unconfirmed.length && !opts.legacyDuplicateAcknowledged) {
+    blockers.push({ code: 'possible_duplicate', message: `${unconfirmed.length === 1 ? 'Another statement' : `${unconfirmed.length} other statements`} from this carrier for ${stmt.statementMonth ?? 'this month'} ${unconfirmed.length === 1 ? 'is' : 'are'} loaded (${unconfirmed.map((u) => `"${u.other.fileName || u.otherId}"`).join(', ')}). An owner must confirm ${unconfirmed.length === 1 ? 'it is a separate statement' : 'each is a separate statement'} ("Confirm separate statement" in the duplicate check above).` });
   }
   const entryCount = commissionLines.length + (stmt.adjustments ?? []).filter((a) => a.amountCents !== 0).length;
   if (entryCount === 0) blockers.push({ code: 'nothing_to_post', message: 'There is no commission to post on this statement.' });
@@ -179,7 +194,7 @@ export interface PostingPlan {
 export const ledgerEntryId = (statementId: string, seq: number, part: string) => `${statementId}__p${seq}__${part}`;
 
 /** Build the exact ledger entries a statement would post. Throws if the statement is not ready. */
-export function buildPostingPlan(stmt: PostingStatement, lines: PostingLine[], opts: { duplicateAcknowledged?: boolean; otherPostedSameMonth?: string[]; note?: string } = {}): PostingPlan {
+export function buildPostingPlan(stmt: PostingStatement, lines: PostingLine[], opts: DuplicateGateOpts & { note?: string } = {}): PostingPlan {
   const r = postingReadiness(stmt, lines, opts);
   if (!r.ready) throw new Error(`Not ready to post: ${r.blockers.map((b) => b.message).join(' ')}`);
   const seq = (stmt.postingSeq ?? 0) + 1;

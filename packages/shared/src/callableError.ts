@@ -83,4 +83,5 @@ export function classifyProbe(err: CallableErrorLike | null): ProbeResult {
 export const PROBE_SAFE_FUNCTIONS = [
   'runStatementMatching', 'setLineMatch', 'approveStatement', 'unapproveStatement', 'postStatement',
   'reverseStatementPosting', 'recordRetainedCommission', 'reverseLedgerEntry',
+  'checkStatementDuplicates', 'setStatementClassification', 'confirmSeparateStatement',
 ] as const;
