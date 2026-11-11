@@ -71,6 +71,16 @@ jobs:
       - name: npm run build
         run: npm run build
 
+      # 1,600 synthetic customers through the real callable (auth + firestore + functions emulators, demo
+      # project, no credentials). The secret and parameter files only satisfy the emulator (it would otherwise
+      # prompt for them and wait); no function under test uses them.
+      - name: Customer & Policy Export end to end with 1,600 synthetic customers (emulators, .xlsx)
+        timeout-minutes: 12
+        run: |
+          printf 'ANTHROPIC_API_KEY=emulator-only-not-a-key\n' > functions/.secret.local
+          printf 'OWNER_EMAILS=owner@example.test\n' > functions/.env.demo-asm-export
+          npx firebase emulators:exec --only auth,firestore,functions --project demo-asm-export "node --import tsx --test scripts/book-export-emulator.test.mjs"
+
       - name: Function endpoints match the app and smoke test (region, callable, options)
         run: node scripts/check-functions-endpoints.mjs
 

@@ -65,6 +65,11 @@ export async function probeStatementFunctions(): Promise<{ name: string; result:
   }));
 }
 
+export interface BookExportResponse {
+  fileBase64: string; fileName: string; title: string; subtitle: string;
+  customers: number; policies: number; rows: number; orphanPolicies: number; totalClientRecords: number; totalPolicyRecords: number;
+}
+
 export const api = {
   claimOwner: () => call<Record<string, never>, { role: string }>('claimOwner', {}),
   saveSettings: (data: SettingsInput) => call<SettingsInput, { ok: true }>('saveSettings', data),
@@ -75,6 +80,8 @@ export const api = {
   saveClient: (data: ClientInput, id?: string, applyBrokerToPolicies = false) =>
     call<{ id?: string; data: ClientInput; applyBrokerToPolicies: boolean }, { id: string; policiesMoved: number }>(
       'saveClient', { id, data, applyBrokerToPolicies }),
+  exportBook: (input: { format: 'folder_checklist' | 'policy_detail'; scope: 'active' | 'all' }) =>
+    call<typeof input, BookExportResponse>('exportBook', input, 300_000),
   recordBrokerAdvance: (input: { advance: AdvanceForm; note: string }) => call<typeof input, { id: string }>('recordBrokerAdvance', input),
   correctBrokerAdvance: (input: { advanceId: string; advance: AdvanceForm; note: string }) => call<typeof input, { id: string; voided: string }>('correctBrokerAdvance', input),
   voidBrokerAdvance: (input: { advanceId: string; note: string }) => call<typeof input, { voided: string }>('voidBrokerAdvance', input),

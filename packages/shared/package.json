@@ -9,6 +9,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./excel": "./src/excelRead.ts",
+    "./excel-write": "./src/excelWrite.ts",
     "./pdf": "./src/pdfText.ts",
     "./buyout-reports": "./src/buyout/render.ts"
   },

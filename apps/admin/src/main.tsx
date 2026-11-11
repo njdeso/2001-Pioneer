@@ -15,6 +15,7 @@ import { ImportPage } from './pages/Import';
 import { StatementUploadPage, StatementQueuePage, StatementReviewPage } from './pages/Statements';
 import { ComingSoonPage } from './pages/ComingSoon';
 import { LedgerPage } from './pages/Ledger';
+import { ReportsPage } from './pages/BookExport';
 import { DueDiligencePage } from './pages/DueDiligence';
 import { BrokerBuyoutPage } from './pages/BrokerBuyout';
 import { configMissing, previewTargetsWrongProject } from './firebase';
@@ -55,6 +56,7 @@ function Gate() {
           <Route path="/queue" element={<StatementQueuePage />} />
           <Route path="/statements/:id" element={<StatementReviewPage />} />
           <Route path="/ledger" element={<LedgerPage />} />
+          <Route path="/reports" element={<ReportsPage />} />
           <Route path="/package" element={<DueDiligencePage />} />
           <Route path="/buyout" element={<BrokerBuyoutPage />} />
           <Route path="/settings" element={<SettingsPage />} />

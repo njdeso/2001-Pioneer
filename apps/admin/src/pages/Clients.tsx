@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { checkTerms, searchBook, termEnd, TERM_STATUSES, TERM_STATUS_LABELS, type PolicyTerm, type TermStatus } from '@asm/shared';
+import { BookExportButton } from './BookExport';
 import { db } from '../firebase';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { CLASSIFICATION_LABELS, LEDGER_CLASSIFICATIONS, formatBps, formatMonth, parseMoneyToCents, type Client, type LedgerClassification, type LedgerEntry, type Policy } from '@asm/shared';
@@ -50,6 +51,7 @@ export function ClientsPage() {
     <div>
       <PageHeader title="Clients & Policies" subtitle={`${clients.length.toLocaleString()} clients · ${policies.length.toLocaleString()} policies`}
         actions={<>
+          <BookExportButton />
           <Link to="/import"><Button variant="secondary">Import from CSV</Button></Link>
           <Button onClick={() => setAdding(true)}>Add client</Button>
         </>} />
@@ -322,3 +324,4 @@ function TermForm({ policy, term, onClose }: { policy: Policy; term: PolicyTerm 
     </Modal>
   );
 }
+

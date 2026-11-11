@@ -21,6 +21,9 @@
       ],
       "@asm/shared/excel": [
         "../packages/shared/src/excelRead.ts"
+      ],
+      "@asm/shared/excel-write": [
+        "../packages/shared/src/excelWrite.ts"
       ]
     }
   },

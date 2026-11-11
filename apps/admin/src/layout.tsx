@@ -16,7 +16,7 @@ export const NAV = [
   { to: '/queue', label: 'AI Processing Queue', icon: '⟳' },
   { to: '/ledger', label: 'Ledger', icon: '≡' },
   { to: '/reconciliation', label: 'Reconciliation', icon: '⚖', phase: 4 },
-  { to: '/reports', label: 'Reports & Analytics', icon: '▤', phase: 5 },
+  { to: '/reports', label: 'Reports & Analytics', icon: '▤' },
   { to: '/valuation', label: 'Book Valuation', icon: '$', phase: 5 },
   { to: '/package', label: 'Due Diligence Package', icon: '⎙' },
   { to: '/buyout', label: 'Broker Buyout', icon: '⇄', adminOnly: true },
