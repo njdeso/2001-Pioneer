@@ -64,7 +64,7 @@ before(async () => {
   for (let i = 0; i < N; i++) {
     const id = `SYNX-C${String(i).padStart(5, '0')}`;
     // Customer status is deliberately unrelated to policy status: "active only" must follow the policies.
-    const c = { name: `${['Zulu', 'alpha', 'Bravo', 'charlie', 'Delta'][i % 5]} Synthetic Customer ${N - i}`, externalId: i % 3 ? `00${i}` : '', classification: 'personal', brokerId: 'B50', status: i % 7 === 0 ? 'inactive' : 'active', synthetic: true };
+    const c = { name: i % 5 === 0 ? `ZULU SYNTHETIC CUSTOMER ${N - i} LLC` : `${['Zulu', 'alpha', 'Bravo', 'charlie', 'Delta'][i % 5]} Synthetic Customer ${N - i}`, externalId: i % 3 ? `00${i}` : '', classification: 'personal', brokerId: 'B50', status: i % 7 === 0 ? 'inactive' : 'active', synthetic: true };
     seeded.clients.push({ id, ...c }); writes.push([`clients/${id}`, c]);
     for (let k = 0; k < i % 5; k++) { // 0–4 policies; every 5th customer has none; i % 10 === 1: only a cancelled one
       const pid = `SYNX-P${i}-${k}`;
@@ -94,6 +94,10 @@ test(`Folder Checklist, all records: all ${N} customers, A–Z, from every recor
   assert.equal(one[2].value, '001'); assert.equal(one[2].numFmt, '@');
   assert.ok(one.slice(4, 8).every((c) => c.value === null && c.border?.top), 'blank, bordered boxes to mark by hand');
   assert.equal(ws.pageSetup.printTitlesRow, '1:1');
+  // All-caps stored names are shown in proper case (display only); mixed-case names as typed.
+  assert.ok(rows.some((r) => r[1] === `Zulu Synthetic Customer ${N} LLC`), 'ZULU SYNTHETIC CUSTOMER 1600 LLC → proper case');
+  assert.ok(!rows.some((r) => /^ZULU SYNTHETIC/.test(r[1])));
+  assert.ok(rows.some((r) => r[1] === `alpha Synthetic Customer ${N - 1}`), 'mixed case left as typed');
   console.log(`checklist of ${N} customers in ${Date.now() - t0} ms (${(res.fileBase64.length * 0.75 / 1024).toFixed(0)} KB xlsx)`);
 });
 
@@ -119,6 +123,7 @@ test('Policy Detail, all records and active only: every policy, numbers as text,
   const act = await exportXlsx({ format: 'policy_detail', scope: 'active' }, T.admin);
   assert.equal(act.rows.length - 1, seeded.policies.filter((p) => p.status === 'active').length);
   assert.ok(act.rows.slice(1).every((r) => r[6] === 'Active'));
+  assert.ok(all.rows.some((r) => r[0] === `Zulu Synthetic Customer ${N - 5} LLC`) && !all.rows.some((r) => /^ZULU SYNTHETIC/.test(r[0])), 'Policy Detail: proper case too');
 });
 
 test('no financial data in either export, even though the records carry premium, rate and broker share', async () => {

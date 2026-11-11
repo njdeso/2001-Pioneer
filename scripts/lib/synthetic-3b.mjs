@@ -22,6 +22,9 @@ export const CLIENTS = {
   'SYN3B-C-EPSILON': { name: 'Epsilon Synthetic Services', brokerId: 'UNASSIGNED' },
   'SYN3B-C-ZETA': { name: 'Zeta Synthetic Logistics', brokerId: 'SYN3B-B50' },
   'SYN3B-C-THETA': { name: 'Theta Synthetic Transport', brokerId: 'SYN3B-B50' },
+  // Stored in ALL CAPS (as legacy agency systems export names); no policies, so no statement or financial effect.
+  // The app and the Customer & Policy Export show it in proper case: "Iota O'Neil Synthetic Auto Body LLC".
+  'SYN3B-C-IOTA': { name: "IOTA O'NEIL SYNTHETIC AUTO BODY LLC", brokerId: 'UNASSIGNED' },
 };
 
 // carrierId, number, broker, optional per-policy broker share, status

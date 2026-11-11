@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { UNASSIGNED_BROKER_ID } from '../schemas.js';
+import { displayName } from '../displayName.js';
 
 /**
  * Customer & Policy Export — internal use only (admin, staff), for organizing the physical customer
@@ -12,6 +13,10 @@ import { UNASSIGNED_BROKER_ID } from '../schemas.js';
  *
  * "Active only" is decided by POLICY status, not customer status:
  *   checklist → customers with at least one active policy; policy detail → active policies only.
+ *
+ * Customer names are shown in proper case (displayName, display only — "SMITH TRUCKING LLC" → "Smith Trucking
+ * LLC"; mixed-case names as typed). Sorting still uses the stored name, case-insensitively, so the order is the
+ * same as before; stored records are never changed.
  *
  * Contains no commission, premium, rate, broker share or other compensation / acquisition-financial data:
  * the column lists below are the whole contract and tests check them.
@@ -100,7 +105,7 @@ export function buildBookExport(data: BookExportData, opts: BookExportInput, tod
     const listed = clients
       .map((c) => ({ c, active: (byClient.get(c.id) ?? []).filter(isActive).length }))
       .filter((x) => opts.scope === 'all' || x.active > 0);
-    const rows: ExportCell[][] = listed.map((x, i) => [i + 1, x.c.name ?? '', x.c.externalId || x.c.id, x.active, null, null, null, null]);
+    const rows: ExportCell[][] = listed.map((x, i) => [i + 1, displayName(x.c.name), x.c.externalId || x.c.id, x.active, null, null, null, null]);
     return {
       format: opts.format, scope: opts.scope,
       title: 'Customer Folder Checklist',
@@ -114,7 +119,7 @@ export function buildBookExport(data: BookExportData, opts: BookExportInput, tod
 
   const known = new Map(data.clients.map((c) => [c.id, c]));
   const wanted = data.policies.filter((p) => opts.scope === 'all' || isActive(p));
-  const name = (p: ExportPolicy) => known.get(p.clientId)?.name ?? '(customer record missing)';
+  const name = (p: ExportPolicy) => (known.has(p.clientId) ? displayName(known.get(p.clientId)!.name) : '(customer record missing)');
   const sorted = [...wanted].sort((a, b) => {
     const ca = known.get(a.clientId), cb = known.get(b.clientId);
     // Missing customers last; otherwise by customer, then policy number, then effective date.

@@ -444,6 +444,10 @@ async function exportStage(cfg) {
       && JSON.stringify(names) === JSON.stringify([...names].sort(coll.compare)) && all.cells.slice(1).every((c) => typeof c[2].value === 'string' && c[2].numFmt === '@' && c.slice(4, 8).every((x) => x.value === null))
       && all.ws.pageSetup.printTitlesRow === '1:1',
     `${all.rows.length - 1} rows / ${clients.length} customer records; ${all.res.fileName}; ${(all.res.fileBase64.length * 0.75 / 1024).toFixed(0)} KB`);
+  const iota = (await db.collection('clients').doc('SYN3B-C-IOTA').get()).get('name');
+  const iotaRow = all.rows.find((r) => r[2] === 'SYN3B-C-IOTA');
+  record('Proper case in the export; the stored name is unchanged', iota === "IOTA O'NEIL SYNTHETIC AUTO BODY LLC" && iotaRow?.[1] === "Iota O'Neil Synthetic Auto Body LLC",
+    `stored "${iota}" → exported "${iotaRow?.[1]}"`);
   const act = await open({ format: 'folder_checklist', scope: 'active' }, STAFF_TOKEN);
   record('Folder Checklist (active only, staff): customers with at least one active POLICY, correct counts',
     act.rows.length - 1 === activeBy.size && act.res.policies === [...activeBy.values()].reduce((a, b) => a + b, 0),

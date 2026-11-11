@@ -159,3 +159,26 @@ test('XLSX Policy Detail: policy numbers as text (no scientific notation, zeros 
   // Every cell in the Policy Number column is a string.
   for (let i = 2; i <= ws.rowCount; i++) assert.equal(typeof ws.getRow(i).getCell(2).value, 'string');
 });
+
+// ---- proper-case customer names (PR #11 display rule) in both exports ----
+test('both exports show customer names in proper case; order and stored records are unchanged', () => {
+  const d: BookExportData = {
+    clients: [
+      { id: 'K1', name: 'SMITH TRUCKING LLC', externalId: '0101' },
+      { id: 'K2', name: "o'brien, pat", externalId: '0102' },
+      { id: 'K3', name: 'McDonald & Sons, Inc.', externalId: '0103' }, // mixed case: as typed
+      { id: 'K4', name: 'ACME INC. DBA ACE AUTO', externalId: '0104' },
+      { id: 'K5', name: 'adams family trust', externalId: '0105' },
+    ],
+    policies: ['K1', 'K2', 'K3', 'K4', 'K5'].map((c, i) => ({ id: `Q${i}`, clientId: c, carrierId: 'CA', policyNumber: `00${i}`, status: 'active', brokerId: 'UNASSIGNED' })),
+    carriers: [{ id: 'CA', name: 'Synthetic Mutual' }], brokers: [],
+  };
+  const before = JSON.stringify(d);
+  const chk = buildBookExport(d, { format: 'folder_checklist', scope: 'all' }, '2026-11-11');
+  assert.deepEqual(chk.rows.map((r) => r[1]), ['Acme Inc. DBA Ace Auto', 'Adams Family Trust', 'McDonald & Sons, Inc.', "O'Brien, Pat", 'Smith Trucking LLC']);
+  assert.deepEqual(chk.rows.map((r) => r[2]), ['0104', '0105', '0103', '0102', '0101'], 'same A–Z order as the stored names (case-insensitive)');
+  const pd = buildBookExport(d, { format: 'policy_detail', scope: 'all' }, '2026-11-11');
+  assert.deepEqual(pd.rows.map((r) => r[0]), ['Acme Inc. DBA Ace Auto', 'Adams Family Trust', 'McDonald & Sons, Inc.', "O'Brien, Pat", 'Smith Trucking LLC']);
+  assert.deepEqual(pd.rows.map((r) => r[1]), ['003', '004', '002', '001', '000'], 'policy numbers untouched');
+  assert.equal(JSON.stringify(d), before, 'stored names are not changed');
+});
