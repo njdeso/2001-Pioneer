@@ -16,18 +16,33 @@ final "  FP-COMPLETE ..." line. The FP-COMPLETE line is printed only when every 
 preflight, the backup and the restore test refuse a snapshot without it.
 Progress (stderr): one line per collection, so a slow run is visibly working.
 
-Never hangs: every request has a 30-second timeout, temporary failures (timeouts, connection errors,
+Never hangs: every request has a 60-second timeout, temporary failures (timeouts, connection errors,
 HTTP 429/500/502/503/504) are retried up to 4 times with backoff, and the whole run is limited to
 FP_DEADLINE_SECONDS (default 1200). Any failure prints "FINGERPRINT FAILED: <reason>" and exits 2.
+
+Authentication: the access token is refreshed with `gcloud auth print-access-token` when a request gets
+HTTP 401 (expired or invalid token) and proactively every 30 minutes; the request is then repeated. If a
+freshly issued token is still refused, the run fails.
+
+Pages hold 100 documents, so each request stays small and quick even on a just-imported database; a page
+that times out is read again from the same position (reads only).
 """
-import hashlib, json, os, socket, sys, time, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, socket, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 project, token = sys.argv[1], sys.argv[2]
 database = sys.argv[3] if len(sys.argv) > 3 else "(default)"
-BASE = f"https://firestore.googleapis.com/v1/projects/{project}/databases/{database}/documents"
-HEAD = {"Authorization": f"Bearer {token}", "x-goog-user-project": project, "Content-Type": "application/json"}
-REQUEST_TIMEOUT = 30
+# FP_FIRESTORE_BASE is for the automated tests only and must point at this machine.
+ROOT = os.environ.get("FP_FIRESTORE_BASE", "https://firestore.googleapis.com")
+if ROOT != "https://firestore.googleapis.com" and not ROOT.startswith(("http://127.0.0.1:", "http://localhost:")):
+    print("FINGERPRINT FAILED: FP_FIRESTORE_BASE may only point at localhost (tests).", file=sys.stderr)
+    sys.exit(2)
+BASE = f"{ROOT}/v1/projects/{project}/databases/{database}/documents"
+REQUEST_TIMEOUT = int(os.environ.get("FP_REQUEST_TIMEOUT", "60"))
 RETRIES = 4
+PAGE_SIZE = 100
+TOKEN_MAX_AGE = 30 * 60
+TOKEN_AT = time.monotonic()
+REFRESHES = 0
 DEADLINE = time.monotonic() + int(os.environ.get("FP_DEADLINE_SECONDS", "1200"))
 STARTED = time.monotonic()
 REQUESTS = 0
@@ -47,45 +62,77 @@ def fail(reason):
     sys.exit(2)
 
 
+def refresh_token(why):
+    """Get a new access token from gcloud (Cloud Shell / CI). Fails the run if gcloud cannot issue one."""
+    global token, TOKEN_AT, REFRESHES
+    try:
+        r = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        fail(f"could not refresh the access token ({why}): {e}")
+    new = r.stdout.strip()
+    if r.returncode != 0 or not new:
+        fail(f"could not refresh the access token ({why}): {r.stderr.strip()[:200]}")
+    token, TOKEN_AT, REFRESHES = new, time.monotonic(), REFRESHES + 1
+    progress(f"access token refreshed ({why})")
+
+
+def headers():
+    return {"Authorization": f"Bearer {token}", "x-goog-user-project": project, "Content-Type": "application/json"}
+
+
 def request(url, body=None):
-    """One HTTP request with a timeout, retries for temporary failures, and the overall deadline."""
+    """One HTTP request with a timeout, token refresh, retries for temporary failures, and the overall deadline."""
     global REQUESTS
     data = json.dumps(body).encode() if body is not None else None
-    for attempt in range(1, RETRIES + 2):
+    refreshed_for_this_request = False
+    attempt = 0
+    while True:
+        attempt += 1
         if time.monotonic() > DEADLINE:
             fail(f"time limit reached after {REQUESTS} requests (FP_DEADLINE_SECONDS). Nothing was changed.")
+        if time.monotonic() - TOKEN_AT > TOKEN_MAX_AGE:
+            refresh_token("token older than 30 minutes")
         REQUESTS += 1
         try:
-            req = urllib.request.Request(url, data=data, headers=HEAD, method="POST" if data else "GET")
+            req = urllib.request.Request(url, data=data, headers=headers(), method="POST" if data else "GET")
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300].replace("\n", " ")
+            if e.code == 401 and not refreshed_for_this_request:
+                # Expired or invalid token: get a fresh one and repeat this same read (does not use a retry).
+                refresh_token("HTTP 401 from Firestore")
+                refreshed_for_this_request = True
+                attempt -= 1
+                continue
             if e.code in (429, 500, 502, 503, 504) and attempt <= RETRIES:
                 reason = f"HTTP {e.code}"
             else:
-                hint = " (permission denied or the access token expired: check gcloud is signed in as the project owner, then run the command again)" if e.code in (401, 403) else ""
+                hint = " (refused even with a freshly issued token: check gcloud is signed in as the project owner)" if e.code == 401 else " (permission denied: check gcloud is signed in as the project owner)" if e.code == 403 else ""
                 fail(f"HTTP {e.code} from Firestore{hint}: {detail}")
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
             if attempt > RETRIES:
                 fail(f"no answer from Firestore after {attempt} tries: {getattr(e, 'reason', e)}")
             reason = f"{type(e).__name__}: {getattr(e, 'reason', e)}"
+        if attempt > RETRIES:
+            fail(f"gave up after {attempt} tries: {reason}")
         wait = min(2 ** attempt, 20)
         progress(f"temporary problem ({reason}); retrying in {wait}s (try {attempt + 1} of {RETRIES + 1})")
         time.sleep(wait)
-    fail("unreachable")
 
 
-def list_docs(path):
+def list_docs(path, show=False):
     """All documents directly under a collection path (e.g. 'clients' or 'statements/ID/lines')."""
     docs, page = [], None
     while True:
-        q = {"pageSize": "300"}
+        q = {"pageSize": str(PAGE_SIZE)}
         if page:
             q["pageToken"] = page
         j = request(f"{BASE}/{path}?{urllib.parse.urlencode(q)}")
         docs += j.get("documents", [])
         page = j.get("nextPageToken")
+        if show and page:
+            progress(f"{path}: {len(docs)} read …")
         if not page:
             return docs
 
@@ -121,7 +168,7 @@ COLLECTIONS = ["clients", "policies", "policyKeys", "carriers", "brokers", "stat
 stores = {}
 for c in COLLECTIONS:
     progress(f"reading {c} …")
-    stores[c] = list_docs(c)
+    stores[c] = list_docs(c, show=True)
     fp(c, stores[c])
     progress(f"{c}: {len(stores[c])} documents")
 
@@ -152,5 +199,5 @@ out(f"  NEW policy terms              {count('terms', all_descendants=True)}")
 for c in ["brokerAdvances", "advanceImports", "buyoutSettlements", "buyoutCounters", "buyoutConfig"]:
     out(f"  NEW {c:<25} {count(c)}")
 
-out(f"  FP-COMPLETE {len(COLLECTIONS) + 1} collections fingerprinted, {REQUESTS} requests, {time.monotonic() - STARTED:.0f}s")
+out(f"  FP-COMPLETE {len(COLLECTIONS) + 1} collections fingerprinted, {REQUESTS} requests, {REFRESHES} token refreshes, {time.monotonic() - STARTED:.0f}s")
 progress("done")
