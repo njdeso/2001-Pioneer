@@ -1,6 +1,8 @@
 // READ-ONLY local check of a real Excel commission statement with the PR #9 reader.
 //
-//   npx tsx scripts/inspect-statement-xlsx.mts DetailedStatement20261110.xlsx [--show-rows 3]
+//   npx tsx scripts/inspect-statement-xlsx.mts DetailedStatement20261110.xlsx [--show-rows 3] [--exceljs-dir DIR]
+//   --exceljs-dir: a folder where exceljs was installed on its own (npm install --prefix DIR exceljs@4.4.0),
+//   for the independent second-parser comparison when the workspace install cannot load it.
 //
 // It only reads the one file named on the command line. No Firebase, no network, no credentials,
 // nothing written. By default it prints structure, counts and totals — not insured names or policy
@@ -16,7 +18,8 @@
 //   6. no silent omission: rows with commission, commission total vs the Summary sheet; row limit
 //   7. what is NOT tested here: the AI extraction step
 import { readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, resolve as resolvePath } from 'node:path';
+import { createRequire } from 'node:module';
 import { readXlsxDetailed } from '../packages/shared/src/excelRead.ts';
 import { readXlsxLite } from '../packages/shared/src/xlsxLite.ts';
 import { excelRowsToText } from '../packages/shared/src/excel.ts';
@@ -24,8 +27,9 @@ import { parseFlexibleDate } from '../packages/shared/src/importMap.ts';
 import { tableToText } from '../packages/shared/src/statements/ai.ts';
 
 const args = process.argv.slice(2);
-const file = args.find((a) => !a.startsWith('--'));
-const showRows = Number(args[args.indexOf('--show-rows') + 1]) || 0;
+const file = args.find((a, i) => !a.startsWith('--') && !['--show-rows', '--exceljs-dir'].includes(args[i - 1] ?? ''));
+const showRows = args.includes('--show-rows') ? Number(args[args.indexOf('--show-rows') + 1]) || 0 : 0;
+const exceljsDir = args.includes('--exceljs-dir') ? args[args.indexOf('--exceljs-dir') + 1] : null;
 if (!file) { console.error('Usage: npx tsx scripts/inspect-statement-xlsx.mts <statement.xlsx> [--show-rows N]'); process.exit(2); }
 
 const TABLE_ROW_LIMIT = 3000; // the server refuses spreadsheets with more rows than it sends on
@@ -82,7 +86,7 @@ if (showRows) console.log(`\n      First ${showRows} data row(s), as the server 
 
 let exceljsSheets: { name: string; rows: string[][] }[] | null = null; let exErr = '';
 try {
-  const mod = (await import('exceljs')) as unknown as { default?: { Workbook: new () => any }; Workbook?: new () => any };
+  const mod = (exceljsDir ? createRequire(resolvePath(exceljsDir, 'package.json'))('exceljs') : await import('exceljs')) as unknown as { default?: { Workbook: new () => any }; Workbook?: new () => any };
   const wb = new (mod.default?.Workbook ?? mod.Workbook!)();
   await wb.xlsx.load(bytes);
   exceljsSheets = wb.worksheets.filter((ws: any) => !ws.state || ws.state === 'visible').map((ws: any) => { const rs: unknown[][] = []; ws.eachRow({ includeEmpty: false }, (row: any) => rs.push(Array.isArray(row.values) ? row.values : [])); return { name: ws.name, rows: excelRowsToText(rs) }; });
@@ -106,7 +110,10 @@ if (exceljsSheets && lite) {
   const d = sameAs(exceljsSheets.filter((s) => s.rows.length), lite);
   report(d.length ? 'FAIL' : 'PASS', '3c. Two independent parsers agree cell for cell (exceljs vs built-in)', d.length ? d.join('\n') : `${lite.reduce((n, s) => n + s.rows.length, 0)} rows identical in both`);
 } else {
-  report(lite ? 'INFO' : 'FAIL', '3c. Two independent parsers agree cell for cell (exceljs vs built-in)', `${exceljsSheets ? '' : `exceljs could not read the file (${exErr}), so only the built-in reader's output exists; check the counts in 3a/3b and the totals in 6 instead.`}${lite ? '' : `\nbuilt-in reader failed: ${liteErr}`}`);
+  const loadFailed = /Cannot find (package|module)|ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND/.test(exErr);
+  report(lite ? 'INFO' : 'FAIL', '3c. Two independent parsers agree cell for cell (exceljs vs built-in)', `${exceljsSheets ? '' : loadFailed
+    ? `exceljs did not LOAD (${exErr.split('\n')[0]}) — an incomplete installation in this folder, not a problem with the workbook (a fresh install loads it on Node 20 and 22). Common cause in Cloud Shell: the 5 GB home disk filling up (check: df -h ~). For the comparison, install it on its own and rerun:\n  npm install --no-save --no-audit --no-fund --prefix /tmp/exceljs-only exceljs@4.4.0\n  npx tsx scripts/inspect-statement-xlsx.mts <file> --exceljs-dir /tmp/exceljs-only`
+    : `exceljs loaded but could not read this workbook (${exErr.split('\n')[0]}) — the kind of failure production hid; the built-in reader read it.`}${lite ? '' : `\nbuilt-in reader failed: ${liteErr}`}`);
 }
 
 // ---------------------------------------------------------------- 4. placeholder dates
@@ -134,32 +141,84 @@ else {
   const fileDate = /(\d{4})(\d{2})\d{2}/.exec(basename(file));
   const single = counts.size === 1 ? [...counts.keys()][0] : null;
   const mismatch = single && fileDate && /^\d{6}$/.test(single) && single !== `${fileDate[1]}${fileDate[2]}`;
+  // Every date column's range (placeholders excluded), and any period / date labels on the Summary sheet.
+  const ranges: string[] = [];
+  header.forEach((h, j) => {
+    const vals = data.map((r) => r[j] ?? '').filter((v) => v !== '');
+    const parsed = vals.map((v) => parseFlexibleDate(v));
+    const dates = parsed.filter((d): d is string => typeof d === 'string').sort();
+    const placeholderN = vals.filter((v, i) => parsed[i] === null).length;
+    if (vals.length && (dates.length + placeholderN) / vals.length >= 0.9 && dates.length) {
+      const inMonth = single && /^\d{6}$/.test(single) ? dates.filter((d) => d.slice(0, 7) === `${single.slice(0, 4)}-${single.slice(4)}`).length : 0;
+      ranges.push(`"${h}": ${dates[0]} … ${dates[dates.length - 1]} (${dates.length} dates${placeholderN ? `, ${placeholderN} placeholder/blank` : ''}${single ? `; ${inMonth} in ${single.slice(0, 4)}-${single.slice(4)}` : ''})`);
+    } else if (vals.length && placeholderN === vals.length) ranges.push(`"${h}": all ${placeholderN} values are the 01/01/0001 placeholder (no date)`);
+  });
+  const periodLabels = (summarySheet?.rows ?? []).filter((r) => r.some((c) => /period|month|statement date|as of|through|ending|date/i.test(c))).map((r) => r.filter((c) => c !== '').join(' | '));
+  report(counts.size === 1 && /^\d{6}$/.test(single!) ? 'PASS' : 'INFO', '5b. Which month: date columns and Summary period', `${ranges.join('\n') || 'no date columns found'}\n${periodLabels.length ? `Summary sheet period/date entries:\n  ${periodLabels.join('\n  ')}` : 'the Summary sheet has no period or date label'}\n${fileDate ? `File name date ${fileDate[1]}-${fileDate[2]}-${/(\d{4})(\d{2})(\d{2})/.exec(basename(file))![3]}: carrier downloads are usually named with the date they were generated, not the statement period.` : ''}`);
   report(counts.size === 1 && /^\d{6}$/.test(single!) ? 'PASS' : 'INFO', '5. Month End', `"${header[meCol]}": ${vals.join(', ')}\nkept verbatim (a number, not turned into a date by the reader).${mismatch ? `\nNOTE: the file name suggests ${fileDate![1]}-${fileDate![2]}, but Month End says ${single!.slice(0, 4)}-${single!.slice(4)}. Confirm which month this statement is for.` : ''}\nThe statement month itself is decided in the AI extraction step (see 7).`);
 }
 
 // ---------------------------------------------------------------- 6. no silent omission
-const commCol = header.findIndex((h) => /comm/i.test(h) && /(amt|amount|paid|earned|due|commission\s*$)/i.test(h) && !/rate|%|pct/i.test(h));
-if (commCol < 0) report('FAIL', '6. Commission column', `no commission amount column recognised in the header (${header.join(' | ')})`);
+// Money columns: ≥ 90 % of non-empty cells are amounts; rates, counts, codes and dates are excluded.
+const notMoney = /rate|%|pct|percent|term|month|year|zip|code|number|no\.?$|#|id$|count|days/i;
+const moneyCols = header.map((h, j) => {
+  const vals = data.map((r) => (r[j] ?? '').trim()).filter((v) => v !== '');
+  const amounts = vals.map(cents);
+  const ok = amounts.filter((c) => c !== null) as number[];
+  const looksDate = vals.some((v) => /\d{1,2}\/\d{1,2}\/\d{2,4}/.test(v));
+  return { j, h, vals: vals.length, ok: ok.length, unreadable: vals.length - ok.length, total: ok.reduce((a, b) => a + b, 0), nonZero: ok.filter((c) => c !== 0).length };
+}).filter((c) => c.vals > 0 && c.ok / c.vals >= 0.9 && !notMoney.test(c.h) && !data.some((r) => /\d{1,2}\/\d{1,2}\/\d{2,4}/.test(r[c.j] ?? '')));
+
+// Summary totals: "Label | value" pairs on one row, and label rows followed by value rows.
+const pairs: { label: string; cents: number }[] = [];
+const srows = summarySheet?.rows ?? [];
+srows.forEach((r, i) => {
+  for (let j = 0; j < r.length; j++) if (/[A-Za-z]/.test(r[j] ?? '') && cents(r[j]) === null) for (let k = j + 1; k < r.length; k++) { const c = cents(r[k] ?? ''); if (c !== null) { pairs.push({ label: r[j], cents: c }); break; } if (/[A-Za-z]/.test(r[k] ?? '')) break; }
+  const next = srows[i + 1];
+  if (next && r.every((c) => c === '' || (/[A-Za-z]/.test(c) && cents(c) === null)) && next.some((c) => cents(c) !== null)) r.forEach((lab, j) => { const c = cents(next[j] ?? ''); if (lab && c !== null && !pairs.some((p) => p.label === lab && p.cents === c)) pairs.push({ label: lab, cents: c }); });
+});
+
+const commish = moneyCols.filter((c) => /comm|due|net|paid|payable|earned|agent/i.test(c.h));
+if (!moneyCols.length) report('FAIL', '6. Money columns', `no amount columns recognised in: ${header.join(' | ')}`);
 else {
-  let total = 0, withComm = 0, unreadable = 0, zero = 0;
-  for (const r of data) {
-    const v = (r[commCol] ?? '').trim();
-    if (!v) continue;
-    const c = cents(v);
-    if (c === null) { unreadable++; continue; }
-    total += c; if (c !== 0) withComm++; else zero++;
+  const lines = moneyCols.map((c) => {
+    const m = pairs.filter((p) => p.cents === c.total).map((p) => `"${p.label}"`);
+    return `"${c.h}": total ${money(c.total)} over ${c.ok} row(s) (${c.nonZero} non-zero${c.unreadable ? `, ${c.unreadable} UNREADABLE` : ''})${m.length ? `  = Summary ${m.join(', ')}` : '  — no Summary total equals this'}`;
+  });
+  report('INFO', '6a. Detailed money columns and the Summary totals they equal', `${lines.join('\n')}\nSummary totals found: ${pairs.length ? pairs.map((p) => `"${p.label}" ${money(p.cents)}`).join(', ') : 'none'}`);
+
+  // Row-by-row relationships between the commission columns (e.g. Gross − Net = a fee column).
+  const rel: string[] = [];
+  for (let a = 0; a < commish.length; a++) for (let b = a + 1; b < commish.length; b++) {
+    const A = commish[a], B = commish[b];
+    let eq = 0, n = 0; const diffs: number[] = [];
+    for (const r of data) { const x = cents(r[A.j] ?? ''), y = cents(r[B.j] ?? ''); if (x === null || y === null) continue; n++; if (x === y) eq++; diffs.push(x - y); }
+    const diffTotal = diffs.reduce((s2, d) => s2 + d, 0);
+    const explain = moneyCols.filter((c) => c !== A && c !== B && data.every((r, i) => { const v = cents(r[c.j] ?? '') ?? 0; return Math.abs(v) === Math.abs(diffs[i] ?? 0); }));
+    rel.push(`"${A.h}" vs "${B.h}": equal on ${eq} of ${n} rows; "${A.h}" − "${B.h}" totals ${money(diffTotal)}${explain.length ? ` = the "${explain.map((e) => e.h).join('"/"')}" column row by row` : ''}`);
   }
-  const candidates: { label: string; cents: number }[] = [];
-  for (const r of summarySheet?.rows ?? []) for (let j = 0; j < r.length; j++) if (/comm/i.test(r[j]) && !/rate|%/i.test(r[j])) for (let k = j + 1; k < r.length; k++) { const c = cents(r[k] ?? ''); if (c !== null) { candidates.push({ label: r[j], cents: c }); break; } }
-  const match = candidates.find((c) => c.cents === total);
-  report(unreadable === 0 ? 'PASS' : 'FAIL', '6a. Every commission transaction row is present and readable', `"${header[commCol]}": ${withComm} row(s) with commission, ${zero} with 0.00, ${unreadable} unreadable, ${data.length - withComm - zero - unreadable} blank; sum ${money(total)}`);
-  report(match ? 'PASS' : candidates.length ? 'FAIL' : 'INFO', '6b. Detailed commission total equals the Summary sheet',
-    candidates.length ? `${candidates.map((c) => `Summary "${c.label}": ${money(c.cents)}${c === match ? '  ← equals the Detailed total' : ''}`).join('\n')}${match ? '' : `\nDetailed total ${money(total)} matches none of them — rows may be missing, or the Summary uses another basis.`}` : 'no commission total found on a Summary sheet to compare with');
+  if (rel.length) report('INFO', '6b. How the commission columns relate, row by row', rel.join('\n'));
+
+  const unreadable = commish.filter((c) => c.unreadable);
+  report(unreadable.length ? 'FAIL' : 'PASS', '6c. Every commission row is present and readable', `${data.length} data rows; ${commish.map((c) => `"${c.h}": ${c.ok} readable, ${c.nonZero} non-zero`).join('; ') || 'no commission columns'}${unreadable.length ? `\nUNREADABLE cells in ${unreadable.map((c) => `"${c.h}" (${c.unreadable})`).join(', ')}` : ''}`);
+
+  // The amount actually paid to the agency: the commission column whose total equals a Summary total
+  // labelled as due / payable / paid / net — decided by the workbook's own totals, not by the header alone.
+  const paidLabel = /due|payable|paid|net|remit|agent|agency/i;
+  const reconciled = commish.filter((c) => pairs.some((p) => p.cents === c.total));
+  // One reconciling column: that is it. Several: the one tied to a due / payable / net / paid total.
+  const paid = reconciled.length === 1 ? reconciled : reconciled.filter((c) => pairs.some((p) => p.cents === c.total && (paidLabel.test(p.label) || paidLabel.test(c.h))));
+  report(paid.length === 1 ? 'PASS' : reconciled.length ? 'INFO' : 'FAIL', '6d. Column that reconciles as the commission paid to the agency',
+    paid.length === 1
+      ? `"${paid[0].h}" — its Detailed total ${money(paid[0].total)} equals the Summary total ${pairs.filter((p) => p.cents === paid[0].total).map((p) => `"${p.label}"`).join(', ')}. This is the figure the statement reader must take as each line's paid commission, and the statement total it must reconcile to.`
+      : reconciled.length
+        ? `${reconciled.length} commission columns equal Summary totals (${reconciled.map((c) => `"${c.h}"`).join(', ')}); which one is paid to the agency is not decided by the totals alone — see 6a/6b and confirm from the carrier's statement definitions.`
+        : `no commission column total equals any Summary total — rows may be missing, or the Summary uses another basis. Do not process this statement until this is explained.`);
 }
 const allRows = prod!.sheets.reduce((n, s) => n + s.rows.length + 1, 0);
-report(allRows <= TABLE_ROW_LIMIT ? 'PASS' : 'FAIL', '6c. Within the row limit (no truncation)', `${allRows} row(s) incl. sheet markers; limit ${TABLE_ROW_LIMIT} (larger spreadsheets are refused with an error, never cut short)`);
+report(allRows <= TABLE_ROW_LIMIT ? 'PASS' : 'FAIL', '6e. Within the row limit (no truncation)', `${allRows} row(s) incl. sheet markers; limit ${TABLE_ROW_LIMIT} (larger spreadsheets are refused with an error, never cut short)`);
 const text = tableToText(prod!.sheets.flatMap((s) => [[`# Sheet: ${s.name}`], ...s.rows]));
-report('INFO', '6d. Text the server would send to the statement reader', `${text.split('\n').length} lines, ${text.length.toLocaleString()} characters`);
+report('INFO', '6f. Text the server would send to the statement reader', `${text.split('\n').length} lines, ${text.length.toLocaleString()} characters`);
 
 // ---------------------------------------------------------------- 7. not tested
 report('INFO', '7. NOT TESTED here: the AI extraction step', 'Turning these rows into statement lines (statement month, carrier, each line\'s commission, reconciliation) is done by the AI statement reader in Cloud Functions. It was tested live in dev with a SYNTHETIC workbook of this layout (12 rows, reconciled exactly), NOT with this file. This script makes no AI call and sends nothing anywhere.');

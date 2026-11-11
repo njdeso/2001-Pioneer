@@ -22,6 +22,10 @@ export function zip(files) {
   return new Uint8Array(Buffer.concat([...parts, cd, end]));
 }
 
+/** Variant with three commission columns, as in some carrier "Detailed" exports: Comm (= gross), Gross Comm,
+ *  and Net Due Agent = Gross Comm − a 5 % fee; the Summary carries the gross and the net-due totals. */
+export const HEAD3 = ['Month End', 'Agency', 'Insured Name', 'Policy Number', 'Line', 'Trans Type', 'Eff Date', 'Exp Date', 'Trans Date', 'Cancel Date',
+  'Written Premium', 'Comm Rate', 'Comm', 'Gross Comm', 'State', 'Company', 'Net Due Agent', 'Term', 'Status', 'Notes'];
 export const HEAD = ['Month End', 'Agency', 'Insured Name', 'Policy Number', 'Line', 'Trans Type', 'Eff Date', 'Exp Date', 'Trans Date', 'Cancel Date',
   'Written Premium', 'Comm Rate', 'Comm Amount', 'Producer', 'State', 'Company', 'Bill Type', 'Term', 'Status', 'Notes'];
 export const detailRows = (n = 94, nonce = '') => Array.from({ length: n }, (_, i) => [202511, 'SYN-001', `Synthetic Insured ${i + 1} & Co`, `SYN${String(100000 + i)}`, i % 2 ? 'Personal Auto' : 'Homeowners', 'RN',
@@ -31,7 +35,7 @@ const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 const colName = (i) => String.fromCharCode(65 + i);
 
 /** A DetailedStatement-like workbook. Summary totals equal the Detailed sheet's sums (it reconciles). */
-export function detailedStatementWorkbook({ prefix = '', refs = true, inline = false, hiddenDetailed = false, rows = 94, nonce = '' } = {}) {
+export function detailedStatementWorkbook({ prefix = '', refs = true, inline = false, hiddenDetailed = false, rows = 94, nonce = '', threeCommission = false } = {}) {
   const x = prefix ? `${prefix}:` : '';
   const ns = prefix ? `xmlns:${prefix}="http://schemas.openxmlformats.org/spreadsheetml/2006/main"` : 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
   const strings = []; const sIdx = (s) => { let k = strings.indexOf(s); if (k < 0) { strings.push(s); k = strings.length - 1; } return k; };
@@ -43,15 +47,19 @@ export function detailedStatementWorkbook({ prefix = '', refs = true, inline = f
     if (inline) return `<${x}c${ref} t="inlineStr"><${x}is><${x}t>${esc(v)}</${x}t></${x}is></${x}c>`;
     return `<${x}c${ref} t="s"><${x}v>${sIdx(v)}</${x}v></${x}c>`;
   };
-  const data = detailRows(rows, nonce);
+  let data = detailRows(rows, nonce);
+  if (threeCommission) data = data.map((r) => { const g = r[12]; const net = Math.round(g * 95) / 100; return [...r.slice(0, 13), g, r[14], r[15], net, ...r.slice(17)]; });
   const premium = Math.round(data.reduce((t, r) => t + r[10] * 100, 0)) / 100;
   const commission = Math.round(data.reduce((t, r) => t + r[12] * 100, 0)) / 100;
+  const netDue = threeCommission ? Math.round(data.reduce((t, r) => t + Math.round(r[16] * 100), 0)) / 100 : null;
   const sheetXml = (rs) => `<?xml version="1.0" encoding="UTF-8"?><${x}worksheet ${ns}><${x}sheetData>${rs.map((row, ri) =>
     `<${x}row r="${ri + 1}">${row.map((v, ci) => cell(v, ri + 1, ci)).join('')}</${x}row>`).join('')}</${x}sheetData></${x}worksheet>`;
   // Summary: one date-formatted numeric cell (serial 45962 = 2025-11-01) to exercise date styles.
   const summary = `<?xml version="1.0" encoding="UTF-8"?><${x}worksheet ${ns}><${x}sheetData>`
     + `<${x}row r="1">${cell('Total Written Premium', 1, 0)}${cell(premium, 1, 1)}</${x}row>`
-    + `<${x}row r="2">${cell('Total Commission', 2, 0)}${cell(commission, 2, 1)}</${x}row>`
+    + (threeCommission
+      ? `<${x}row r="2">${cell('Gross Commission', 2, 0)}${cell(commission, 2, 1)}</${x}row><${x}row r="4">${cell('Net Due Agent', 4, 0)}${cell(netDue, 4, 1)}</${x}row>`
+      : `<${x}row r="2">${cell('Total Commission', 2, 0)}${cell(commission, 2, 1)}</${x}row>`)
     + `<${x}row r="3">${cell('Statement Date', 3, 0)}${cell(45962, 3, 1, 1)}</${x}row>`
     + `</${x}sheetData></${x}worksheet>`;
   const files = {
@@ -64,12 +72,12 @@ export function detailedStatementWorkbook({ prefix = '', refs = true, inline = f
       + '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet2.xml"/>'
       + '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>'
       + '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>',
-    'xl/worksheets/sheet1.xml': sheetXml([HEAD, ...data]),
+    'xl/worksheets/sheet1.xml': sheetXml([threeCommission ? HEAD3 : HEAD, ...data]),
     'xl/worksheets/sheet2.xml': summary,
     'xl/styles.xml': `<?xml version="1.0"?><${x}styleSheet ${ns}><${x}numFmts count="1"><${x}numFmt numFmtId="164" formatCode="mm/dd/yyyy"/></${x}numFmts><${x}cellXfs count="2"><${x}xf numFmtId="0"/><${x}xf numFmtId="164" applyNumberFormat="1"/></${x}cellXfs></${x}styleSheet>`,
   };
   files['xl/sharedStrings.xml'] = `<?xml version="1.0"?><${x}sst ${ns} count="${strings.length}" uniqueCount="${strings.length}">${strings.map((s) => `<${x}si><${x}t>${esc(s)}</${x}t></${x}si>`).join('')}</${x}sst>`;
-  return { bytes: zip(files), premium, commission };
+  return { bytes: zip(files), premium, commission, netDue };
 }
 
 /** An old Excel 97–2003 (.xls / OLE) or encrypted-Office container header, as seen in disguised files. */

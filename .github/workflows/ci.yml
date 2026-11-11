@@ -56,6 +56,12 @@ jobs:
       - name: Production backup scripts fail closed and only verify by restore (fake gcloud, no Google access)
         run: node --test scripts/prod-backup.test.mjs scripts/prod-backup-restore-test.test.mjs scripts/prod-fingerprint.test.mjs scripts/inspect-statement-xlsx.test.mjs
 
+      - name: Cloud Functions runtime dependencies load from a clean install (as Cloud Functions installs them)
+        run: |
+          mkdir -p /tmp/fn-deps && cp functions/package.json /tmp/fn-deps/ && cd /tmp/fn-deps
+          npm install --omit=dev --no-audit --no-fund
+          node -e "Promise.all([import('exceljs'), import('pdfjs-dist/legacy/build/pdf.mjs')]).then(([x]) => { if (typeof (x.default ?? x).Workbook !== 'function') throw new Error('exceljs Workbook missing'); console.log('exceljs and pdfjs-dist load'); })"
+
       - name: npm run typecheck
         run: npm run typecheck
 
