@@ -1,8 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import {
   brokerInput, carrierInput, clientInput, fieldErrors, formatBps, formatCents, parseMoneyToCents, parsePercentToBps, policyInput,
-  UNASSIGNED_BROKER_ID, type Broker, type Carrier, type Client, type Policy,
-} from '@asm/shared';
+  UNASSIGNED_BROKER_ID, type Broker, type Carrier, type Client, type Policy, displayName } from '@asm/shared';
 import type { ZodType, z } from 'zod';
 import { api, ApiError } from './api';
 import { useData } from './data';
@@ -199,7 +198,7 @@ export function ClientForm({ open, onClose, client, onSaved }: {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={client ? `Edit ${client.name}` : 'Add client'}>
+    <Modal open={open} onClose={onClose} title={client ? `Edit ${displayName(client.name)}` : 'Add client'}>
       <form onSubmit={submit}>
         <Grid>
           <Field label="Client name" error={s.errors.name} className="sm:col-span-2"><TextInput value={f.name} onChange={set('name')} autoFocus /></Field>
@@ -280,7 +279,7 @@ export function PolicyForm({ open, onClose, client, policy }: {
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={policy ? `Edit policy ${policy.policyNumber}` : `Add policy for ${client.name}`}>
+    <Modal open={open} onClose={onClose} title={policy ? `Edit policy ${policy.policyNumber}` : `Add policy for ${displayName(client.name)}`}>
       <form onSubmit={submit}>
         <Grid>
           <Field label="Policy number" error={s.errors.policyNumber}><TextInput value={f.policyNumber} onChange={set('policyNumber')} autoFocus /></Field>

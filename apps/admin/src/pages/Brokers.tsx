@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { brokerSplit, formatBps, monthlyTotals, sumCents, UNASSIGNED_BROKER_ID, type Broker, type Policy } from '@asm/shared';
+import { brokerSplit, formatBps, monthlyTotals, sumCents, UNASSIGNED_BROKER_ID, type Broker, type Policy, displayName } from '@asm/shared';
 import { useData } from '../data';
 import { BrokerForm } from '../forms';
 import { api } from '../api';
@@ -82,7 +82,7 @@ export function BrokerDetailPage() {
 
   const columns: Column<Policy>[] = [
     { key: 'num', header: 'Policy #', render: (p) => <Link className="text-ink hover:underline" to={`/clients/${p.clientId}?policy=${p.id}`}>{p.policyNumber}</Link>, sort: (p) => p.policyNumber },
-    { key: 'client', header: 'Client', render: (p) => clientById.get(p.clientId)?.name ?? '—', sort: (p) => clientById.get(p.clientId)?.name ?? '' },
+    { key: 'client', header: 'Client', render: (p) => displayName(clientById.get(p.clientId)?.name) || '—', sort: (p) => clientById.get(p.clientId)?.name ?? '' },
     { key: 'carrier', header: 'Carrier', render: (p) => carrierById.get(p.carrierId)?.name ?? '—', sort: (p) => carrierById.get(p.carrierId)?.name ?? '' },
     { key: 'line', header: 'Line', render: (p) => (p.line === 'personal' ? 'Personal' : 'Commercial'), sort: (p) => p.line },
     { key: 'status', header: 'Status', render: (p) => p.status, sort: (p) => p.status },

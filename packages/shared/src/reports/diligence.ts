@@ -1,4 +1,5 @@
 import { totalInWindow } from '../aggregate.js';
+import { displayName } from '../displayName.js';
 import type { Cents } from '../money.js';
 import { windowMonths, type Month } from '../period.js';
 import {
@@ -315,8 +316,8 @@ export function clientPolicyExport(input: {
     const t = t12.get(p.id);
     t12PolicyCents += t?.cents ?? 0;
     lines.push(row([
-      p.clientId, c?.externalId ?? '', c ? str(c.name) : '(client record missing)', c?.classification ?? '', c?.status ?? '',
-      p.id, p.namedInsured ?? '', carrierName.get(p.carrierId) ?? p.carrierId, p.wholesalerId ? carrierName.get(p.wholesalerId) ?? p.wholesalerId : '',
+      p.clientId, c?.externalId ?? '', c ? displayName(str(c.name)) : '(client record missing)', c?.classification ?? '', c?.status ?? '',
+      p.id, displayName(p.namedInsured), carrierName.get(p.carrierId) ?? p.carrierId, p.wholesalerId ? carrierName.get(p.wholesalerId) ?? p.wholesalerId : '',
       p.line ?? '', p.policyType ?? '', str(p.policyNumber), (Array.isArray(p.alternateNumbers) ? p.alternateNumbers : []).join('; '),
       p.effectiveDate ?? '', p.expirationDate ?? '', p.status ?? '',
       typeof p.premiumCents === 'number' ? centsToDecimal(p.premiumCents) : '', pct(p.commissionRateBps),
@@ -325,7 +326,7 @@ export function clientPolicyExport(input: {
   }
   const noPolicy = [...input.clients].filter((c) => !withPolicy.has(c.id)).sort((a, b) => str(a.name).localeCompare(str(b.name)));
   for (const c of noPolicy) {
-    lines.push(row([c.id, c.externalId ?? '', str(c.name), c.classification ?? '', c.status ?? '', ...Array(15).fill('')]));
+    lines.push(row([c.id, c.externalId ?? '', displayName(str(c.name)), c.classification ?? '', c.status ?? '', ...Array(15).fill('')]));
   }
   const unexportedT12 = [...t12.keys()].filter((id) => !input.policies.some((p) => p.id === id));
   const checks: DiligenceCheck[] = [
