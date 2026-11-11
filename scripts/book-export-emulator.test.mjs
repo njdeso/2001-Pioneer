@@ -90,7 +90,7 @@ test('Policy Detail, all customers: every policy plus each customer without one;
   const numbers = rows.map((x) => unwrap(x[5])).filter(Boolean);
   assert.deepEqual([...numbers].sort(), seeded.policies.map((p) => p.policyNumber).sort(), 'exactly the stored policy numbers');
   assert.ok(rows.some((x) => x[5] === '="0001"'), 'leading zeros');
-  assert.ok(rows.some((x) => x[5] === '="617730000001"'), 'long numbers as text');
+  assert.ok(rows.some((x) => x[5] === '="617730000002"'), 'long numbers as text');
 });
 
 test('active customers only', async () => {
