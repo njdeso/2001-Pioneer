@@ -144,7 +144,7 @@ test('exports change nothing: customer, policy, carrier and broker records ident
   assert.equal((await db.collection('ledger').get()).size, 0);
   assert.equal((await db.collection('fileTracking').get()).size, 0);
   const audits = (await db.collection('auditLog').where('action', '==', 'export_book').get()).docs.map((d) => d.data());
-  assert.ok(audits.length >= 7, `${audits.length} audit entries`);
+  assert.equal(audits.length, 6, 'one audit entry per successful export (6), none for refused calls');
   assert.ok(audits.every((a) => /\d+ customers, \d+ (active )?policies, \d+ rows/.test(a.summary) && !/Synthetic Customer/.test(a.summary)), 'audit records counts, not customer data');
   assert.ok(audits.some((a) => a.actorRole === 'staff' || a.actorUid === 'staff1' || JSON.stringify(a).includes('staff1')));
 });
