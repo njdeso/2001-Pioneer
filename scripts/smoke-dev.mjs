@@ -302,10 +302,15 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   // the same lines as this run's — in review, plus the upload smoke statements. Same-month statements are
   // compared by content, so those identical leftovers would (correctly) block approval. Discard them through
   // the app's own discardStatement (refuses anything approved or posted; audit-logged).
+  // A finished run ends with its statement re-approved (step 7); that one is returned to review first.
+  // Posted statements are never touched.
   const leftovers = (await db.collection('statements').where('payerId', '==', PAYER_ID).where('statementMonth', '==', '2026-10').get()).docs
-    .filter((d) => d.id !== sid && ['needs_review', 'discrepancy'].includes(d.get('status')) && Number(d.get('postedCents') ?? 0) === 0
+    .filter((d) => d.id !== sid && ['needs_review', 'discrepancy', 'approved'].includes(d.get('status')) && Number(d.get('postedCents') ?? 0) === 0
       && (d.get('synthetic') === true || String(d.get('fileName') ?? '').startsWith('SMOKE-')));
-  for (const d of leftovers) await call('discardStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+  for (const d of leftovers) {
+    if (d.get('status') === 'approved') await call('unapproveStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+    await call('discardStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+  }
   record('Housekeeping: earlier runs\' synthetic statements for this payer and month discarded', true, `${leftovers.length} discarded via discardStatement`);
 
   // 1. Approval is blocked while lines are ambiguous or unreviewed
