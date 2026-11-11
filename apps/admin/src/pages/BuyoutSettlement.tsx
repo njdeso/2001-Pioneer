@@ -2,8 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { collection, doc, getDocs, onSnapshot } from 'firebase/firestore';
 import {
   brokerStatementModel, EXCLUSION_TEXT, flagText, parseMoneyToCents, reconciliationModel, SNAPSHOT_STATE_LABELS, statementFileStem, toBuyoutInputs, valueBuyout,
-  type BrokerAdvance, type BuyoutConfig, type BuyoutSnapshot, type PolicyTerm, type PolicyValuation, type SnapshotPolicyRow, type SnapshotState,
-} from '@asm/shared';
+  type BrokerAdvance, type BuyoutConfig, type BuyoutSnapshot, type PolicyTerm, type PolicyValuation, type SnapshotPolicyRow, type SnapshotState, displayName } from '@asm/shared';
 import { api } from '../api';
 import { useData } from '../data';
 import { db } from '../firebase';
@@ -70,7 +69,7 @@ export function BuyoutSettlement({ advances, terms }: { advances: BrokerAdvance[
         </div>
       </Card>
 
-      {preview && <Preview v={preview} closing={closing} onSnapshot={() => setCreating(true)} names={{ client: (id) => clientById.get(id)?.name ?? id, carrier: (id) => carrierById.get(id)?.name ?? id, broker: (id) => brokerById.get(id)?.name ?? id }} />}
+      {preview && <Preview v={preview} closing={closing} onSnapshot={() => setCreating(true)} names={{ client: (id) => displayName(clientById.get(id)?.name) || id, carrier: (id) => carrierById.get(id)?.name ?? id, broker: (id) => brokerById.get(id)?.name ?? id }} />}
 
       <Card title="Settlement versions">
         {!versions.length ? <p className="text-sm text-slate-500">No snapshots yet. A snapshot freezes the calculation for a closing date so it can be reviewed, adjusted, finalized and sent to brokers.</p> : (
@@ -368,7 +367,7 @@ function SnapshotModal({ snap, onClose }: { snap: BuyoutSnapshot; onClose: () =>
 
         <div>
           <Button size="sm" variant="ghost" onClick={() => setShowRows(!showRows)}>{showRows ? 'Hide' : 'Show'} the {snap.policyCount} stored policy rows</Button>
-          {showRows && rows && <PolicyTable rows={rows} names={{ client: (id) => rows.find((r) => r.clientId === id)?.clientName ?? id, carrier: (id) => rows.find((r) => r.carrierId === id)?.carrierName ?? id, broker: nameOf }} open={open} setOpen={setOpen} />}
+          {showRows && rows && <PolicyTable rows={rows} names={{ client: (id) => displayName(rows.find((r) => r.clientId === id)?.clientName) || id, carrier: (id) => rows.find((r) => r.carrierId === id)?.carrierName ?? id, broker: nameOf }} open={open} setOpen={setOpen} />}
         </div>
 
         {snap.history && snap.history.length > 0 && (
