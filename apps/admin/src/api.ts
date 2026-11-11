@@ -65,6 +65,11 @@ export async function probeStatementFunctions(): Promise<{ name: string; result:
   }));
 }
 
+export interface BookExportResponse {
+  csv: string; fileName: string; customers: number; policies: number; rows: number;
+  customersWithoutPolicies: number; orphanPolicies: number; totalClientRecords: number; totalPolicyRecords: number;
+}
+
 export const api = {
   claimOwner: () => call<Record<string, never>, { role: string }>('claimOwner', {}),
   saveSettings: (data: SettingsInput) => call<SettingsInput, { ok: true }>('saveSettings', data),
@@ -75,6 +80,10 @@ export const api = {
   saveClient: (data: ClientInput, id?: string, applyBrokerToPolicies = false) =>
     call<{ id?: string; data: ClientInput; applyBrokerToPolicies: boolean }, { id: string; policiesMoved: number }>(
       'saveClient', { id, data, applyBrokerToPolicies }),
+  exportBook: (input: { format: 'customer_summary' | 'policy_detail'; scope: 'all' | 'active'; includeFileTracking: boolean }) =>
+    call<typeof input, BookExportResponse>('exportBook', input, 300_000),
+  setFileTracking: (input: { clientId: string; fileReviewed: boolean; reviewStatus: string; boxNumber: string; transferDate: string | null }) =>
+    call<typeof input, { ok: true }>('setFileTracking', input),
   recordBrokerAdvance: (input: { advance: AdvanceForm; note: string }) => call<typeof input, { id: string }>('recordBrokerAdvance', input),
   correctBrokerAdvance: (input: { advanceId: string; advance: AdvanceForm; note: string }) => call<typeof input, { id: string; voided: string }>('correctBrokerAdvance', input),
   voidBrokerAdvance: (input: { advanceId: string; note: string }) => call<typeof input, { voided: string }>('voidBrokerAdvance', input),

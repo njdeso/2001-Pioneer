@@ -19,6 +19,7 @@ export * from './statements/posting.js';
 export * from './statements/duplicates.js';
 export * from './reports/ledger.js';
 export * from './reports/diligence.js';
+export * from './reports/bookExport.js';
 export * from './callableError.js';
 export * from './statements/personName.js';
 export * from './terms.js';
