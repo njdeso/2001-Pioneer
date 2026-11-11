@@ -17,6 +17,9 @@
 //                            the specified $339.04 example, a two-term policy and a cancelled policy (no clawback);
 //                            adjustment re-settles installments; reviewed locks adjustments; finalize refused
 //                            when data changed since the snapshot, or while blockers remain; no ledger writes)
+//  10. Customer & Policy    (Customer Folder Checklist and Policy Detail Export as .xlsx: every dev customer/policy, A–Z,
+//      Export                 active-only by policy status, policy numbers and IDs as text cells, no financial columns;
+//                             admin and staff allowed, buyer and no-role users refused; nothing written but the audit log)
 //   6. Stage 3C posting     (same statement: approval blocked until ambiguous/unreviewed lines are
 //                            resolved; staff cannot approve or post; approve; matching locked; concurrent
 //                            and repeated posting post exactly once; ledger entries, allocations, suspense,
@@ -37,6 +40,7 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { exportedCallables } from './lib/callables.mjs';
 import { getStorage } from 'firebase-admin/storage';
+import ExcelJS from 'exceljs';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { assertDevProjectNumber } from './lib/dev-guard.mjs';
 import { seedBook, writeStatement, LINES, EXPECTED_SUMMARY, PAYER_ID } from './lib/synthetic-3b.mjs';
@@ -276,6 +280,56 @@ async function stage3b() {
   record('Nothing posted to financial reports', ledgerAfter === ledgerBefore && ledgerForStmt === 0 && (stmt.postedCents ?? 0) === 0,
     `ledger entries ${ledgerBefore} → ${ledgerAfter}; for this statement ${ledgerForStmt}; posted ${$(stmt.postedCents ?? 0)}`);
   return { sid, ref, policiesBefore, linesBefore };
+}
+
+// ---------------------------------------------------------------- Customer & Policy Export (.xlsx)
+async function exportStage(cfg) {
+  summary('\n#### Customer & Policy Export (.xlsx) — every dev record, internal users only\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  const open = async (input, token) => {
+    const res = await call('exportBook', input, 1, token);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Buffer.from(res.fileBase64, 'base64'));
+    const ws = wb.worksheets[0]; const rows = []; const cells = [];
+    ws.eachRow({ includeEmpty: false }, (r) => { rows.push(r.values.slice(1)); const c = []; r.eachCell({ includeEmpty: true }, (x) => c.push(x)); cells.push(c); });
+    return { res, ws, rows, cells };
+  };
+  const clients = (await db.collection('clients').select('name', 'externalId').get()).docs.map((d) => ({ id: d.id, name: d.get('name'), externalId: d.get('externalId') }));
+  const policies = (await db.collection('policies').select('clientId', 'status', 'policyNumber').get()).docs.map((d) => ({ id: d.id, ...d.data() }));
+  const activeBy = new Map(); for (const p of policies) if ((p.status ?? 'active') === 'active') activeBy.set(p.clientId, (activeBy.get(p.clientId) ?? 0) + 1);
+  const ledgerBefore = (await db.collection('ledger').count().get()).data().count;
+  const coll = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
+
+  const all = await open({ format: 'folder_checklist', scope: 'all' }, ID_TOKEN);
+  const names = all.rows.slice(1).map((r) => r[1]);
+  record('Folder Checklist (all records, admin): every dev customer, A–Z, blank boxes',
+    all.rows.length - 1 === clients.length && JSON.stringify(all.rows[0]) === JSON.stringify(['No.', 'Customer Name', 'Customer ID', 'Active Policies', 'File Located', 'File Reviewed', 'Ready for Pioneer', 'Box Number'])
+      && JSON.stringify(names) === JSON.stringify([...names].sort(coll.compare)) && all.cells.slice(1).every((c) => typeof c[2].value === 'string' && c[2].numFmt === '@' && c.slice(4, 8).every((x) => x.value === null))
+      && all.ws.pageSetup.printTitlesRow === '1:1',
+    `${all.rows.length - 1} rows / ${clients.length} customer records; ${all.res.fileName}; ${(all.res.fileBase64.length * 0.75 / 1024).toFixed(0)} KB`);
+  const act = await open({ format: 'folder_checklist', scope: 'active' }, STAFF_TOKEN);
+  record('Folder Checklist (active only, staff): customers with at least one active POLICY, correct counts',
+    act.rows.length - 1 === activeBy.size && act.res.policies === [...activeBy.values()].reduce((a, b) => a + b, 0),
+    `${act.rows.length - 1} customers (expected ${activeBy.size}), ${act.res.policies} active policies`);
+  const pd = await open({ format: 'policy_detail', scope: 'all' }, STAFF_TOKEN);
+  const pda = await open({ format: 'policy_detail', scope: 'active' }, ID_TOKEN);
+  const activeCount = policies.filter((p) => (p.status ?? 'active') === 'active').length;
+  record('Policy Detail (all / active): every policy, numbers as text, active = active policies only',
+    pd.rows.length - 1 === policies.length && pda.rows.length - 1 === activeCount && pd.cells.slice(1).every((c) => typeof c[1].value === 'string' && c[1].numFmt === '@')
+      && JSON.stringify(pd.rows[0]) === JSON.stringify(['Customer Name', 'Policy Number', 'Carrier', 'Policy Type', 'Effective Date', 'Expiration Date', 'Policy Status', 'Broker'])
+      && pda.rows.slice(1).every((r) => r[6] === 'Active'),
+    `all ${pd.rows.length - 1}/${policies.length}; active ${pda.rows.length - 1}/${activeCount}`);
+  const text = JSON.stringify([all.rows[0], pd.rows[0]]);
+  record('No financial columns in either export', !/commission|premium|rate|share|compensation|amount/i.test(text), text.slice(0, 160));
+  const buyer = await adminIdToken(cfg.apiKey, 'ci-smoke-buyer', 'buyer');
+  const pioneer = await adminIdToken(cfg.apiKey, 'ci-smoke-pioneer', 'pioneer');
+  const denied = [];
+  for (const [who, tok] of [['buyer', buyer], ['pioneer', pioneer]]) denied.push([who, (await expectRejected(call('exportBook', { format: 'folder_checklist', scope: 'all' }, 1, tok))).rejected]);
+  record('Export refused for buyer and Pioneer roles (admin and staff only)', denied.every(([, r]) => r), denied.map(([w, r]) => `${w}: ${r ? 'refused' : 'ALLOWED'}`).join(', '));
+  const ledgerAfter = (await db.collection('ledger').count().get()).data().count;
+  const audits = (await db.collection('auditLog').where('action', '==', 'export_book').get()).docs.filter((d) => Date.now() - (d.get('at')?.toMillis?.() ?? 0) < 15 * 60_000).length;
+  record('Exports changed nothing but the audit log', ledgerAfter === ledgerBefore && audits >= 4, `ledger ${ledgerBefore} → ${ledgerAfter}; ${audits} recent export audit entries`);
 }
 
 // ---------------------------------------------------------------- Stage 3C posting
@@ -642,6 +696,7 @@ try {
   try { ctx3b = await stage3b(); } catch (err) { record('Stage 3B matching run', false, err instanceof Error ? err.message : String(err)); }
   if (ctx3b) { try { await stage3c(ctx3b); } catch (err) { record('Stage 3C posting run', false, err instanceof Error ? err.message : String(err)); } }
   try { await buyoutStage(); } catch (err) { record('Broker buyout run', false, err instanceof Error ? err.message : String(err)); }
+  try { await exportStage(cfg); } catch (err) { record('Customer & Policy Export run', false, err instanceof Error ? err.message : String(err)); }
   try { await duplicateStage(); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
