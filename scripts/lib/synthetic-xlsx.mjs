@@ -89,3 +89,73 @@ export function oleFile(marker = 'Workbook', nonce = '') {
 export function htmlExport(nonce = '') {
   return new TextEncoder().encode(`<html><head><meta charset="utf-8"></head><body><!-- ${nonce} --><table><tr><td>Policy Number</td><td>Comm Amount</td></tr><tr><td>SYN100000</td><td>120.00</td></tr></table></body></html>`);
 }
+
+/** Any workbook from { name, rows } sheets (numbers stay numeric cells; strings shared or inline). */
+export function sheetsWorkbook(sheets, { prefix = '', inline = false } = {}) {
+  const x = prefix ? `${prefix}:` : '';
+  const ns = prefix ? `xmlns:${prefix}="http://schemas.openxmlformats.org/spreadsheetml/2006/main"` : 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+  const strings = []; const sIdx = (s) => { let k = strings.indexOf(s); if (k < 0) { strings.push(s); k = strings.length - 1; } return k; };
+  const colRef = (i) => (i < 26 ? String.fromCharCode(65 + i) : String.fromCharCode(64 + Math.floor(i / 26)) + String.fromCharCode(65 + (i % 26)));
+  const cell = (v, r, c) => {
+    const ref = ` r="${colRef(c)}${r}"`;
+    if (typeof v === 'number') return `<${x}c${ref}><${x}v>${v}</${x}v></${x}c>`;
+    if (v === '' || v === null || v === undefined) return '';
+    if (inline) return `<${x}c${ref} t="inlineStr"><${x}is><${x}t>${esc(v)}</${x}t></${x}is></${x}c>`;
+    return `<${x}c${ref} t="s"><${x}v>${sIdx(String(v))}</${x}v></${x}c>`;
+  };
+  const files = {
+    '[Content_Types].xml': '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+    '_rels/.rels': '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+    'xl/workbook.xml': `<?xml version="1.0"?><${x}workbook ${ns} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><${x}sheets>${sheets.map((s, i) => `<${x}sheet name="${esc(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')}</${x}sheets></${x}workbook>`,
+    'xl/_rels/workbook.xml.rels': `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join('')}<Relationship Id="rIdS" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>`,
+  };
+  sheets.forEach((s, i) => {
+    files[`xl/worksheets/sheet${i + 1}.xml`] = `<?xml version="1.0" encoding="UTF-8"?><${x}worksheet ${ns}><${x}sheetData>${s.rows.map((row, ri) => `<${x}row r="${ri + 1}">${row.map((v, ci) => cell(v, ri + 1, ci)).join('')}</${x}row>`).join('')}</${x}sheetData></${x}worksheet>`;
+  });
+  files['xl/sharedStrings.xml'] = `<?xml version="1.0"?><${x}sst ${ns} count="${strings.length}" uniqueCount="${strings.length}">${strings.map((s) => `<${x}si><${x}t>${esc(s)}</${x}t></${x}si>`).join('')}</${x}sst>`;
+  return zip(files);
+}
+
+/**
+ * A DetailedStatement with MVR chargebacks (fictional data): 20 columns incl. an ambiguous "Comm" column
+ * (deliberately NOT gross), Gross Comm and Net Due Agent; MVR charges appear as Net Due Agent < Gross Comm
+ * on the affected row, with "MVR" in Trans Type (or a separate MVR-only row with no commission).
+ *   mvr: [{ row: <0-based data row>, cents: <positive charge>, only?: true (an MVR-only row inserted there) }]
+ *   negatives: data-row indexes made cancellations (negative premium and commission)
+ *   summary: overrides { commissions, net, mvr } in cents (null = omit the label)
+ * Returns { sheets, bytes, grossCents, mvrCents, netCents, rows }.
+ */
+export const MVR_HEAD = ['Month End', 'Agency', 'Insured Name', 'Policy Number', 'Line', 'Trans Type', 'Eff Date', 'Exp Date', 'Trans Date', 'Cancel Date',
+  'Written Premium', 'Comm Rate', 'Comm', 'Gross Comm', 'State', 'Company', 'Net Due Agent', 'Term', 'Status', 'Notes'];
+export function mvrStatement({ rows = 94, mvr = [{ row: 10, cents: 18480 }], negatives = [3, 40], summary = {}, monthEnd = 202511, nonce = '', prefix = '', inline = false, mutate } = {}) {
+  const data = [];
+  for (let i = 0; i < rows; i++) {
+    const neg = negatives.includes(i);
+    const premC = (100000 + i * 1050) * (neg ? -1 : 1);
+    const grossC = Math.round(premC * 0.12);
+    data.push([monthEnd, 'SYN-001', `Synthetic Insured ${i + 1}`, `00${String(4000 + i)}`, i % 2 ? 'Personal Auto' : 'Homeowners', neg ? 'CN' : (i % 5 ? 'RN' : 'NB'),
+      `0${(i % 9) + 1}/01/2025`, `0${(i % 9) + 1}/01/2026`, '11/03/2025', neg ? '11/15/2025' : '01/01/0001',
+      premC / 100, 0.12, Math.round(grossC * 0.9) / 100, grossC / 100, 'NY', 'Synthetic Mutual', grossC / 100, 12, neg ? 'Cancelled' : 'Active', i === 0 ? nonce : '']);
+  }
+  // MVR charges, highest row first so inserted rows do not shift later ones
+  for (const m of [...mvr].sort((a, b) => b.row - a.row)) {
+    if (m.only) {
+      data.splice(m.row, 0, [monthEnd, 'SYN-001', `Synthetic Insured MVR ${m.row}`, `00${String(9000 + m.row)}`, 'Personal Auto', 'MVR', '', '', '11/05/2025', '01/01/0001', '', '', '', '', 'NY', 'Synthetic Mutual', -m.cents / 100, '', 'Active', 'MVR fee']);
+    } else {
+      const r = data[m.row];
+      r[16] = Math.round(r[13] * 100 - m.cents) / 100;
+      r[19] = 'MVR chargeback';
+    }
+  }
+  if (mutate) mutate(data);
+  const sum = (j) => data.reduce((t, r) => t + Math.round((typeof r[j] === 'number' ? r[j] : 0) * 100), 0);
+  const grossCents = sum(13); const netCents = sum(16); const mvrCents = netCents - grossCents;
+  const s = { commissions: grossCents, net: netCents, mvr: mvrCents, ...summary };
+  const summaryRows = [['Summary', 'Current', 'Year to Date'], ['Written Premium - Current', sum(10) / 100]];
+  // Year-to-date figures sit to the right of the current ones, as on carrier summaries.
+  if (s.commissions !== null) summaryRows.push(['Commissions - Current', s.commissions / 100, (s.commissions * 11) / 100]);
+  if (s.mvr !== null && s.mvr !== undefined) summaryRows.push(['MVR Charges', s.mvr / 100, (s.mvr * 3) / 100]);
+  if (s.net !== null) summaryRows.push(['Net Amount Due Agent', s.net / 100, (s.net * 11) / 100]);
+  const sheets = [{ name: 'Detailed', rows: [MVR_HEAD, ...data] }, { name: 'Summary', rows: summaryRows }];
+  return { sheets, bytes: sheetsWorkbook(sheets, { prefix, inline }), grossCents, mvrCents, netCents, rows: data };
+}

@@ -10,6 +10,7 @@ export * from './importPlan.js';
 export * from './excel.js';
 export * from './statements/types.js';
 export * from './statements/travelers.js';
+export * from './statements/detailedStatement.js';
 export * from './statements/reconcile.js';
 export * from './statements/ai.js';
 export * from './statements/anthropic.js';

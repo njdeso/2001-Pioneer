@@ -4,7 +4,7 @@ import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/fir
 import { ref as storageRef, uploadBytesResumable } from 'firebase/storage';
 import {
   formatBps, formatMonth, STATEMENT_CLASSIFICATION_LABELS, TRANSACTION_TYPE_LABELS,
-  type Cents, type StatementClassification, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment,
+  type Cents, type StatementClassification, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment, type SourceAccounting,
 } from '@asm/shared';
 import { db, storage } from '../firebase';
 import { api } from '../api';
@@ -44,6 +44,7 @@ interface StatementDoc {
   title?: string;
   stated?: StatedTotals;
   adjustments?: StatementAdjustment[];
+  sourceAccounting?: SourceAccounting | null;
   statementIssues?: LineIssue[];
   reconciliation?: ReconciliationResult;
   reconciled?: boolean;
@@ -70,7 +71,7 @@ const STATUS: Record<StatementDoc['status'], { label: string; tone: 'slate' | 'g
   posted: { label: 'Posted', tone: 'green' },
 };
 
-const METHOD: Record<string, string> = { 'travelers-pl-v1': 'Parsed (Travelers)', ai: 'AI (PDF)', 'table-ai': 'AI (spreadsheet)' };
+const METHOD: Record<string, string> = { 'travelers-pl-v1': 'Parsed (Travelers)', 'detailed-statement-v1': 'Parsed (Detailed Statement)', ai: 'AI (PDF)', 'table-ai': 'AI (spreadsheet)' };
 
 export function StatusBadge({ status }: { status: StatementDoc['status'] }) {
   const s = STATUS[status] ?? { label: status, tone: 'slate' as const };
@@ -356,7 +357,7 @@ export function StatementReviewPage() {
             </div>
           )}
           {stmt.failure.code.startsWith('ai_') && <div className="mt-1 text-xs">Use <Link className="underline" to="/settings">Settings → Test AI connection</Link> to check the key and model before retrying.</div>}
-          {(stmt.failure.code.startsWith('xlsx_') || stmt.failure.code.startsWith('table_') || stmt.failure.code === 'wrong_type') && (
+          {(stmt.failure.code.startsWith('xlsx_') || stmt.failure.code.startsWith('table_') || stmt.failure.code.startsWith('detailed_') || stmt.failure.code === 'wrong_type') && (
             <div className="mt-1 text-xs">
               <span className="font-mono">{stmt.failure.code}</span>{stmt.failure.detail ? <span className="font-mono"> · {stmt.failure.detail}</span> : null}
               <div className="mt-1">{stmt.failure.code === 'wrong_type' ? 'Upload the corrected file again; it goes into this same statement.' : 'Retry reads the same stored file again. If the file itself needs fixing (saved as .xlsx, password removed, sheet unhidden), discard this statement and upload the corrected file.'}</div>
@@ -412,13 +413,19 @@ export function StatementReviewPage() {
                     <td className="pl-3">{c.ok ? <span className="text-emerald-700">✓</span> : <span className="text-red-700">✕</span>}</td>
                   </tr>
                 ))}
-                {(stmt.adjustments ?? []).map((a) => (
-                  <tr key={a.label} className="border-t border-slate-100 text-xs text-slate-500">
-                    <td className="py-1 pl-4">Statement adjustment: {a.label}</td><td className="text-right"><Money cents={a.amountCents} /></td><td colSpan={3} />
+                {(stmt.adjustments ?? []).map((a, i) => (
+                  <tr key={`${i}-${a.label}`} className="border-t border-slate-100 text-xs text-slate-500">
+                    <td className="py-1 pl-4">Statement adjustment (agency only, not split with brokers): {a.label}</td><td className="text-right"><Money cents={a.amountCents} /></td><td colSpan={3} />
                   </tr>
                 ))}
               </tbody>
             </table>
+            {stmt.sourceAccounting && (
+              <p className="mt-2 text-xs text-slate-500">
+                Sheet “{stmt.sourceAccounting.sheet}”: {stmt.sourceAccounting.rows} rows read = {stmt.sourceAccounting.lineRows} commission lines + {stmt.sourceAccounting.adjustmentOnlyRows} MVR-only + {stmt.sourceAccounting.totalRows} total row(s).
+                {stmt.sourceAccounting.rowsWithErrors.length > 0 && <span className="text-red-700"> Rows with errors: {stmt.sourceAccounting.rowsWithErrors.join(', ')}.</span>}
+              </p>
+            )}
             {stmt.stated?.ytdCommissionPayableCents != null && <p className="mt-2 text-xs text-slate-500">Carrier year-to-date commission payable (reference): <Money cents={stmt.stated.ytdCommissionPayableCents} /></p>}
             {!rec.reconciled && (
               <ul className="mt-3 list-disc space-y-0.5 pl-5 text-sm text-red-700">{rec.blockingReasons.map((b, i) => <li key={i}>{b}</li>)}</ul>

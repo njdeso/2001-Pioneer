@@ -16,7 +16,10 @@
 //   4. 01/01/0001 placeholder dates: kept verbatim in the text; parsed as "no date" (blank)
 //   5. Month End values (e.g. 202511) kept verbatim; their YYYYMM reading
 //   6. no silent omission: rows with commission, commission total vs the Summary sheet; row limit
-//   7. what is NOT tested here: the AI extraction step
+//   7. what is NOT tested here: the AI extraction step (used only for layouts the built-in readers do not know)
+//   8. the deterministic DetailedStatement reader (the one production uses for this layout, no AI):
+//      lines at Gross Comm, MVR charges as agency-only adjustments, both Summary reconciliations,
+//      row accounting, and a SIMULATED broker/agency allocation with a clearly labelled test share
 import { readFileSync } from 'node:fs';
 import { basename, resolve as resolvePath } from 'node:path';
 import { createRequire } from 'node:module';
@@ -25,9 +28,14 @@ import { readXlsxLite } from '../packages/shared/src/xlsxLite.ts';
 import { excelRowsToText } from '../packages/shared/src/excel.ts';
 import { parseFlexibleDate } from '../packages/shared/src/importMap.ts';
 import { tableToText } from '../packages/shared/src/statements/ai.ts';
+import { readDetailedStatement } from '../packages/shared/src/statements/detailedStatement.ts';
+import { reconcileStatement } from '../packages/shared/src/statements/reconcile.ts';
+import { buildPostingPlan } from '../packages/shared/src/statements/posting.ts';
+import { commissionSplit } from '../packages/shared/src/statements/match.ts';
 
 const args = process.argv.slice(2);
 const file = args.find((a, i) => !a.startsWith('--') && !['--show-rows', '--exceljs-dir'].includes(args[i - 1] ?? ''));
+const TEST_BROKER_SHARE_BPS = 5000; // SIMULATION ONLY: a made-up 50 % broker share, no real broker or policy
 const showRows = args.includes('--show-rows') ? Number(args[args.indexOf('--show-rows') + 1]) || 0 : 0;
 const exceljsDir = args.includes('--exceljs-dir') ? args[args.indexOf('--exceljs-dir') + 1] : null;
 if (!file) { console.error('Usage: npx tsx scripts/inspect-statement-xlsx.mts <statement.xlsx> [--show-rows N]'); process.exit(2); }
@@ -208,9 +216,9 @@ else {
   const reconciled = commish.filter((c) => pairs.some((p) => p.cents === c.total));
   // One reconciling column: that is it. Several: the one tied to a due / payable / net / paid total.
   const paid = reconciled.length === 1 ? reconciled : reconciled.filter((c) => pairs.some((p) => p.cents === c.total && (paidLabel.test(p.label) || paidLabel.test(c.h))));
-  report(paid.length === 1 ? 'PASS' : reconciled.length ? 'INFO' : 'FAIL', '6d. Column that reconciles as the commission paid to the agency',
+  report(paid.length === 1 ? 'PASS' : reconciled.length ? 'INFO' : 'FAIL', '6d. Column that reconciles to the net payment to the agency',
     paid.length === 1
-      ? `"${paid[0].h}" — its Detailed total ${money(paid[0].total)} equals the Summary total ${pairs.filter((p) => p.cents === paid[0].total).map((p) => `"${p.label}"`).join(', ')}. This is the figure the statement reader must take as each line's paid commission, and the statement total it must reconcile to.`
+      ? `"${paid[0].h}" — its Detailed total ${money(paid[0].total)} equals the Summary total ${pairs.filter((p) => p.cents === paid[0].total).map((p) => `"${p.label}"`).join(', ')}. This is the amount the agency is paid for the month; how it is split into policy commission and agency-only charges is check 8.`
       : reconciled.length
         ? `${reconciled.length} commission columns equal Summary totals (${reconciled.map((c) => `"${c.h}"`).join(', ')}); which one is paid to the agency is not decided by the totals alone — see 6a/6b and confirm from the carrier's statement definitions.`
         : `no commission column total equals any Summary total — rows may be missing, or the Summary uses another basis. Do not process this statement until this is explained.`);
@@ -220,8 +228,83 @@ report(allRows <= TABLE_ROW_LIMIT ? 'PASS' : 'FAIL', '6e. Within the row limit (
 const text = tableToText(prod!.sheets.flatMap((s) => [[`# Sheet: ${s.name}`], ...s.rows]));
 report('INFO', '6f. Text the server would send to the statement reader', `${text.split('\n').length} lines, ${text.length.toLocaleString()} characters`);
 
+// ---------------------------------------------------------------- 8. deterministic DetailedStatement reader
+const det = readDetailedStatement(prod!.sheets);
+if (det.kind === 'not_this_layout') {
+  report('INFO', '8. Deterministic DetailedStatement reader', 'This workbook is not the DetailedStatement layout (no Gross Comm / Net Due Agent columns), so production would use the AI statement reader for it (see 7).');
+} else if (det.kind === 'incomplete') {
+  report('FAIL', '8. Deterministic DetailedStatement reader', `${det.code}: ${det.message}\n${det.detail}\nProduction refuses this file with that message; it is not sent to the AI.`);
+} else {
+  const { statement: st, report: rp } = det;
+  const acc = st.sourceAccounting!;
+  const rec = reconcileStatement(st);
+  const allIssues = [...st.issues, ...st.lines.flatMap((l) => l.issues.map((i) => ({ ...i, text: `line ${l.lineNo}: ${i.text}` })))];
+  const errs = allIssues.filter((i) => i.level === 'error');
+  const warns = allIssues.filter((i) => i.level === 'warning');
+  const col = (r: string) => (rp.columns[r] ? `"${rp.columns[r].header}" (column ${rp.columns[r].index + 1})` : '(none)');
+  const mvrAdj = st.adjustments.filter((a) => a.source?.kind === 'mvr');
+  report('INFO', '8a. Layout recognized: DetailedStatement (deterministic reader, no AI)', [
+    `sheets: "${rp.sheet}" (header at row ${rp.headerRow}) and "${rp.summarySheet}"`,
+    `gross commission (paid on each line, split with brokers): ${col('gross')}`,
+    `net due agent (reconciliation only): ${col('net')}`,
+    `ignored, never used as commission: ${col('comm')}${rp.ignoredCommTotalCents !== null ? `, total ${money(rp.ignoredCommTotalCents)}` : ''}`,
+    `month: ${col('monthEnd')}; policy number: ${col('policy')}; insured: ${col('insured')}; transaction type: ${col('transType')}; effective date: ${col('effDate')}; MVR column: ${col('mvr')}`,
+  ].join('\n'));
+  report(errs.length ? 'FAIL' : 'PASS', '8b. Every transaction accounted for', [
+    `transactions read (data rows): ${acc.rows}`,
+    `policy commission lines: ${acc.lineRows} (${st.lines.filter((l) => (l.paidCommissionCents ?? 0) < 0).length} negative, ${st.lines.filter((l) => l.transactionType === 'cancellation').length} cancellations)`,
+    `MVR-only rows (adjustment, no line): ${acc.adjustmentOnlyRows}; verified total rows (not counted again): ${acc.totalRows}`,
+    `${acc.rows} = ${acc.lineRows} + ${acc.adjustmentOnlyRows} + ${acc.totalRows}: ${acc.lineRows + acc.adjustmentOnlyRows + acc.totalRows === acc.rows ? 'every row used once — none omitted' : 'MISMATCH'}`,
+    `rows rejected (with errors, block approval): ${acc.rowsWithErrors.length ? acc.rowsWithErrors.join(', ') : 'none'}`,
+    `identical rows (all kept): ${acc.identicalRowGroups.length ? acc.identicalRowGroups.map((g) => g.join(' & ')).join('; ') : 'none'}`,
+  ].join('\n'));
+  report('INFO', '8c. Commission and the MVR adjustment', [
+    `gross policy commissions (Σ Gross Comm): ${money(rp.grossTotalCents)}`,
+    `agency-only adjustments: ${st.adjustments.length} (${mvrAdj.length} MVR), total MVR chargebacks ${money(rp.mvr.totalCents)}${rp.mvr.identifiedBy.length ? ` — identified by ${rp.mvr.identifiedBy.join(' and ')}` : ''}`,
+    ...mvrAdj.map((a) => `  Detailed row ${a.source!.sheetRow}: ${money(a.amountCents)} — ${a.source!.lineNo ? `its policy line ${a.source!.lineNo} keeps its gross commission` : 'MVR-only row, no policy line'}${showRows && a.source!.policyNumberRaw ? ` (policy ${a.source!.policyNumberRaw})` : ''}`),
+    `net agency payment (gross + adjustments): ${money(rec.totals.commissionCents + rec.totals.adjustmentsCents)}`,
+    `Σ Net Due Agent column: ${money(rp.netColumnTotalCents)}`,
+    `statement month: ${st.statementMonth ?? '(not determined)'} (Month End ${rp.monthEndValues.join(', ')})`,
+    `Summary: Commissions - Current ${rp.summary.commissionsCurrentCents === null ? 'not found' : money(rp.summary.commissionsCurrentCents)}; Net Amount Due Agent ${rp.summary.netAmountDueAgentCents === null ? 'not found' : money(rp.summary.netAmountDueAgentCents)}${rp.summary.mvrCents !== null ? `; MVR ${money(rp.summary.mvrCents)}` : ''}`,
+  ].join('\n'));
+  report(rec.reconciled ? 'PASS' : 'FAIL', '8d. Reconciliation (exact to the cent; approval and posting are blocked unless all pass)', [
+    ...rec.checks.map((c) => `${c.ok ? 'ok  ' : 'FAIL'} ${c.label}: ${c.statedCents === null ? 'carrier total not found' : `carrier ${money(c.statedCents)}, statement ${money(c.extractedCents)}`}`),
+    ...rp.checks.filter((c) => !['gross_vs_summary', 'net_vs_summary'].includes(c.key)).map((c) => `${c.ok ? 'ok  ' : 'FAIL'} ${c.label}${c.detail ? ` (${c.detail})` : ''}`),
+    ...(errs.length ? [`errors (${errs.length}):`, ...errs.slice(0, 15).map((e) => `  ${e.code}: ${e.text}`)] : []),
+    ...(warns.length ? [`warnings (${warns.length}, do not block):`, ...warns.slice(0, 10).map((e) => `  ${e.code}: ${e.text}`)] : []),
+  ].join('\n'));
+
+  // SIMULATED allocation: every line matched to a made-up policy owned by a made-up broker at 50 %.
+  try {
+    const lines = st.lines.map((l) => {
+      const amt = l.paidCommissionCents ?? 0;
+      const sp = commissionSplit(amt, TEST_BROKER_SHARE_BPS);
+      return {
+        id: String(l.lineNo).padStart(5, '0'), lineNo: l.lineNo, insuredName: '', policyNumberRaw: '', paidCommissionCents: l.paidCommissionCents, transactionType: l.transactionType, effectiveDate: l.effectiveDate,
+        match: { status: 'matched', method: 'auto', confidence: 'high', policyId: `TEST-POLICY-${l.lineNo}`, clientId: 'TEST-CLIENT', carrierId: 'TEST-CARRIER', brokerId: 'TEST-BROKER', brokerShareBps: TEST_BROKER_SHARE_BPS, brokerShareSource: 'broker', commissionCents: amt, brokerCents: sp.brokerCents, agencyCents: sp.agencyCents, reasons: [], candidates: [], policyNumberKey: null, nameEvidence: 'strong', engineVersion: 'simulation' },
+      };
+    });
+    const plan = buildPostingPlan({ id: 'SIMULATION', status: 'needs_review', payerId: 'TEST-CARRIER', payerKind: 'carrier', statementMonth: st.statementMonth ?? '2000-01', statementDate: null, adjustments: st.adjustments, postedCents: 0, postingSeq: 0, matching: { stale: false, balanced: true } }, lines as never);
+    const out: string[] = [`SIMULATION ONLY — test broker share ${TEST_BROKER_SHARE_BPS / 100} % on every line; no real broker, policy or ledger involved`];
+    for (const a of mvrAdj) {
+      const e = a.source!.lineNo ? plan.entries.find((x) => x.lineNo === a.source!.lineNo) : null;
+      if (e) out.push(`affected transaction (line ${e.lineNo}): gross ${money(e.amountCents)} → test broker ${money(e.brokerCents)} + agency ${money(e.agencyCents)} (NOT reduced by the MVR)`);
+    }
+    // Labels carry the policy number: hidden unless --show-rows was given.
+    const label = (t: string) => (showRows ? t : t.replace(/, policy [^)]*\)/, ', policy hidden)'));
+    for (const e of plan.entries.filter((x) => x.level === 'carrier')) out.push(`agency-only adjustment entry "${label(e.note)}": ${money(e.amountCents)} → broker ${money(e.brokerCents)}, agency ${money(e.agencyCents)}`);
+    out.push(`whole statement: ${plan.entries.length} entries, total ${money(plan.totals.amountCents)} = test broker ${money(plan.totals.brokerCents)} + agency ${money(plan.totals.agencyCents)}; balanced: ${plan.balanced}`);
+    const brokerOk = plan.entries.filter((x) => x.level === 'carrier').every((x) => x.brokerCents === 0);
+    report(plan.balanced && brokerOk ? 'PASS' : 'FAIL', '8e. Simulated broker / agency allocation', out.join('\n'));
+  } catch (e) {
+    report('INFO', '8e. Simulated broker / agency allocation', `not simulated: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 // ---------------------------------------------------------------- 7. not tested
-report('INFO', '7. NOT TESTED here: the AI extraction step', 'Turning these rows into statement lines (statement month, carrier, each line\'s commission, reconciliation) is done by the AI statement reader in Cloud Functions. It was tested live in dev with a SYNTHETIC workbook of this layout (12 rows, reconciled exactly), NOT with this file. This script makes no AI call and sends nothing anywhere.');
+report('INFO', '7. NOT TESTED here: the AI extraction step', det.kind === 'not_this_layout'
+  ? 'Turning these rows into statement lines is done by the AI statement reader in Cloud Functions for this layout. This script makes no AI call and sends nothing anywhere.'
+  : 'Not needed for this workbook: production reads the DetailedStatement layout with the deterministic reader above (check 8), never the AI. This script makes no AI call and sends nothing anywhere.');
 finish();
 
 function finish(): never {

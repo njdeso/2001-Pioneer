@@ -17,6 +17,11 @@
 //                            the specified $339.04 example, a two-term policy and a cancelled policy (no clawback);
 //                            adjustment re-settles installments; reviewed locks adjustments; finalize refused
 //                            when data changed since the snapshot, or while blockers remain; no ledger writes)
+//   9. DetailedStatement     (synthetic Excel workbook of the carrier DetailedStatement layout with MVR charges, read by
+//      with MVR charges     the deterministic reader — no AI: lines at Gross Comm, MVR charges as agency-only adjustments,
+//                            exact reconciliation; matching, approval and posting split brokers on gross (50 % / 40 % / 30 %)
+//                            and post the MVR charges once, 100 % agency; wrong Summary totals and an unexplained deduction
+//                            are held as discrepancies and cannot be approved; everything reversed and discarded after)
 //   6. Stage 3C posting     (same statement: approval blocked until ambiguous/unreviewed lines are
 //                            resolved; staff cannot approve or post; approve; matching locked; concurrent
 //                            and repeated posting post exactly once; ledger entries, allocations, suspense,
@@ -279,6 +284,115 @@ async function stage3b() {
   record('Nothing posted to financial reports', ledgerAfter === ledgerBefore && ledgerForStmt === 0 && (stmt.postedCents ?? 0) === 0,
     `ledger entries ${ledgerBefore} → ${ledgerAfter}; for this statement ${ledgerForStmt}; posted ${$(stmt.postedCents ?? 0)}`);
   return { sid, ref, policiesBefore, linesBefore };
+}
+
+// ---------------------------------------------------------------- DetailedStatement with MVR charges (Option B)
+// Business rule (owner, PR #9): brokers are paid on GROSS commission; MVR chargebacks are agency-only.
+// Synthetic statement for SYN3B-MUTUAL, month 2025-09 (outside the Stage 3C report window). Every run reverses
+// its posting and discards its statements through the app's own callables, so dev ends net zero.
+const MVR_MONTH = '2025-09';
+function mvrWorkbook(nonce, { summaryNet = null, unexplained = false } = {}) {
+  const r = (pol, name, type, gross, net, notes = '') => [202509, 'DEV001', name, pol, 'Commercial Auto', type, '09/01/2025', '09/01/2026', '09/03/2025', '01/01/0001',
+    gross === '' ? '' : gross * 10, gross === '' ? '' : 0.1, gross === '' ? '' : Math.round(gross * 90) / 100, gross, 'NY', 'Synthetic Mutual Insurance Co (TEST)', net, 12, 'Active', notes];
+  const rows = [
+    r('SYN-1001', 'Alpha Synthetic Trucking LLC', 'RN', 120, unexplained ? 110 : 101.52, unexplained ? '' : 'MVR chargeback'), // B50 50 %, MVR 18.48 on this policy
+    r('SYN-1002', 'Beta Synthetic Cab Corp', 'EN', 50, 50),                    // B40 40 %
+    r('SYN-1006', 'Zeta Synthetic Logistics', 'CN', -45, -45),                 // per-policy 30 %, cancellation
+    r('0045678', 'Epsilon Synthetic Services', 'RN', 25, 25, `SMOKE ${nonce}`), // unassigned, leading zeros
+    r('617738486', 'Delta Synthetic Limo', 'MVR', '', -12.25, 'MVR fee'),      // MVR-only row: no commission
+  ];
+  // Gross 150.00. Net Due Agent: 101.52 + 50 − 45 + 25 − 12.25 = 119.27 (or 127.75 with the unexplained 10.00 deduction,
+  // so that only the row itself is wrong). The Summary carries the column totals unless told otherwise.
+  const gross = 15000; const net = unexplained ? 12775 : 11927;
+  const summary = [['Summary', 'Current'], ['Commissions - Current', gross / 100], ['Net Amount Due Agent', (summaryNet ?? net) / 100]];
+  return SX.sheetsWorkbook([{ name: 'Detailed', rows: [SX.MVR_HEAD, ...rows] }, { name: 'Summary', rows: summary }], { prefix: 'x', inline: true });
+}
+
+async function detailedMvrStage(cfg) {
+  summary('\n#### DetailedStatement with MVR chargebacks — deterministic reader, brokers on gross, MVR agency-only (synthetic)\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  await seedBook(db, FieldValue);
+  // Housekeeping: earlier runs' statements for this payer and month (reversed or held) are discarded first.
+  const old = (await db.collection('statements').where('payerId', '==', PAYER_ID).where('statementMonth', '==', MVR_MONTH).get()).docs
+    .filter((d) => ['needs_review', 'discrepancy', 'approved'].includes(d.get('status')) && Number(d.get('postedCents') ?? 0) === 0 && String(d.get('fileName') ?? '').startsWith('SMOKE-mvr'));
+  for (const d of old) {
+    if (d.get('status') === 'approved') await call('unapproveStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+    await call('discardStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+  }
+  const upload = async (label, bytes) => {
+    const n = randomUUID().slice(0, 8);
+    const r = await call('registerStatementUpload', { fileName: `SMOKE-mvr-${label}-${n}.xlsx`, sha256: sha256hex(bytes), size: bytes.length });
+    await putFile(cfg.storageBucket, r.uploadPath, bytes, XLSX_TYPE);
+    const p = await call('processStatement', { statementId: r.statementId, method: 'auto' });
+    return { sid: r.statementId, p, doc: (await db.collection('statements').doc(r.statementId).get()).data() };
+  };
+  const cleanup = [];
+  try {
+    // 1. Read: deterministic reader, gross lines, MVR adjustments, exact reconciliation
+    const nonce = randomUUID().slice(0, 8);
+    const { sid, p, doc } = await upload('ok', mvrWorkbook(nonce));
+    cleanup.push(sid);
+    const adj = doc.adjustments ?? [];
+    const lines = (await db.collection('statements').doc(sid).collection('lines').get()).docs.map((d) => d.data());
+    const recChecks = (doc.reconciliation?.checks ?? []).map((c) => `${c.key} ${$(c.statedCents)}/${$(c.extractedCents)} ${c.ok ? 'ok' : 'FAIL'}`).join('; ');
+    record('DetailedStatement read without AI (deterministic reader)', doc.method === 'detailed-statement-v1' && p.status === 'needs_review' && p.reconciled === true, `${describe(p)}; method ${doc.method}; month ${doc.statementMonth}; ${recChecks}`);
+    const alpha = lines.find((l) => l.policyNumberRaw === 'SYN-1001');
+    record('Lines at Gross Comm; MVR charges are separate agency-only adjustments, each once',
+      lines.length === 4 && lines.reduce((t, l) => t + l.paidCommissionCents, 0) === 15000 && alpha?.paidCommissionCents === 12000
+        && adj.length === 2 && adj.reduce((t, a) => t + a.amountCents, 0) === -3073 && adj.every((a) => a.source?.kind === 'mvr')
+        && doc.sourceAccounting?.rows === 5 && doc.sourceAccounting?.lineRows === 4 && doc.sourceAccounting?.adjustmentOnlyRows === 1
+        && lines.some((l) => l.policyNumberRaw === '0045678') && doc.statementMonth === MVR_MONTH,
+      `${lines.length} lines, gross ${$(lines.reduce((t, l) => t + l.paidCommissionCents, 0))}; MVR line keeps ${$(alpha?.paidCommissionCents)}; adjustments ${adj.map((a) => $(a.amountCents)).join(', ')}; rows ${doc.sourceAccounting?.rows} = ${doc.sourceAccounting?.lineRows} lines + ${doc.sourceAccounting?.adjustmentOnlyRows} MVR-only`);
+
+    // 2. Matching and approval: brokers on gross
+    await call('runStatementMatching', { statementId: sid });
+    const pre = await call('checkStatementDuplicates', { statementId: sid });
+    for (const f of (pre.findings ?? []).filter((x) => !x.hard && !x.confirmed)) {
+      await call('setStatementClassification', { statementId: sid, classification: 'other' });
+      if (!f.other.classification) await call('setStatementClassification', { statementId: f.otherId, classification: 'other' });
+      await call('confirmSeparateStatement', { statementId: sid, otherStatementId: f.otherId, reason: 'smoke test: separate synthetic statement (dev only)' });
+    }
+    const ap = await call('approveStatement', { statementId: sid, note: 'smoke: DetailedStatement MVR' });
+    const want = { entries: 6, amountCents: 11927, brokerCents: 6650, agencyCents: 5277, adjustmentsCents: -3073 };
+    const apErr = Object.entries(want).filter(([k, v]) => ap.totals[k] !== v).map(([k, v]) => `${k} ${ap.totals[k]} ≠ ${v}`);
+    record('Approval plan: total = net payment; broker share only from gross policy commission', ap.status === 'approved' && apErr.length === 0,
+      `${ap.totals.entries} entries, ${$(ap.totals.amountCents)}; broker ${$(ap.totals.brokerCents)}, agency ${$(ap.totals.agencyCents)}, adjustments ${$(ap.totals.adjustmentsCents)}${apErr.length ? ` — ${apErr.join('; ')}` : ''}`);
+
+    // 3. Post and inspect the ledger
+    await call('postStatement', { statementId: sid });
+    const entries = (await db.collection('ledger').where('statementId', '==', sid).get()).docs.map((d) => d.data()).filter((e) => !e.reversalOf);
+    const a = entries.find((e) => e.policyNumberRaw === 'SYN-1001');
+    const carrier = entries.filter((e) => e.level === 'carrier');
+    record('Ledger: MVR policy split 50/50 on gross; MVR posted once per charge, 100 % agency, no policy',
+      entries.length === 6 && a?.amountCents === 12000 && a?.brokerShareBps === 5000 && a?.brokerCents === 6000 && a?.agencyCents === 6000
+        && carrier.length === 2 && carrier.every((e) => e.brokerCents === 0 && e.agencyCents === e.amountCents && e.policyId === null && e.brokerShareBps === 0)
+        && carrier.reduce((t, e) => t + e.amountCents, 0) === -3073 && !entries.some((e) => e.level === 'policy' && e.amountCents < 0 && e.policyNumberRaw === '617738486'),
+      `MVR policy ${$(a?.amountCents)} → broker ${$(a?.brokerCents)} @${(a?.brokerShareBps ?? 0) / 100}% / agency ${$(a?.agencyCents)}; MVR entries ${carrier.map((e) => `${$(e.amountCents)} (broker ${$(e.brokerCents)})`).join(', ')}; total ${$(entries.reduce((t, e) => t + e.amountCents, 0))}`);
+    await call('reverseStatementPosting', { statementId: sid, reason: 'smoke test: DetailedStatement cleanup' });
+    const net = (await db.collection('ledger').where('statementId', '==', sid).get()).docs.reduce((t, d) => t + d.get('amountCents'), 0);
+    record('Reversed: the synthetic posting nets to zero', net === 0, `net ${$(net)}`);
+
+    // 4. Inconsistent workbooks are held as discrepancies and cannot be approved (never guessed)
+    for (const [label, bytes, re] of [
+      ['badsummary', mvrWorkbook(randomUUID().slice(0, 8), { summaryNet: 11928 }), /Net agency payment/],
+      ['unexplained', mvrWorkbook(randomUUID().slice(0, 8), { unexplained: true }), /line error|nothing on the row identifies/],
+    ]) {
+      const bad = await upload(label, bytes);
+      cleanup.push(bad.sid);
+      const blocked = await expectRejected(call('approveStatement', { statementId: bad.sid }));
+      const reasons = (bad.doc.reconciliation?.blockingReasons ?? []).join('; ');
+      record(`Inconsistent DetailedStatement (${label}) is a discrepancy and cannot be approved`, bad.p.status === 'discrepancy' && bad.p.reconciled === false && blocked.rejected && re.test(reasons),
+        `${describe(bad.p)}; approve refused: ${blocked.rejected}; ${reasons.slice(0, 200)}`);
+    }
+  } finally {
+    for (const id of cleanup) {
+      const st = (await db.collection('statements').doc(id).get()).get('status');
+      if (st === 'approved') await call('unapproveStatement', { statementId: id, reason: 'smoke test cleanup (dev only)' });
+      if (['needs_review', 'discrepancy', 'approved', 'extraction_failed'].includes(st)) await call('discardStatement', { statementId: id, reason: 'smoke test cleanup (dev only)' });
+    }
+    record('Cleanup: synthetic DetailedStatement statements discarded via discardStatement', true, `${cleanup.length} discarded`);
+  }
 }
 
 // ---------------------------------------------------------------- Stage 3C posting
@@ -673,6 +787,7 @@ try {
   if (ctx3b) { try { await stage3c(ctx3b); } catch (err) { record('Stage 3C posting run', false, err instanceof Error ? err.message : String(err)); } }
   try { await buyoutStage(); } catch (err) { record('Broker buyout run', false, err instanceof Error ? err.message : String(err)); }
   try { await duplicateStage(); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
+  try { await detailedMvrStage(cfg); } catch (err) { record('DetailedStatement MVR run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
 }

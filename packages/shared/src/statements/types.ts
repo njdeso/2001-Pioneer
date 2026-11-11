@@ -72,7 +72,29 @@ export interface StatedTotals {
   ytdCommissionPayableCents: Cents | null; // informational
 }
 
-export interface StatementAdjustment { label: string; amountCents: Cents }
+export interface StatementAdjustment {
+  label: string;
+  amountCents: Cents;
+  /** Where a deterministic reader found it (e.g. an MVR charge on one Detailed row). Absent for AI / PDF adjustments. */
+  source?: { sheet: string; sheetRow: number; kind: 'mvr'; policyNumberRaw: string; lineNo: number | null };
+}
+
+/** How every source row of a spreadsheet statement was used (deterministic readers only). */
+export interface SourceAccounting {
+  sheet: string;
+  /** Data rows below the header. */
+  rows: number;
+  /** Rows that became statement lines (policy commission at gross). */
+  lineRows: number;
+  /** Rows that are only an agency-only adjustment (e.g. an MVR charge with no commission). */
+  adjustmentOnlyRows: number;
+  /** Carrier subtotal / total rows, verified against the rows above and not counted again. */
+  totalRows: number;
+  /** Rows with an error (also listed in the statement or line issues). They block approval. */
+  rowsWithErrors: number[];
+  /** Exact-duplicate rows (all kept). */
+  identicalRowGroups: number[][];
+}
 
 export interface ExtractedStatement {
   carrierName: string;
@@ -88,9 +110,13 @@ export interface ExtractedStatement {
   lines: ExtractedLine[];
   /** Problems with the statement as a whole (missing header, unreadable totals…). */
   issues: LineIssue[];
+  /** Deterministic spreadsheet readers: how each source row was used. */
+  sourceAccounting?: SourceAccounting;
+  /** Labels for the two required reconciliation checks, in the statement's own terms. */
+  checkLabels?: { commission: string; monthPayable: string };
 }
 
-export type ExtractionMethod = 'travelers-pl-v1' | 'ai' | 'table-ai';
+export type ExtractionMethod = 'travelers-pl-v1' | 'detailed-statement-v1' | 'ai' | 'table-ai';
 
 export interface ReconciliationCheck {
   key: 'commission' | 'monthPayable' | 'paymentReceived' | 'premiumForCommission' | 'transactionPremium' | 'fee';
