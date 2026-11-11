@@ -1,0 +1,39 @@
+# Throwaway diagnostic (no secrets, no deploy): reproduce a fresh install as a user would, then check that
+# exceljs loads (1) from the workspace root, as the inspection script does, and (2) from a clean
+# functions-only install, as Cloud Functions installs it.
+name: Probe exceljs install
+on:
+  push:
+    branches: [probe/exceljs-install]
+permissions: {}
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node }}' }
+      - name: Fresh workspace install (like a new clone in Cloud Shell)
+        run: |
+          node -v; npm -v
+          npm install --no-audit --no-fund 2>&1 | tail -3
+      - name: exceljs from the workspace root
+        run: |
+          node -e "import('exceljs').then(m=>console.log('ROOT exceljs OK', typeof (m.default??m).Workbook)).catch(e=>{console.log('ROOT exceljs FAIL', e.code, e.message.split('\n')[0])})"
+          npx tsx -e "import('exceljs').then(m=>console.log('ROOT-TSX exceljs OK', typeof (m.default??m).Workbook)).catch(e=>console.log('ROOT-TSX exceljs FAIL', e.code, String(e.message).split('\n')[0]))" || true
+          echo "--- who requires es-abstract/2025 ---"
+          grep -rl "es-abstract/2025" node_modules --include=*.js 2>/dev/null | sed 's#node_modules/##' | awk -F/ '{print ($1 ~ /^@/ ? $1"/"$2 : $1)}' | sort | uniq -c | sort -rn | head -15
+          echo "--- es-abstract copies ---"
+          find node_modules -name package.json -path '*node_modules/es-abstract/package.json' | while read p; do echo "$p $(node -p "require('./$p').version")"; done | head
+          echo "--- exceljs dependency path ---"
+          npm ls exceljs 2>&1 | head; npm explain es-abstract 2>&1 | head -40 || true
+      - name: Clean functions-only install (like Cloud Functions)
+        run: |
+          mkdir /tmp/fn && cp functions/package.json /tmp/fn/ && cd /tmp/fn
+          npm install --omit=dev --no-audit --no-fund 2>&1 | tail -2
+          node -e "import('exceljs').then(m=>console.log('FUNCTIONS exceljs OK', typeof (m.default??m).Workbook)).catch(e=>{console.log('FUNCTIONS exceljs FAIL', e.code, e.message.split('\n')[0])})"
+          npm ls es-abstract 2>&1 | head -10 || true
