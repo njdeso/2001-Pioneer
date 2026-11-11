@@ -73,10 +73,15 @@ test('ambiguous, never-matched and unreviewed unmatched commission lines block; 
   assert.deepEqual(r2.warnings.find((w) => w.code === 'suspense')?.lineNos, [6]);
 });
 
-test('possible duplicate statement must be acknowledged', () => {
-  assert.ok(postingReadiness(stmt({ possibleDuplicateOf: 'S0' }), ready()).blockers.some((b) => b.code === 'possible_duplicate'));
-  assert.ok(postingReadiness(stmt(), ready(), { otherPostedSameMonth: ['S9'] }).blockers.some((b) => b.code === 'possible_duplicate'));
-  assert.equal(postingReadiness(stmt({ possibleDuplicateOf: 'S0' }), ready(), { duplicateAcknowledged: true }).ready, true);
+test('same-month statements: unconfirmed blocks, confirmed passes, an identical statement always blocks', () => {
+  const f = (o: Record<string, unknown>) => ({ otherId: 'S0', other: { fileName: 'other.pdf', status: 'posted', classification: null, agencyCode: null, officeCode: null, statementDate: null, title: '', statedTotalCents: null, postedCents: 0, lineCount: 3 }, relation: 'separate', hard: false, sharedLines: 0, thisLines: 3, otherLines: 3, evidence: [], confirmation: null, confirmed: false, ...o }) as never;
+  assert.ok(postingReadiness(stmt(), ready(), { duplicates: [f({})] }).blockers.some((b) => b.code === 'possible_duplicate'));
+  assert.equal(postingReadiness(stmt(), ready(), { duplicates: [f({ confirmed: true })] }).ready, true);
+  assert.equal(postingReadiness(stmt(), ready(), { duplicates: [f({})], legacyDuplicateAcknowledged: true }).ready, true, 'pre-existing approval acknowledgement still honoured');
+  const hard = postingReadiness(stmt(), ready(), { duplicates: [f({ relation: 'identical', hard: true, sharedLines: 3 })], legacyDuplicateAcknowledged: true });
+  assert.ok(hard.blockers.some((b) => b.code === 'duplicate_statement'), 'nothing unlocks an identical statement');
+  // possibleDuplicateOf on old records no longer blocks by itself; the server's content check decides.
+  assert.equal(postingReadiness(stmt({ possibleDuplicateOf: 'S0' }), ready(), { duplicates: [] }).ready, true);
 });
 
 // ---- plan ----------------------------------------------------------------------------------

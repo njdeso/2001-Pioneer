@@ -9,8 +9,10 @@ import {
   DEFAULT_AI_MODEL, AI_PROMPT_VERSION, TRAVELERS_PL_PARSER, extractWithClaude, isTravelersPlStatement, normalizeName,
   parseCsv, parseTravelersPl, reconcileStatement, tableToText,
   type ExtractedStatement, type ExtractionMethod,
+  type DupLine,
 } from '@asm/shared';
 import { audit, db, FieldValue, idParam, meta, parse, requireRole, type Actor } from '../lib/core.js';
+import { duplicateFindings } from '../lib/duplicates.js';
 
 /**
  * Stage 3A — statement upload, extraction and reconciliation.
@@ -314,21 +316,16 @@ export const processStatement = onCall(
       const rec = reconcileStatement(s);
       const payer = await resolvePayer(s);
 
-      // ---- Same statement already loaded under a different file? ----
-      let possibleDuplicateOf: string | null = null;
-      if (payer.payerId && s.statementMonth) {
-        const identityRef = db.collection('statementIdentity').doc(`${payer.payerId}_${s.agencyCode ?? 'NA'}_${s.statementMonth}`);
-        possibleDuplicateOf = await db.runTransaction(async (tx) => {
-          const snap = await tx.get(identityRef);
-          const other = snap.exists ? (snap.get('statementId') as string) : null;
-          if (other && other !== statementId) {
-            const otherDoc = await tx.get(db.collection('statements').doc(other));
-            if (otherDoc.exists && otherDoc.get('status') !== 'discarded') return other;
-          }
-          tx.set(identityRef, { statementId, at: FieldValue.serverTimestamp() });
-          return null;
-        });
-      }
+      // ---- Other statements from this payer for this month (compared by content) ----
+      // Several statements a month are normal (e.g. Personal and Commercial Lines). This is informational;
+      // approval and posting always re-check (functions/src/lib/duplicates.ts). The old carrier+agency+month
+      // identity records (statementIdentity) are left as they are and no longer used.
+      const dupCheck = await duplicateFindings(statementId, {
+        status: rec.reconciled ? 'needs_review' : 'discrepancy', fileName: doc.fileName, payerId: payer.payerId, statementMonth: s.statementMonth,
+        classification: doc.classification ?? null, agencyCode: s.agencyCode, officeCode: s.officeCode, statementDate: s.statementDate, title: s.title,
+        statementTotalCents: s.stated.monthCommissionPayableCents ?? s.stated.commissionPayableCents, postedCents: 0, separateConfirmations: doc.separateConfirmations ?? {},
+      }, s.lines as unknown as DupLine[]);
+      const possibleDuplicateOf: string | null = dupCheck.findings.find((f) => !f.confirmed)?.otherId ?? null;
 
       await replaceLines(ref, s, payer.payerId);
       const runRef = db.collection('extractionRuns').doc();
@@ -352,6 +349,9 @@ export const processStatement = onCall(
         payerId: payer.payerId,
         payerNote: payer.note,
         possibleDuplicateOf,
+        title: s.title,
+        contentDigest: dupCheck.current.digest,
+        duplicateCheck: { at: new Date().toISOString(), others: dupCheck.findings.length, sameStatement: dupCheck.findings.filter((f) => f.hard).length, unconfirmed: dupCheck.findings.filter((f) => !f.hard && !f.confirmed).length },
         statementTotalCents: s.stated.monthCommissionPayableCents ?? s.stated.commissionPayableCents,
         extractedCommissionCents: rec.totals.commissionCents,
         postedCents: 0,

@@ -6,6 +6,7 @@ import {
   type PostingLine, type PostingStatement,
 } from '@asm/shared';
 import { audit, db, FieldValue, parse, requireRole, type Actor } from '../lib/core.js';
+import { duplicateFindings } from '../lib/duplicates.js';
 
 /**
  * Stage 3C — statement approval, commission posting and reversal. ADMIN ONLY (staff can view).
@@ -32,10 +33,8 @@ async function loadForPosting(tx: Transaction, statementId: string) {
   const s = snap.data()!;
   const linesSnap = await tx.get(ref.collection('lines'));
   const payerSnap = s.payerId ? await tx.get(db.collection('carriers').doc(String(s.payerId))) : null;
-  const others = s.payerId && s.statementMonth
-    ? (await tx.get(db.collection('statements').where('payerId', '==', s.payerId).where('statementMonth', '==', s.statementMonth).where('status', '==', 'posted')))
-      .docs.filter((d) => d.id !== statementId).map((d) => d.id)
-    : [];
+  // Every other live statement from this payer for this month, compared by content (same transaction).
+  const { findings: duplicates } = await duplicateFindings(statementId, s, linesSnap.docs.map((d) => d.data()), tx);
   const stmt: PostingStatement = {
     id: statementId,
     status: String(s.status),
@@ -57,7 +56,7 @@ async function loadForPosting(tx: Transaction, statementId: string) {
       transactionType: l.transactionType, effectiveDate: l.effectiveDate ?? null, match: l.match ?? null,
     };
   });
-  return { ref, raw: s, stmt, lines, others };
+  return { ref, raw: s, stmt, lines, duplicates };
 }
 
 function blockersError(r: ReturnType<typeof postingReadiness>): HttpsError {
@@ -79,9 +78,11 @@ export const approveStatement = onCall(async (req) => {
   const actor = requireRole(req, ['admin']);
   const input = parse(approveInput, req.data);
   return db.runTransaction(async (tx) => {
-    const { ref, stmt, lines, others } = await loadForPosting(tx, input.statementId);
+    const { ref, stmt, lines, duplicates } = await loadForPosting(tx, input.statementId);
     if (stmt.status !== 'needs_review') throw new HttpsError('failed-precondition', `Only a reconciled statement awaiting review can be approved (this one is "${stmt.status}").`);
-    const opts = { duplicateAcknowledged: input.confirmNotDuplicate, otherPostedSameMonth: others };
+    // Same-month statements must each be confirmed separate (confirmSeparateStatement); the old one-click
+    // confirmNotDuplicate flag is no longer accepted as a substitute for new approvals.
+    const opts = { duplicates };
     const r = postingReadiness(stmt, lines, opts);
     if (!r.ready) throw blockersError(r);
     const plan = buildPostingPlan(stmt, lines, opts);
@@ -89,12 +90,12 @@ export const approveStatement = onCall(async (req) => {
     const fingerprint = planFingerprint(plan);
     tx.update(ref, {
       status: 'approved',
-      approval: { ...actorStamp(actor), note: input.note, fingerprint, postingId: plan.postingId, totals: plan.totals, duplicateAcknowledged: input.confirmNotDuplicate, warnings: r.warnings },
+      approval: { ...actorStamp(actor), note: input.note, fingerprint, postingId: plan.postingId, totals: plan.totals, duplicateAcknowledged: false, separateFrom: duplicates.filter((d) => d.confirmed).map((d) => d.otherId), warnings: r.warnings },
       updatedAt: FieldValue.serverTimestamp(), updatedBy: actor.uid,
     });
     audit(tx, actor, {
       action: 'statement_approve', entityType: 'statement', entityId: input.statementId,
-      summary: `Approved for posting: ${plan.totals.entries} entries, ${(plan.totals.amountCents / 100).toFixed(2)} (broker ${(plan.totals.brokerCents / 100).toFixed(2)}, agency ${(plan.totals.agencyCents / 100).toFixed(2)})${input.confirmNotDuplicate ? '; confirmed not a duplicate' : ''}${input.note ? ` — ${input.note}` : ''}`,
+      summary: `Approved for posting: ${plan.totals.entries} entries, ${(plan.totals.amountCents / 100).toFixed(2)} (broker ${(plan.totals.brokerCents / 100).toFixed(2)}, agency ${(plan.totals.agencyCents / 100).toFixed(2)})${duplicates.length ? `; separate from ${duplicates.length} other same-month statement(s), each confirmed` : ''}${input.note ? ` — ${input.note}` : ''}`,
       changes: { status: { before: 'needs_review', after: 'approved' } },
     });
     return { status: 'approved', fingerprint, totals: plan.totals, warnings: r.warnings };
@@ -123,10 +124,12 @@ export const postStatement = onCall({ timeoutSeconds: 120, memory: '512MiB' }, a
   const actor = requireRole(req, ['admin']);
   const { statementId } = parse(z.object({ statementId: z.string().regex(idRe) }), req.data);
   return db.runTransaction(async (tx) => {
-    const { ref, raw, stmt, lines, others } = await loadForPosting(tx, statementId);
+    const { ref, raw, stmt, lines, duplicates } = await loadForPosting(tx, statementId);
     if (stmt.status === 'posted') throw new HttpsError('already-exists', 'This statement is already posted.');
     if (stmt.status !== 'approved' || !raw.approval?.fingerprint) throw new HttpsError('failed-precondition', 'Approve the statement before posting.');
-    const opts = { duplicateAcknowledged: !!raw.approval.duplicateAcknowledged, otherPostedSameMonth: others };
+    // Re-checked at posting: an identical / same statement always blocks (even if approved earlier); an
+    // approval given before pairwise confirmation existed keeps its old acknowledgement for the rest.
+    const opts = { duplicates, legacyDuplicateAcknowledged: !!raw.approval.duplicateAcknowledged };
     const r = postingReadiness(stmt, lines, opts);
     if (!r.ready) throw blockersError(r);
     const plan = buildPostingPlan(stmt, lines, opts);

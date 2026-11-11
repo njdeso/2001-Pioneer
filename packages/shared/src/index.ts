@@ -16,6 +16,7 @@ export * from './statements/anthropic.js';
 export * from './statements/diagnose.js';
 export * from './statements/match.js';
 export * from './statements/posting.js';
+export * from './statements/duplicates.js';
 export * from './reports/ledger.js';
 export * from './reports/diligence.js';
 export * from './callableError.js';

@@ -1,4 +1,4 @@
-import type { AiDiagnosis, LineMatch, MatchSummary, PostingPlan } from '@asm/shared';
+import type { AiDiagnosis, DuplicateFinding, LineMatch, MatchSummary, PostingPlan, StatementClassification } from '@asm/shared';
 import { httpsCallable } from 'firebase/functions';
 import { classifyProbe, describeCallableError, PROBE_SAFE_FUNCTIONS, type ProbeResult, type BrokerAdvanceInput, type ParsedAdvanceRow } from '@asm/shared';
 
@@ -115,8 +115,14 @@ export const api = {
   setLineMatch: (input: { action: 'assign'; statementId: string; lineId: string; policyId: string; note?: string } | { action: 'unmatch' | 'auto'; statementId: string; lineId: string; note?: string }
     | { action: 'historical'; statementId: string; lineId: string; clientId: string | null; insuredName: string; policyNumber: string; carrierId: string | null; policyStatus: 'cancelled' | 'expired' | 'unknown'; attributedBrokerId: string | null; note: string }) =>
     call<typeof input, { match: LineMatch; summary: MatchSummary }>('setLineMatch', input),
-  approveStatement: (statementId: string, confirmNotDuplicate = false, note = '') =>
-    call<{ statementId: string; confirmNotDuplicate: boolean; note: string }, { status: string; totals: PostingPlan['totals'] }>('approveStatement', { statementId, confirmNotDuplicate, note }),
+  approveStatement: (statementId: string, note = '') =>
+    call<{ statementId: string; note: string }, { status: string; totals: PostingPlan['totals'] }>('approveStatement', { statementId, note }),
+  checkStatementDuplicates: (statementId: string) =>
+    call<{ statementId: string }, { statementId: string; classification: StatementClassification | null; lineCount: number; findings: DuplicateFinding[] }>('checkStatementDuplicates', { statementId }),
+  setStatementClassification: (statementId: string, classification: StatementClassification) =>
+    call<{ statementId: string; classification: StatementClassification }, { classification: StatementClassification }>('setStatementClassification', { statementId, classification }),
+  confirmSeparateStatement: (statementId: string, otherStatementId: string, reason: string) =>
+    call<{ statementId: string; otherStatementId: string; reason: string }, { confirmed: true }>('confirmSeparateStatement', { statementId, otherStatementId, reason }),
   unapproveStatement: (statementId: string, reason: string) => call<{ statementId: string; reason: string }, { status: string }>('unapproveStatement', { statementId, reason }),
   postStatement: (statementId: string) => call<{ statementId: string }, { status: string; postingId: string; totals: PostingPlan['totals'] }>('postStatement', { statementId }, 120_000),
   reverseStatementPosting: (statementId: string, reason: string) =>

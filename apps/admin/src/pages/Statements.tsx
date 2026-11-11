@@ -3,14 +3,15 @@ import { Link, useNavigate, useParams } from 'react-router';
 import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { ref as storageRef, uploadBytesResumable } from 'firebase/storage';
 import {
-  formatBps, formatMonth, TRANSACTION_TYPE_LABELS,
-  type Cents, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment,
+  formatBps, formatMonth, STATEMENT_CLASSIFICATION_LABELS, TRANSACTION_TYPE_LABELS,
+  type Cents, type StatementClassification, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment,
 } from '@asm/shared';
 import { db, storage } from '../firebase';
 import { api } from '../api';
 import { useData } from '../data';
 import { Badge, Button, Card, DataTable, Empty, ErrorNote, Field, Modal, Money, PageHeader, Select, Stat, TextArea, cx, type Column } from '../ui';
 import { PostingPanel, type PostingInfo } from './StatementPosting';
+import { ClassificationPicker, DuplicateReview, useDuplicateCheck } from './StatementDuplicates';
 import { BrokerCell, MatchBadge, MatchDialog, MatchedTo, MatchingPanel, lineMatch, matchFilterFn, type MatchFilter, type MatchingInfo, type MatchLine } from './StatementMatching';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,8 @@ interface StatementDoc {
   payerId?: string | null;
   payerNote?: string;
   possibleDuplicateOf?: string | null;
+  classification?: StatementClassification | null;
+  title?: string;
   stated?: StatedTotals;
   adjustments?: StatementAdjustment[];
   statementIssues?: LineIssue[];
@@ -193,6 +196,7 @@ export function StatementQueuePage() {
     { key: 'file', header: 'File', render: (r) => <span className="font-medium text-ink">{r.fileName}</span>, sort: (r) => r.fileName },
     { key: 'carrier', header: 'Carrier', render: (r) => (r.payerId ? carrierById.get(r.payerId)?.name : r.carrierName ? <span className="text-amber-800">{r.carrierName} (not set up)</span> : '—') ?? '—' },
     { key: 'month', header: 'Month', render: (r) => (r.statementMonth ? formatMonth(r.statementMonth) : '—'), sort: (r) => r.statementMonth ?? '' },
+    { key: 'type', header: 'Type', render: (r) => (r.classification ? STATEMENT_CLASSIFICATION_LABELS[r.classification] : '—'), sort: (r) => r.classification ?? '' },
     { key: 'method', header: 'Method', render: (r) => (r.method ? METHOD[r.method] ?? r.method : '—') },
     { key: 'status', header: 'Status', render: (r) => <StatusBadge status={r.status} />, sort: (r) => r.status },
     { key: 'stated', header: 'Carrier total', align: 'right', render: (r) => <Money cents={r.statementTotalCents ?? null} /> },
@@ -248,6 +252,10 @@ export function StatementReviewPage() {
   const [payer, setPayer] = useState('');
   const [discarding, setDiscarding] = useState(false);
   const [reason, setReason] = useState('');
+  // Same-month statements from this carrier, compared by content on the server; re-checked when this
+  // statement changes (status, lines, classification or a confirmation).
+  const dupKey = stmt ? `${stmt.status}|${stmt.classification ?? ''}|${lines.length}|${JSON.stringify((stmt as unknown as { separateConfirmations?: unknown }).separateConfirmations ?? {}).length}|${stmt.statementMonth ?? ''}|${stmt.payerId ?? ''}` : '';
+  const dup = useDuplicateCheck(id ?? '', dupKey);
 
   useEffect(() => {
     if (!id) return;
@@ -355,12 +363,13 @@ export function StatementReviewPage() {
         </div>
       )}
       {stmt.status === 'discarded' && <div className="rounded-md bg-slate-100 px-4 py-2 text-sm text-slate-700">Discarded: {stmt.discardReason}. The original file and extracted lines are preserved.</div>}
-      {stmt.possibleDuplicateOf && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
-          Another file for the same carrier, agency code and month is already loaded (<Link className="underline" to={`/statements/${stmt.possibleDuplicateOf}`}>open it</Link>).
-          If this is a revised statement, keep both for now; the revision workflow arrives in Stage 3E.
+      {['needs_review', 'discrepancy', 'approved', 'posted'].includes(stmt.status) && (
+        <div className="flex flex-wrap items-end gap-4">
+          <ClassificationPicker statementId={stmt.id} value={stmt.classification} onSaved={dup.reload} />
+          <p className="pb-2 text-xs text-slate-500">Personal Lines, Commercial Lines or Other. Shown when this carrier sends more than one statement a month; it does not by itself prove two files are different statements.</p>
         </div>
       )}
+      {stmt.payerId && stmt.statementMonth && <DuplicateReview statementId={stmt.id} month={stmt.statementMonth} check={dup.check} error={dup.error} reload={dup.reload} />}
       {['needs_review', 'discrepancy'].includes(stmt.status) && !stmt.payerId && (
         <Card title="Which carrier is this statement from?">
           <p className="mb-3 text-sm text-slate-600">{stmt.payerNote}</p>
@@ -428,7 +437,7 @@ export function StatementReviewPage() {
         <MatchingPanel statementId={stmt.id} payerId={stmt.payerId} matching={stmt.matching} lines={lines} canMatch={canMatch} />
       )}
       {['needs_review', 'discrepancy', 'approved', 'posted'].includes(stmt.status) && (
-        <PostingPanel statementId={stmt.id} stmt={stmt as unknown as PostingInfo} lines={lines} />
+        <PostingPanel statementId={stmt.id} stmt={stmt as unknown as PostingInfo} lines={lines} duplicates={dup.check?.findings ?? null} />
       )}
 
       {lines.length > 0 && (

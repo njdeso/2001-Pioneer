@@ -10,6 +10,9 @@
 //                            scenario, broker percentages, negative commission, totals; manual assign /
 //                            unmatch / re-run keeps manual / return to automatic; audit entries;
 //                            extracted values and policies unchanged; nothing posted to the ledger)
+//   8. Same-month statements (synthetic payer SYNDUP: Personal + Commercial Lines are separate and confirmable
+//                            with classification and a reason; a renamed copy is the same statement, can never be
+//                            confirmed and blocks approval; staff cannot confirm; audit on both; no ledger writes)
 //   7. Broker buyout        (synthetic broker SYNBO-B50 at closing 2026-03-07: staff denied; snapshot math for
 //                            the specified $339.04 example, a two-term policy and a cancelled policy (no clawback);
 //                            adjustment re-settles installments; reviewed locks adjustments; finalize refused
@@ -470,6 +473,55 @@ async function buyoutStage() {
   record('Buyout: every step audit-logged; nothing written to the ledger', audits.size >= 5 && ledgerAfter === ledgerBefore, `${audits.size} audit entries; ledger ${ledgerBefore} → ${ledgerAfter}; snapshot v${c.version} (${c.id}) left ${(await ref.get()).get('state')}`);
 }
 
+// ---------------------------------------------------------------- Same-month statements (duplicates)
+async function duplicateStage() {
+  summary('\n#### Same-month statements — Personal / Commercial Lines vs a renamed copy (synthetic payer SYNDUP)\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  const month = '2026-09';
+  const line = (n, pol, name, cents) => ({ lineNo: n, page: 1, insuredName: name, policyNumberRaw: pol, policyNumberNormalized: pol.replace(/[^A-Z0-9]/gi, '').toUpperCase(), paymentReceivedCents: cents * 10, paidCommissionCents: cents, rateBps: 1000, termCommissionCents: null, premiumForCommissionCents: null, transactionPremiumCents: null, feeCents: null, effectiveDate: '2026-09-01', transactionCodeRaw: 'REN', transactionType: 'renewal', paymentMethod: '', kind: 'commission', rawText: 'synthetic', issues: [], status: 'pending', match: { status: 'not_started' } });
+  const PL = [line(1, 'SYNPL-0001', 'Synthetic Alder Family', 1200), line(2, 'SYNPL-0002', 'Synthetic Birch Family', 800), line(3, 'SYNPL-0003', 'Synthetic Cedar Family', 450)];
+  const CL = [line(1, 'SYNCL-9001', 'Synthetic Works LLC', 5000), line(2, 'SYNCL-9002', 'Synthetic Supply Inc', 2500)];
+  const write = async (id, fileName, lines, title) => {
+    const ref = db.collection('statements').doc(id);
+    for (const d of await ref.collection('lines').listDocuments()) await d.delete();
+    await ref.set({ status: 'needs_review', fileName, fileType: 'pdf', size: 1, sha256: id, payerId: 'SYNDUP', statementMonth: month, statementDate: '2026-09-30', agencyCode: '0000', officeCode: null, title,
+      statementTotalCents: lines.reduce((t, l) => t + l.paidCommissionCents, 0), postedCents: 0, reconciled: true, synthetic: true, updatedAt: FieldValue.serverTimestamp() });
+    for (const l of lines) await ref.collection('lines').doc(String(l.lineNo).padStart(5, '0')).set({ ...l, statementId: id, payerId: 'SYNDUP' });
+  };
+  await write('SYNDUP-PL', 'Synthetic Personal Lines Sep.pdf', PL, 'Personal Lines Statement');
+  await write('SYNDUP-CL', 'Synthetic Commercial Lines Sep.pdf', CL, 'Commercial Lines Statement');
+  await write('SYNDUP-COPY', 'scan_renamed_copy.pdf', [...PL].reverse().map((l, i) => ({ ...l, lineNo: i + 1 })), 'Personal Lines Statement');
+  const ledgerBefore = (await db.collection('ledger').count().get()).data().count;
+
+  const c = await call('checkStatementDuplicates', { statementId: 'SYNDUP-PL' });
+  const rel = Object.fromEntries((c.findings ?? []).map((f) => [f.otherId, f]));
+  record('Duplicates: PL vs CL same month = separate (0 shared lines), not a duplicate', rel['SYNDUP-CL']?.relation === 'separate' && rel['SYNDUP-CL']?.hard === false && rel['SYNDUP-CL']?.sharedLines === 0, JSON.stringify(rel['SYNDUP-CL'] && { relation: rel['SYNDUP-CL'].relation, shared: rel['SYNDUP-CL'].sharedLines }));
+  record('Duplicates: renamed copy with the same lines = identical (hard)', rel['SYNDUP-COPY']?.relation === 'identical' && rel['SYNDUP-COPY']?.hard === true, JSON.stringify(rel['SYNDUP-COPY'] && { relation: rel['SYNDUP-COPY'].relation, shared: rel['SYNDUP-COPY'].sharedLines }));
+
+  const unclassified = await expectRejected(call('confirmSeparateStatement', { statementId: 'SYNDUP-CL', otherStatementId: 'SYNDUP-PL', reason: 'Commercial Lines statement for September' }));
+  await call('setStatementClassification', { statementId: 'SYNDUP-PL', classification: 'personal' }, 1, STAFF_TOKEN);
+  await call('setStatementClassification', { statementId: 'SYNDUP-CL', classification: 'commercial' });
+  await call('setStatementClassification', { statementId: 'SYNDUP-COPY', classification: 'commercial' });
+  record('Duplicates: confirmation requires both statements classified; staff may classify', unclassified.rejected && /Classify/.test(unclassified.message), unclassified.message);
+  const staff = await expectRejected(call('confirmSeparateStatement', { statementId: 'SYNDUP-CL', otherStatementId: 'SYNDUP-PL', reason: 'Commercial Lines statement for September' }, 1, STAFF_TOKEN));
+  const short = await expectRejected(call('confirmSeparateStatement', { statementId: 'SYNDUP-CL', otherStatementId: 'SYNDUP-PL', reason: 'ok' }));
+  const copy = await expectRejected(call('confirmSeparateStatement', { statementId: 'SYNDUP-COPY', otherStatementId: 'SYNDUP-PL', reason: 'Labelled Commercial, so it must be different' }));
+  record('Duplicates: staff cannot confirm; a short reason is refused; an identical copy can never be confirmed (even classified differently)', staff.rejected && /permission/i.test(staff.message) && short.rejected && /10 characters/.test(short.message) && copy.rejected && /cannot be confirmed/.test(copy.message), `${staff.message} | ${short.message} | ${copy.message}`);
+
+  await call('confirmSeparateStatement', { statementId: 'SYNDUP-CL', otherStatementId: 'SYNDUP-PL', reason: 'Commercial Lines statement for September; the other is Personal Lines' });
+  const [pl, cl] = await Promise.all(['SYNDUP-PL', 'SYNDUP-CL'].map((id) => db.collection('statements').doc(id).get()));
+  const after = await call('checkStatementDuplicates', { statementId: 'SYNDUP-CL' });
+  const plFinding = (after.findings ?? []).find((f) => f.otherId === 'SYNDUP-PL');
+  const audits = await db.collection('auditLog').where('action', '==', 'statement_confirm_separate').where('entityId', 'in', ['SYNDUP-PL', 'SYNDUP-CL']).get();
+  record('Duplicates: confirmed separate — recorded on both statements with content digests, audit-logged on both', plFinding?.confirmed === true && !!pl.get('separateConfirmations.SYNDUP-CL.digest') && !!cl.get('separateConfirmations.SYNDUP-PL.otherDigest') && audits.size >= 2,
+    `confirmed=${plFinding?.confirmed}; audit entries ${audits.size}`);
+
+  const approve = await expectRejected(call('approveStatement', { statementId: 'SYNDUP-PL' }));
+  const ledgerAfter = (await db.collection('ledger').count().get()).data().count;
+  record('Duplicates: approval of the original is blocked while the identical copy exists; ledger untouched', approve.rejected && /cannot be posted twice/.test(approve.message) && ledgerAfter === ledgerBefore, `${approve.message.slice(0, 160)}… ledger ${ledgerBefore} → ${ledgerAfter}`);
+}
+
 // ---------------------------------------------------------------- run
 summary(`### Live smoke test — ${DEV}\n`);
 summary('| | Check | Result |');
@@ -573,6 +625,7 @@ try {
   try { ctx3b = await stage3b(); } catch (err) { record('Stage 3B matching run', false, err instanceof Error ? err.message : String(err)); }
   if (ctx3b) { try { await stage3c(ctx3b); } catch (err) { record('Stage 3C posting run', false, err instanceof Error ? err.message : String(err)); } }
   try { await buyoutStage(); } catch (err) { record('Broker buyout run', false, err instanceof Error ? err.message : String(err)); }
+  try { await duplicateStage(); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
 }

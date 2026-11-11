@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 import { useMemo, useState } from 'react';
-import { buildPostingPlan, formatMonth, postingReadiness, type PostingLine, type PostingStatement } from '@asm/shared';
+import { buildPostingPlan, formatMonth, postingReadiness, type DuplicateFinding, type PostingLine, type PostingStatement } from '@asm/shared';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { useData } from '../data';
@@ -27,14 +27,14 @@ export interface PostingInfo {
   reversals?: { postingId: string; reason: string; email?: string; amountCents: number; entries: number; at: string }[];
 }
 
-export function PostingPanel({ statementId, stmt, lines }: { statementId: string; stmt: PostingInfo; lines: MatchLine[] }) {
+/** `duplicates`: the server's same-month comparison (null while loading — approval waits for it). */
+export function PostingPanel({ statementId, stmt, lines, duplicates }: { statementId: string; stmt: PostingInfo; lines: MatchLine[]; duplicates: DuplicateFinding[] | null }) {
   const { role } = useAuth();
   const { carrierById } = useData();
   const isAdmin = role === 'admin';
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [ackDuplicate, setAckDuplicate] = useState(false);
   const [note, setNote] = useState('');
   const [reasonFor, setReasonFor] = useState<null | 'unapprove' | 'reverse'>(null);
   const [reason, setReason] = useState('');
@@ -46,8 +46,10 @@ export function PostingPanel({ statementId, stmt, lines }: { statementId: string
     matching: stmt.matching ? { stale: !!stmt.matching.stale, balanced: stmt.matching.balanced !== false } : null,
   };
   const pl = lines as unknown as PostingLine[];
-  const readiness = useMemo(() => postingReadiness(ps, pl, { duplicateAcknowledged: ackDuplicate || !!stmt.approval?.duplicateAcknowledged }), [stmt, lines, ackDuplicate]); // eslint-disable-line react-hooks/exhaustive-deps
-  const preview = useMemo(() => { try { return readiness.ready ? buildPostingPlan(ps, pl, { duplicateAcknowledged: true }) : null; } catch { return null; } }, [readiness]); // eslint-disable-line react-hooks/exhaustive-deps
+  const gate = { duplicates: duplicates ?? [], legacyDuplicateAcknowledged: !!stmt.approval?.duplicateAcknowledged };
+  const readiness = useMemo(() => postingReadiness(ps, pl, gate), [stmt, lines, duplicates]); // eslint-disable-line react-hooks/exhaustive-deps
+  const preview = useMemo(() => { try { return readiness.ready ? buildPostingPlan(ps, pl, gate) : null; } catch { return null; } }, [readiness]); // eslint-disable-line react-hooks/exhaustive-deps
+  const checking = duplicates === null;
 
   async function act(fn: () => Promise<unknown>, done: string) {
     setBusy(true); setError(null); setNotice(null);
@@ -57,7 +59,6 @@ export function PostingPanel({ statementId, stmt, lines }: { statementId: string
   const totals = stmt.posting?.totals ?? stmt.approval?.totals ?? preview?.totals;
   const posted = stmt.status === 'posted';
   const approved = stmt.status === 'approved';
-  const dupFlag = readiness.blockers.some((b) => b.code === 'possible_duplicate') || (!!stmt.possibleDuplicateOf && !stmt.approval);
 
   return (
     <Card title={<span className="flex items-center gap-2">Approval &amp; posting {posted ? <Badge tone="green">Posted</Badge> : approved ? <Badge tone="blue">Approved</Badge> : readiness.ready ? <Badge tone="green">Ready to approve</Badge> : <Badge tone="amber">Not ready</Badge>}</span>}>
@@ -94,14 +95,8 @@ export function PostingPanel({ statementId, stmt, lines }: { statementId: string
         <div className="mt-4 flex flex-wrap items-end gap-3">
           {!posted && !approved && (
             <>
-              {dupFlag && (
-                <label className="flex items-center gap-2 text-sm text-amber-900">
-                  <input type="checkbox" checked={ackDuplicate} onChange={(e) => setAckDuplicate(e.target.checked)} />
-                  I confirm this is a separate statement, not a duplicate
-                </label>
-              )}
               <Field label="Approval note (optional)" className="min-w-[16rem] flex-1"><TextArea rows={1} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-              <Button disabled={busy || !readiness.ready} onClick={() => void act(() => api.approveStatement(statementId, ackDuplicate, note), 'Approved. Review the totals, then post.')}>Approve for posting</Button>
+              <Button disabled={busy || checking || !readiness.ready} onClick={() => void act(() => api.approveStatement(statementId, note), 'Approved. Review the totals, then post.')}>{checking ? 'Checking other statements…' : 'Approve for posting'}</Button>
             </>
           )}
           {approved && (
