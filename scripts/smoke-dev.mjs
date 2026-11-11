@@ -295,6 +295,16 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   summary('|---|---|---|');
   const ledgerFor = async (q = sid) => (await db.collection('ledger').where('statementId', '==', q).get()).docs.map((d) => ({ id: d.id, ...d.data() }));
 
+  // 0. Housekeeping (DEV only, synthetic only): every earlier run left its reversed synthetic statement — with
+  // the same lines as this run's — in review, plus the upload smoke statements. Same-month statements are
+  // compared by content, so those identical leftovers would (correctly) block approval. Discard them through
+  // the app's own discardStatement (refuses anything approved or posted; audit-logged).
+  const leftovers = (await db.collection('statements').where('payerId', '==', PAYER_ID).where('statementMonth', '==', '2026-10').get()).docs
+    .filter((d) => d.id !== sid && ['needs_review', 'discrepancy'].includes(d.get('status')) && Number(d.get('postedCents') ?? 0) === 0
+      && (d.get('synthetic') === true || String(d.get('fileName') ?? '').startsWith('SMOKE-')));
+  for (const d of leftovers) await call('discardStatement', { statementId: d.id, reason: 'Superseded synthetic smoke-test fixture (dev only)' });
+  record('Housekeeping: earlier runs\' synthetic statements for this payer and month discarded', true, `${leftovers.length} discarded via discardStatement`);
+
   // 1. Approval is blocked while lines are ambiguous or unreviewed
   const blocked = await expectRejected(call('approveStatement', { statementId: sid }));
   record('Approval blocked by ambiguous and unreviewed lines', blocked.rejected && /ambiguous/.test(blocked.message) && /not yet reviewed/.test(blocked.message), blocked.message.slice(0, 220));
@@ -308,16 +318,23 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   const staffApprove = await expectRejected(call('approveStatement', { statementId: sid }, 1, STAFF_TOKEN));
   record('Staff cannot approve', staffApprove.rejected && /permission/i.test(staffApprove.message), staffApprove.message.slice(0, 160));
 
-  // 4. Approve. If a statement from the same carrier and month is already posted (e.g. a manual test
-  //    posting in dev), approval must first require the "separate statement" confirmation.
+  // 4. Approve. Any other live statement from the same carrier and month (e.g. a manual test posting in dev)
+  //    must first be confirmed as a separate statement; an identical one could never be.
   const before = await windowTotals();
-  const otherPosted = (await db.collection('statements').where('payerId', '==', PAYER_ID).where('statementMonth', '==', '2026-10').where('status', '==', 'posted').get()).docs.map((d) => d.id).filter((id) => id !== sid);
-  if (otherPosted.length) {
+  const pre = await call('checkStatementDuplicates', { statementId: sid });
+  const open = (pre.findings ?? []).filter((f) => !f.hard && !f.confirmed);
+  const hard = (pre.findings ?? []).filter((f) => f.hard);
+  if (hard.length) record('No identical same-month statement remains after housekeeping', false, hard.map((f) => `${f.otherId} (${f.other.status})`).join(', '));
+  if (open.length) {
     const dup = await expectRejected(call('approveStatement', { statementId: sid, note: 'smoke test approval' }));
-    record('Another posted statement for this carrier and month requires "separate statement" confirmation', dup.rejected && /separate statement|duplicate/i.test(dup.message), `${otherPosted.join(', ')}: ${dup.message.slice(0, 160)}`);
+    await call('setStatementClassification', { statementId: sid, classification: 'other' });
+    for (const f of open) {
+      if (!f.other.classification) await call('setStatementClassification', { statementId: f.otherId, classification: 'other' });
+      await call('confirmSeparateStatement', { statementId: sid, otherStatementId: f.otherId, reason: 'smoke test: separate synthetic statement (dev only)' });
+    }
+    record('Other same-month statements must be confirmed separate before approval', dup.rejected && /separate statement/i.test(dup.message), `${open.map((f) => f.otherId).join(', ')}: ${dup.message.slice(0, 160)}`);
   }
-  const confirm = otherPosted.length > 0;
-  const ap = await call('approveStatement', { statementId: sid, note: 'smoke test approval', confirmNotDuplicate: confirm });
+  const ap = await call('approveStatement', { statementId: sid, note: 'smoke test approval' });
   const expected = { entries: 10, amountCents: 41000, brokerCents: 14200, agencyCents: 26800, suspenseCents: 8000, adjustmentsCents: -500 };
   const apErr = Object.entries(expected).filter(([k, v]) => ap.totals[k] !== v).map(([k, v]) => `${k} ${ap.totals[k]} ≠ ${v}`);
   record('Approve: plan totals', ap.status === 'approved' && apErr.length === 0,
@@ -376,7 +393,7 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   record('Reversing again is refused', revAgain.rejected, revAgain.message.slice(0, 120));
 
   // 9. Correct and post again (next posting number, new entry IDs), then reverse to leave dev net zero
-  await call('approveStatement', { statementId: sid, note: 'smoke: re-approval', confirmNotDuplicate: confirm });
+  await call('approveStatement', { statementId: sid, note: 'smoke: re-approval' });
   const p2 = await call('postStatement', { statementId: sid });
   const second = (await ledgerFor()).filter((e) => e.postingId === `${sid}__p2` && !e.reversalOf);
   record('Re-post after reversal uses posting 2 with new entries', p2.postingId === `${sid}__p2` && second.length === 10 && second.reduce((s, e) => s + e.amountCents, 0) === 41000, `${p2.postingId}: ${second.length} entries, ${$(second.reduce((s, e) => s + e.amountCents, 0))}`);
@@ -483,8 +500,8 @@ async function duplicateStage() {
   const PL = [line(1, 'SYNPL-0001', 'Synthetic Alder Family', 1200), line(2, 'SYNPL-0002', 'Synthetic Birch Family', 800), line(3, 'SYNPL-0003', 'Synthetic Cedar Family', 450)];
   const CL = [line(1, 'SYNCL-9001', 'Synthetic Works LLC', 5000), line(2, 'SYNCL-9002', 'Synthetic Supply Inc', 2500)];
   const write = async (id, fileName, lines, title) => {
+    // Fixed IDs and fixed line numbers: each run overwrites the same documents (no deletes needed).
     const ref = db.collection('statements').doc(id);
-    for (const d of await ref.collection('lines').listDocuments()) await d.delete();
     await ref.set({ status: 'needs_review', fileName, fileType: 'pdf', size: 1, sha256: id, payerId: 'SYNDUP', statementMonth: month, statementDate: '2026-09-30', agencyCode: '0000', officeCode: null, title,
       statementTotalCents: lines.reduce((t, l) => t + l.paidCommissionCents, 0), postedCents: 0, reconciled: true, synthetic: true, updatedAt: FieldValue.serverTimestamp() });
     for (const l of lines) await ref.collection('lines').doc(String(l.lineNo).padStart(5, '0')).set({ ...l, statementId: id, payerId: 'SYNDUP' });
