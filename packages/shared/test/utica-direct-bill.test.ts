@@ -250,3 +250,45 @@ test('an MVR/CLUE row that pays the agency is held for review, not moved', () =>
   assert.ok(errors(s).includes('utica_mvr_positive'));
   assert.equal(reconcileStatement(s).reconciled, false);
 });
+
+// ---- Production re-read (PR #14 follow-up): the AI may put the GROSS PREMIUMS column in either premium
+// field, or in neither. The May 2026 statement must still read +$929.56 / −$19.14 / +$910.42.
+function mayAs(where: 'premiumForCommission' | 'both' | 'none'): ExtractedStatement {
+  const s = asExtracted('May');
+  for (const l of s.lines) {
+    const p = l.transactionPremiumCents;
+    if (where === 'premiumForCommission') { l.premiumForCommissionCents = p; l.transactionPremiumCents = null; }
+    if (where === 'both') l.premiumForCommissionCents = p;
+    if (where === 'none') { l.transactionPremiumCents = null; l.premiumForCommissionCents = null; }
+  }
+  if (where === 'premiumForCommission') { s.stated.premiumForCommissionCents = s.stated.transactionPremiumCents; s.stated.transactionPremiumCents = null; }
+  if (where === 'none') s.stated.transactionPremiumCents = null;
+  return s;
+}
+
+for (const where of ['premiumForCommission', 'both', 'none'] as const) {
+  test(`May 2026 re-read with gross premiums in ${where === 'none' ? 'neither premium field' : where === 'both' ? 'both premium fields' : 'the "premium for commission" field'}: +$929.56 policy commissions, −$19.14 MVR/CLUE, +$910.42 due`, () => {
+    const { statement: s, report } = applyUticaDirectBillRules(mayAs(where));
+    assert.equal(report.applied, true, JSON.stringify(s.issues));
+    assert.equal(report.evidenceRows, where === 'none' ? 0 : STATEMENTS.May.rows.filter((r) => parseMoneyToCents(r[1]) && parseMoneyToCents(r[3])).length);
+    assert.equal(sum(s), 92956);
+    assert.deepEqual(s.adjustments.map((a) => a.amountCents), [-1914]);
+    assert.equal(s.stated.monthCommissionPayableCents, 91042);
+    assert.ok(s.lines.every((l) => l.transactionCodeRaw !== 'EXP'));
+    // Each commission has the sign of its printed gross premium (endorsement credits stay negative).
+    for (const l of s.lines.filter((x) => x.paidCommissionCents)) {
+      const printedPremium = parseMoneyToCents(STATEMENTS.May.rows[l.lineNo - 1][1])!;
+      if (printedPremium) assert.equal(Math.sign(l.paidCommissionCents!), Math.sign(printedPremium), `line ${l.lineNo}`);
+    }
+    const rec = reconcileStatement(s);
+    assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+  });
+}
+
+test('with no premium evidence AND rows that do not add up to the printed total, nothing is reversed', () => {
+  const s0 = mayAs('none');
+  s0.lines[1].paidCommissionCents = -8100; // misread: 80.10- read as 81.00-
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.equal(report.applied, false);
+  assert.match(s.issues.find((i) => i.code === 'utica_sign_unverified')!.text, /do not add up to the printed commission total/);
+});
