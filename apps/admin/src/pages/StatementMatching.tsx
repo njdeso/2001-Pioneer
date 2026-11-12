@@ -262,10 +262,15 @@ export function MatchDialog({ statementId, payerId, line, onClose }: { statement
             </>
           )}
           <h3 className="mb-2 text-xs font-semibold uppercase text-slate-500">Search clients and policies</h3>
-          <div className="mb-2 flex gap-2">
-            <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Policy number, client or insured name, client ID" className="flex-1" autoFocus />
-            <Select value={scope} onChange={(e) => setScope(e.target.value as 'payer' | 'all')}
-              options={[{ value: 'payer', label: payerId ? `${carriers.find((c) => c.id === payerId)?.name ?? 'This carrier'} only` : 'This carrier' }, { value: 'all', label: 'All carriers' }]} />
+          {/* Search ~60 % / carrier ~40 % side by side on wider screens; stacked full-width on small ones. */}
+          <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="min-w-0 sm:w-3/5">
+              <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Policy number, client or insured name, client ID" aria-label="Search clients and policies" autoFocus />
+            </div>
+            <div className="min-w-0 sm:w-2/5">
+              <Select value={scope} onChange={(e) => setScope(e.target.value as 'payer' | 'all')} aria-label="Carrier filter"
+                options={[{ value: 'payer', label: payerId ? `${carriers.find((c) => c.id === payerId)?.name ?? 'This carrier'} only` : 'This carrier' }, { value: 'all', label: 'All carriers' }]} />
+            </div>
           </div>
           <div className="max-h-72 space-y-1 overflow-y-auto">
             {query.trim().length >= 2 && !results.length && <p className="text-xs text-slate-500">No policies found. Policies are never created here — add the client and policy first if it is missing.</p>}
