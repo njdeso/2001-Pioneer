@@ -6,7 +6,7 @@ import { getStorage } from 'firebase-admin/storage';
 import type { DocumentData, DocumentReference } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import {
-  DEFAULT_AI_MODEL, AI_PROMPT_VERSION, DETAILED_STATEMENT_READER, TRAVELERS_PL_PARSER, extractWithClaude, readDetailedStatement, isTravelersPlStatement, normalizeName, sniffError, sniffSpreadsheet,
+  DEFAULT_AI_MODEL, AI_PROMPT_VERSION, DETAILED_STATEMENT_READER, TRAVELERS_PL_PARSER, applyUticaDirectBillRules, extractWithClaude, isUticaDirectBill, readDetailedStatement, isTravelersPlStatement, normalizeName, sniffError, sniffSpreadsheet,
   parseCsv, parseTravelersPl, reconcileStatement, tableToText,
   type ExtractedStatement, type ExtractionMethod,
   type DupLine,
@@ -229,7 +229,14 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
     };
     return { ...none, method: type === 'pdf' ? 'ai' : 'table-ai', model, attempts: res.attempts, usage: res.usage ?? null, failure };
   }
-  return { statement: res.statement, method: type === 'pdf' ? 'ai' : 'table-ai', model, usage: res.usage, attempts: res.attempts, failure: null };
+  // Carrier-specific reading rules for what the AI copied exactly as printed (Utica direct bill only).
+  let statement = res.statement;
+  if (statement && isUticaDirectBill(statement)) {
+    const u = applyUticaDirectBillRules(statement);
+    statement = u.statement;
+    logger.info('Utica direct-bill rules', { fileName, applied: u.report.applied, evidenceRows: u.report.evidenceRows, contradicting: u.report.contradictingRows, filled: u.report.filledRows.length, outsideTotals: u.report.rowsOutsideTotals });
+  }
+  return { statement, method: type === 'pdf' ? 'ai' : 'table-ai', model, usage: res.usage, attempts: res.attempts, failure: null };
 }
 
 /** Match the statement's carrier name / agency code to a set-up carrier or wholesaler. */
@@ -241,6 +248,14 @@ async function resolvePayer(s: ExtractedStatement): Promise<{ payerId: string | 
   const n = normalizeName(s.carrierName);
   const byName = carriers.filter((c) => normalizeName(c.name) === n || normalizeName(c.code) === n || (c.aliases ?? []).some((a) => normalizeName(a) === n));
   if (byName.length === 1) return { payerId: byName[0].id, note: `Matched by name "${s.carrierName}"` };
+  // Utica National prints its statements as "Utica Mutual Ins Co. - ERO" / "Utica Mutual Insurance Co. - ERO".
+  // When no name or alias matches exactly, a Utica statement goes to the ONE set-up carrier whose name or
+  // alias contains "Utica" (e.g. Utica National Insurance Group). Never creates a carrier; if there are
+  // several, the carrier is chosen on the review screen as before.
+  if (!byName.length && !byCode.length && isUticaDirectBill(s)) {
+    const utica = carriers.filter((c) => c.status !== 'inactive' && [c.name, ...(c.aliases ?? [])].some((n) => /\butica\b/i.test(n ?? '')));
+    if (utica.length === 1) return { payerId: utica[0].id, note: `Matched Utica statement "${s.carrierName}" to ${utica[0].name}` };
+  }
   if (byCode.length > 1 || byName.length > 1) return { payerId: null, note: 'More than one carrier matches; choose the carrier on the review screen' };
   return { payerId: null, note: `No carrier set up for "${s.carrierName}"${code ? ` / agency code ${code}` : ''}; add it or choose one on the review screen` };
 }
