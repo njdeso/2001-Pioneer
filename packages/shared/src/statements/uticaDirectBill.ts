@@ -19,6 +19,13 @@ import type { ExtractedLine, ExtractedStatement } from './types.js';
  *    leave both blank. Such a row takes the policy number and insured name of the row above on the same
  *    page (matching reads the line's policy number), and carries a note saying the number was not printed on
  *    that row and which line it came from. Rows with a printed policy number are never changed.
+ * 4. MVR/CLUE EXPENSE (entry code EXP, policy "MVRCLU", no premium) is 100 % an agency expense (owner's
+ *    rule, same as Progressive MVR charges): after the sign is verified each such row becomes ONE
+ *    statement-level adjustment — carrier level, no policy, broker 0, never a policy commission line and
+ *    never in broker commission or buyout figures. The printed Producers Total includes it, so the policy
+ *    commission check uses that total less the MVR/CLUE amount, and "lines + adjustments = Amount Due
+ *    Producer" still checks the printed amount exactly. Each adjustment records its page, row and the
+ *    printed policy text for the audit trail. A positive (refund) EXP row is held for review, not moved.
  * 3. ROWS OUTSIDE THE CARRIER'S TOTALS. If the lines exceed the printed commission total by exactly one
  *    row's commission (and, when printed, the gross premium total by exactly that row's premium), that row
  *    is named in a blocking message: it is printed but the carrier did not include it in what it paid.
@@ -43,11 +50,13 @@ export interface UticaReport {
   contradictingRows: number[];
   filledRows: number[];
   rowsOutsideTotals: number[];
+  /** Original line numbers of MVR/CLUE expense rows moved to agency-only adjustments. */
+  mvrClueRows: number[];
 }
 
 export function applyUticaDirectBillRules(input: ExtractedStatement): { statement: ExtractedStatement; report: UticaReport } {
   const s: ExtractedStatement = { ...input, issues: [...input.issues], lines: input.lines.map((l) => ({ ...l, issues: [...l.issues] })), adjustments: input.adjustments.map((a) => ({ ...a })), stated: { ...input.stated } };
-  const report: UticaReport = { applied: false, evidenceRows: 0, contradictingRows: [], filledRows: [], rowsOutsideTotals: [] };
+  const report: UticaReport = { applied: false, evidenceRows: 0, contradictingRows: [], filledRows: [], rowsOutsideTotals: [], mvrClueRows: [] };
 
   // ---- 2. group-printed rows: policy number and insured from the row above (same page) ----
   let prev: ExtractedLine | null = null;
@@ -105,6 +114,32 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
         s.issues.push({ level: 'error', code: 'utica_row_outside_totals', text });
       }
     }
+  }
+  // ---- 4. MVR/CLUE expense rows → agency-only statement adjustments ----
+  const isMvrClue = (l: ExtractedLine) => /^EXP$/i.test(l.transactionCodeRaw.trim()) && /^MVR\s*CLU/i.test(l.policyNumberRaw.trim()) && !l.transactionPremiumCents;
+  const mvr = s.lines.filter(isMvrClue);
+  const refunds = mvr.filter((l) => (l.paidCommissionCents ?? 0) > 0);
+  if (refunds.length) {
+    for (const l of refunds) l.issues.push({ level: 'error', code: 'utica_mvr_positive', text: `Line ${l.lineNo}: an MVR/CLUE entry that pays the agency (${fmt(l.paidCommissionCents!)}) is not handled automatically; confirm how it should be recorded.` });
+  } else if (mvr.length) {
+    const mvrTotal = mvr.reduce((t, l) => t + (l.paidCommissionCents ?? 0), 0);
+    for (const l of mvr) {
+      if (l.paidCommissionCents) {
+        s.adjustments.push({
+          label: `MVR/CLUE expense (statement page ${l.page ?? '?'}, line ${l.lineNo}${l.effectiveDate ? `, ${l.effectiveDate}` : ''})`,
+          amountCents: l.paidCommissionCents,
+          source: { sheet: `page ${l.page ?? '?'}`, sheetRow: l.lineNo, kind: 'mvr', policyNumberRaw: l.policyNumberRaw, lineNo: null },
+        });
+      }
+      report.mvrClueRows.push(l.lineNo);
+    }
+    s.lines = s.lines.filter((l) => !isMvrClue(l)); // line numbers keep the printed order (audit trail)
+    if (s.stated.commissionPayableCents !== null) s.stated.commissionPayableCents -= mvrTotal;
+    s.checkLabels = {
+      commission: 'Policy commissions = Producers Total less MVR/CLUE expenses',
+      monthPayable: 'Policy commissions + MVR/CLUE expenses (agency only) = Amount Due Producer',
+    };
+    s.issues.push({ level: 'warning', code: 'utica_mvr_clue', text: `${mvr.length} MVR/CLUE expense row(s) (line ${report.mvrClueRows.join(', ')}, total ${fmt(mvrTotal)}) recorded as agency-only adjustments: no policy, never split with a broker.` });
   }
   return { statement: s, report };
 }

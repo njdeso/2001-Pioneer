@@ -5,6 +5,9 @@ import { reconcileStatement } from '../src/statements/reconcile.ts';
 import { parseMoneyToCents } from '../src/money.ts';
 import { normalizePolicyNumber } from '../src/normalize.ts';
 import type { ExtractedLine, ExtractedStatement, TransactionType } from '../src/statements/types.ts';
+import { buildPostingPlan, type PostingLine, type PostingStatement } from '../src/statements/posting.ts';
+import { commissionSplit } from '../src/statements/match.ts';
+import { ledgerTotals } from '../src/reports/ledger.ts';
 
 // Regression cases from the five real Utica National direct-bill statements (Feb, Mar, May, Jul, Aug 2026).
 // Every amount, entry code and rate is as printed on the statement; the insured names and policy numbers
@@ -117,14 +120,21 @@ for (const key of ['Mar', 'May', 'Jul', 'Aug']) {
     const { statement: s, report } = applyUticaDirectBillRules(asExtracted(key));
     assert.equal(report.applied, true);
     assert.deepEqual(report.contradictingRows, []);
-    assert.equal(s.lines.length, st.rows.length, 'no line added or removed');
-    assert.equal(sum(s), st.agency, 'agency commission total');
-    assert.equal(s.stated.commissionPayableCents, st.agency);
-    assert.equal(s.stated.monthCommissionPayableCents, st.agency, 'amount due producer');
+    // MVR/CLUE expense rows (EXP) are agency-only adjustments, not policy lines; every other row is a line.
+    const exp = st.rows.map((r, i) => (r[0] === 'EXP' ? i + 1 : 0)).filter(Boolean);
+    assert.equal(s.lines.length, st.rows.length - exp.length, 'every row is a line except MVR/CLUE expenses');
+    assert.deepEqual(report.mvrClueRows, exp);
+    assert.deepEqual(s.adjustments.map((a) => [a.amountCents, a.source?.kind, a.source?.policyNumberRaw, a.source?.sheetRow]),
+      exp.map((n) => [-parseMoneyToCents(st.rows[n - 1][3])!, 'mvr', 'MVRCLU', n]), 'MVR/CLUE kept once, negative, with its row for the audit trail');
+    const mvrTotal = s.adjustments.reduce((t, a) => t + a.amountCents, 0);
+    assert.equal(sum(s) + mvrTotal, st.agency, 'policy commissions + MVR/CLUE = agency total');
+    assert.equal(s.stated.commissionPayableCents, st.agency - mvrTotal, 'policy commission check: Producers Total less MVR/CLUE');
+    assert.equal(s.stated.monthCommissionPayableCents, st.agency, 'amount due producer (printed) unchanged');
     // Each line: agency commission = printed with the sign reversed (row by row, not a blanket flip).
-    st.rows.forEach(([, , , comm], i) => assert.equal(s.lines[i].paidCommissionCents, parseMoneyToCents(comm) === 0 ? 0 : -parseMoneyToCents(comm)!));
-    // Cancellations, chargebacks (COMM) and MVR/CLUE expenses (EXP) stay negative.
-    for (const l of s.lines.filter((x) => ['CANC', 'COMM', 'EXP'].includes(x.transactionCodeRaw))) assert.ok(l.paidCommissionCents! < 0, `${l.transactionCodeRaw} line ${l.lineNo}`);
+    for (const l of s.lines) { const printed = parseMoneyToCents(st.rows[l.lineNo - 1][3])!; assert.equal(l.paidCommissionCents, printed === 0 ? 0 : -printed); }
+    // Cancellations and chargebacks (COMM) stay negative policy lines.
+    for (const l of s.lines.filter((x) => ['CANC', 'COMM'].includes(x.transactionCodeRaw))) assert.ok(l.paidCommissionCents! < 0, `${l.transactionCodeRaw} line ${l.lineNo}`);
+    assert.ok(!s.lines.some((l) => l.transactionCodeRaw === 'EXP'));
     // New business and renewals are positive.
     for (const l of s.lines.filter((x) => ['NEW', 'REN'].includes(x.transactionCodeRaw))) assert.ok(l.paidCommissionCents! > 0);
     // Group-printed rows take the policy and insured of the row above (matching reads the policy number),
@@ -132,9 +142,10 @@ for (const key of ['Mar', 'May', 'Jul', 'Aug']) {
     const blanks = st.rows.map((r, i) => (!r[4] ? i : -1)).filter((i) => i >= 0);
     assert.equal(report.filledRows.length, blanks.length);
     const original = asExtracted(key);
-    for (const [i, l] of s.lines.entries()) {
+    for (const l of s.lines) {
+      const i = l.lineNo - 1;
       if (blanks.includes(i)) {
-        const above = s.lines.slice(0, i).reverse().find((x) => !blanks.includes(x.lineNo - 1))!;
+        const above = s.lines.filter((x) => x.lineNo < l.lineNo && !blanks.includes(x.lineNo - 1)).at(-1)!;
         assert.equal(l.policyNumberRaw, above.policyNumberRaw, `line ${i + 1}`);
         assert.equal(l.insuredName, above.insuredName);
         assert.match(l.issues.find((x) => x.code === 'utica_group_row')!.text, new RegExp(`taken from line ${above.lineNo} above`));
@@ -145,7 +156,7 @@ for (const key of ['Mar', 'May', 'Jul', 'Aug']) {
     const rec = reconcileStatement(s);
     assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
     assert.deepEqual(rec.checks.map((c) => [c.key, c.statedCents, c.extractedCents]),
-      [['commission', st.agency, st.agency], ['monthPayable', st.agency, st.agency], ['transactionPremium', parseMoneyToCents(st.totals.gross), parseMoneyToCents(st.totals.gross)]]);
+      [['commission', st.agency - mvrTotal, st.agency - mvrTotal], ['monthPayable', st.agency, st.agency], ['transactionPremium', parseMoneyToCents(st.totals.gross), parseMoneyToCents(st.totals.gross)]]);
     assert.ok(rec.checks.every((c) => c.ok), 'commission, amount due and gross premium all match the printed totals');
     assert.ok(!s.lines.some((l) => l.issues.some((x) => x.code === 'chk_sign_premium')), 'commission and premium now agree in sign');
   });
@@ -169,7 +180,7 @@ test('February 2026: the rows add up to $2,835.46 but Utica\'s own totals leave 
 });
 
 test('five statements together: +$10,221.36 printed by Utica (the Feb rows themselves total $10,480.56)', () => {
-  const total = Object.keys(STATEMENTS).reduce((t, k) => t + (applyUticaDirectBillRules(asExtracted(k)).statement.stated.commissionPayableCents ?? 0), 0);
+  const total = Object.keys(STATEMENTS).reduce((t, k) => t + (applyUticaDirectBillRules(asExtracted(k)).statement.stated.monthCommissionPayableCents ?? 0), 0);
   assert.equal(total, 1022136);
 });
 
@@ -203,4 +214,39 @@ test('the input statement is not modified (pure function)', () => {
   const s0 = asExtracted('Aug'); const before = JSON.stringify(s0);
   applyUticaDirectBillRules(s0);
   assert.equal(JSON.stringify(s0), before);
+});
+
+test('MVR/CLUE at a 50 % broker share: broker $0.00, agency absorbs all of it; policy lines split on their own commission', () => {
+  for (const key of ['May', 'Jul', 'Aug']) {
+    const { statement: s } = applyUticaDirectBillRules(asExtracted(key));
+    const lines: PostingLine[] = s.lines.map((l) => {
+      const amt = l.paidCommissionCents ?? 0; const sp = commissionSplit(amt, 5000);
+      return { id: String(l.lineNo).padStart(5, '0'), lineNo: l.lineNo, insuredName: l.insuredName, policyNumberRaw: l.policyNumberRaw, paidCommissionCents: l.paidCommissionCents, transactionType: l.transactionType, effectiveDate: l.effectiveDate,
+        match: { status: 'matched', method: 'auto', confidence: 'high', policyId: `P-${l.policyNumberRaw}`, clientId: 'C', carrierId: 'UTICA', brokerId: 'B50', brokerShareBps: 5000, brokerShareSource: 'broker', commissionCents: amt, brokerCents: sp.brokerCents, agencyCents: sp.agencyCents, reasons: [], candidates: [], policyNumberKey: null, nameEvidence: 'strong', engineVersion: 'test' } } as unknown as PostingLine;
+    });
+    const stmt: PostingStatement = { id: `UT-${key}`, status: 'needs_review', payerId: 'UTICA', payerKind: 'carrier', statementMonth: s.statementMonth, statementDate: null, adjustments: s.adjustments, postedCents: 0, postingSeq: 0, matching: { stale: false, balanced: true } };
+    const plan = buildPostingPlan(stmt, lines);
+    const st = STATEMENTS[key];
+    assert.equal(plan.totals.amountCents, st.agency, `${key}: posted total = Amount Due Producer`);
+    const mvr = plan.entries.filter((e) => e.level === 'carrier');
+    assert.equal(mvr.length, 1, `${key}: MVR/CLUE posted exactly once`);
+    assert.equal(mvr[0].brokerCents, 0); assert.equal(mvr[0].brokerShareBps, 0); assert.equal(mvr[0].policyId, null);
+    assert.equal(mvr[0].agencyCents, mvr[0].amountCents); assert.ok(mvr[0].amountCents < 0);
+    assert.equal(mvr[0].classification, 'other_adjustment');
+    const brokerFromPolicies = plan.entries.filter((e) => e.level === 'policy').reduce((t, e) => t + e.brokerCents, 0);
+    assert.equal(plan.totals.brokerCents, brokerFromPolicies, 'broker total comes only from policy commissions');
+    assert.ok(!plan.entries.some((e) => e.level === 'policy' && /MVRCLU/.test(String(e.policyId))), 'no policy entry for MVR/CLUE');
+    assert.equal(ledgerTotals(plan.entries.map((e) => ({ ...e, postingStatus: 'posted', reversalOf: null })) as never).brokerCents, brokerFromPolicies);
+  }
+});
+
+test('an MVR/CLUE row that pays the agency is held for review, not moved', () => {
+  const s0 = asExtracted('Jul');
+  s0.lines[7].paidCommissionCents = -638; // printed "6.38-": would be a credit to the agency after the reversal
+  s0.stated.commissionPayableCents! -= 1276; s0.stated.monthCommissionPayableCents! -= 1276;
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(report.mvrClueRows, []);
+  assert.equal(s.adjustments.length, 0);
+  assert.ok(errors(s).includes('utica_mvr_positive'));
+  assert.equal(reconcileStatement(s).reconciled, false);
 });
