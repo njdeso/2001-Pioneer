@@ -292,3 +292,55 @@ test('with no premium evidence AND rows that do not add up to the printed total,
   assert.equal(report.applied, false);
   assert.match(s.issues.find((i) => i.code === 'utica_sign_unverified')!.text, /do not add up to the printed commission total/);
 });
+
+// ---- Production re-read of May 2026, as reported: "signs NOT reversed because line(s) 19, 20 print the
+// commission with the same sign as the premium". Lines 19 (COMM chargeback 26.88) and 20 (EXP MVR/CLUE 19.14)
+// have GROSS PREMIUMS .00; their NET PREMIUMS equal the commission (26.88, 19.14). The AI copied that net
+// figure into a premium field, so they looked like rows contradicting the convention.
+function mayAsReread(premiumField: 'transactionPremium' | 'premiumForCommission', netForAll = false): ExtractedStatement {
+  const s = asExtracted('May');
+  for (const l of s.lines) {
+    const gross = l.transactionPremiumCents ?? 0;
+    const net = gross + (l.paidCommissionCents ?? 0); // Gross + Commission(printed) = Net, as printed on the statement
+    const value = netForAll || gross === 0 ? (net || null) : gross;
+    l.transactionPremiumCents = premiumField === 'transactionPremium' ? value : null;
+    l.premiumForCommissionCents = premiumField === 'premiumForCommission' ? value : null;
+  }
+  if (premiumField === 'premiumForCommission') { s.stated.premiumForCommissionCents = null; }
+  s.stated.transactionPremiumCents = null; // the printed premium total is not what is under test here
+  return s;
+}
+
+for (const [field, netForAll] of [['transactionPremium', false], ['premiumForCommission', false], ['transactionPremium', true]] as const) {
+  test(`May 2026 production re-read (lines 19/20 carry their net premium in ${field}${netForAll ? ', net premiums on every row' : ''}): reversed, MVR/CLUE separated, reconciles`, () => {
+    const s0 = mayAsReread(field, netForAll);
+    assert.equal(premium19(s0), 2688); assert.equal(premium20(s0), 1914);
+    const { statement: s, report } = applyUticaDirectBillRules(s0);
+    assert.deepEqual(report.contradictingRows, [], 'lines 19 and 20 are not evidence against the convention');
+    assert.equal(report.applied, true);
+    assert.deepEqual(report.mvrClueRows, [20]);
+    assert.equal(sum(s), 92956, 'policy commissions +$929.56');
+    assert.deepEqual(s.adjustments.map((a) => [a.amountCents, a.source?.policyNumberRaw, a.source?.sheetRow]), [[-1914, 'MVRCLU', 20]], 'MVR/CLUE −$19.14, agency only');
+    assert.equal(s.stated.monthCommissionPayableCents, 91042, 'net amount due producer +$910.42');
+    const chargeback = s.lines.find((l) => l.lineNo === 19)!;
+    assert.equal(chargeback.transactionCodeRaw, 'COMM');
+    assert.equal(chargeback.paidCommissionCents, -2688, 'the commission chargeback stays a negative policy line (kept, not an adjustment)');
+    assert.equal(s.lines.length, 19, '19 policy lines + 1 adjustment = all 20 printed entries');
+    const rec = reconcileStatement(s);
+    assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+    assert.equal(rec.totals.commissionCents + rec.totals.adjustmentsCents, 91042);
+  });
+}
+const premium19 = (s: ExtractedStatement) => s.lines[18].transactionPremiumCents ?? s.lines[18].premiumForCommissionCents;
+const premium20 = (s: ExtractedStatement) => s.lines[19].transactionPremiumCents ?? s.lines[19].premiumForCommissionCents;
+
+test('a real policy row printed with the wrong sign is still caught (validation is not bypassed)', () => {
+  const s0 = mayAsReread('transactionPremium');
+  s0.lines[9].paidCommissionCents = 23580; // REN 1572.00: "235.80-" misread as "235.80"
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(report.contradictingRows, [10]);
+  assert.equal(report.applied, false);
+  assert.equal(s.adjustments.length, 0, 'nothing moved when the signs are not verified');
+  assert.equal(s.lines.length, 20, 'all entries kept');
+  assert.equal(reconcileStatement(s).reconciled, false);
+});

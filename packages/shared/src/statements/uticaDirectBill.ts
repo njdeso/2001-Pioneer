@@ -43,6 +43,17 @@ const neg = (c: Cents | null) => (c === null ? null : c === 0 ? 0 : -c);
 /** The row's printed GROSS PREMIUMS amount. The AI may put it in either premium field (both mean the same
  *  column on this statement), so use whichever it filled. */
 const premium = (l: Pick<ExtractedLine, 'transactionPremiumCents' | 'premiumForCommissionCents'>) => l.transactionPremiumCents ?? l.premiumForCommissionCents;
+/**
+ * A row with NO gross premium: Utica's "commission chargebacks on unpaid direct bill premiums … and/or
+ * MVR/CLUE expense" entries (entry codes COMM / EXP, GROSS PREMIUMS .00). Their NET PREMIUMS column equals
+ * the commission, and the AI may copy that net figure into a premium field — which is not a gross premium
+ * and says nothing about the sign convention. Recognised by the entry code, or by a premium equal to the
+ * commission (impossible for a real policy row: that would be a 100 % commission rate).
+ */
+const noGrossPremium = (l: ExtractedLine) => {
+  const p = premium(l);
+  return !p || /^(COMM|EXP)$/i.test(l.transactionCodeRaw.trim()) || Math.abs(p) === Math.abs(l.paidCommissionCents ?? 0);
+};
 const sign = (c: Cents | null) => (c === null || c === 0 ? 0 : c > 0 ? 1 : -1);
 
 export interface UticaReport {
@@ -78,6 +89,7 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
 
   // ---- 1. verify the printed sign convention, then reverse every commission figure ----
   for (const l of s.lines) {
+    if (noGrossPremium(l)) continue; // chargeback / expense rows carry no gross premium to compare with
     const c = sign(l.paidCommissionCents), p = sign(premium(l));
     if (c === 0 || p === 0) continue;
     if (c !== p) report.evidenceRows++;
@@ -123,7 +135,7 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
     }
   }
   // ---- 4. MVR/CLUE expense rows → agency-only statement adjustments ----
-  const isMvrClue = (l: ExtractedLine) => /^EXP$/i.test(l.transactionCodeRaw.trim()) && /^MVR\s*CLU/i.test(l.policyNumberRaw.trim()) && !premium(l);
+  const isMvrClue = (l: ExtractedLine) => /^EXP$/i.test(l.transactionCodeRaw.trim()) && /^MVR\s*CLU/i.test(l.policyNumberRaw.trim()) && noGrossPremium(l);
   const mvr = s.lines.filter(isMvrClue);
   const refunds = mvr.filter((l) => (l.paidCommissionCents ?? 0) > 0);
   if (refunds.length) {
