@@ -459,7 +459,9 @@ test('May 2026 production re-read: line 16 net read as -136.00 — sign verified
   assert.deepEqual(report.netSignCorrectedRows, [16]);
   const l16 = s.lines.find((l) => l.lineNo === 16)!;
   assert.deepEqual([l16.premiumForCommissionCents, l16.transactionPremiumCents, l16.paidCommissionCents], [17000, 13600, 3400]);
-  assert.match(l16.issues.find((i) => i.code === 'utica_net_sign_read')!.text, /^Line 16: net premium read as -\$136\.00; .* give \$136\.00, which is used/);
+  const note = l16.issues.find((i) => i.code === 'utica_net_sign_read')!;
+  assert.equal(note.text, 'Line 16: AI read the net premium as -$136.00; corrected to $136.00. Reason: the net premium is the only figure on the row that does not agree with the others. Arithmetic: gross $170.00 x 20.00% = commission $34.00 (printed 34.00-); gross $170.00 + commission as printed -$34.00 = net $136.00; with $136.00 the net premium column adds up exactly to the printed total $4,825.58 (as read it added up to $4,553.58). Commission and gross premium unchanged.');
+  assert.ok(s.issues.some((i) => i.code === 'utica_net_sign_read' && i.text === note.text), 'also shown at the top of the statement');
   assert.deepEqual(report.mvrClueRows, [20]);
   assert.deepEqual(s.adjustments.map((a) => [a.amountCents, a.source?.kind]), [[-1914, 'mvr']], 'MVR/CLUE −$19.14 still an agency-only adjustment');
   assert.equal(sum(s), 92956);
@@ -482,6 +484,16 @@ test('the net figure is NOT corrected when the printed net total does not confir
   assert.deepEqual(report.netSignCorrectedRows, []);
   assert.equal(s.lines.find((l) => l.lineNo === 16)!.transactionPremiumCents, -13600, 'left as read');
   assert.ok(errors(s).includes('utica_row_premium_inconsistent'));
+  assert.equal(reconcileStatement(s).reconciled, false);
+});
+
+test('a misread net with no printed rate is not corrected and still blocks the sign reversal', () => {
+  const s0 = mayRereadNov12();
+  s0.lines[15].rateBps = null;
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(report.contradictingRows, [16]);
+  assert.equal(report.applied, false);
+  assert.equal(s.lines[15].transactionPremiumCents, -13600);
   assert.equal(reconcileStatement(s).reconciled, false);
 });
 

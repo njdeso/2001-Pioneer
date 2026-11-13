@@ -77,7 +77,7 @@ function misreadNetField(l: ExtractedLine): PremField | null {
     const n = l[net], g = l[OTHER[net]];
     if (n === null || g === null || !n || !g || n === g) continue;
     if (g + c !== -n || sign(n) === sign(g)) continue;
-    if (l.rateBps && Math.round((Math.abs(g) * l.rateBps) / 10000) !== Math.abs(c)) continue;
+    if (!l.rateBps || Math.round((Math.abs(g) * l.rateBps) / 10000) !== Math.abs(c)) continue; // the printed rate must confirm the gross
     return net;
   }
   return null;
@@ -155,10 +155,14 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
     const printed = s.stated[f];
     const corrected = s.lines.reduce((t, l) => t + (rows.includes(l) ? -(l[f] ?? 0) : (l[f] ?? 0)), 0);
     if (printed !== null && corrected === printed) {
+      const asRead = s.lines.reduce((t, l) => t + (l[f] ?? 0), 0);
       for (const l of rows) {
-        const read = l[f]!;
+        const read = l[f]!, gross = l[OTHER[f]]!, printedComm = neg(l.paidCommissionCents)!;
         l[f] = -read;
-        l.issues.push({ level: 'warning', code: 'utica_net_sign_read', text: `Line ${l.lineNo}: net premium read as ${fmt(read)}; the printed row (gross ${fmt(l[OTHER[f]]!)} + commission as printed) and the printed net premium total both give ${fmt(-read)}, which is used. Commission and gross premium unchanged.` });
+        const rate = (l.rateBps! / 100).toFixed(2);
+        const text = `Line ${l.lineNo}: AI read the net premium as ${fmt(read)}; corrected to ${fmt(-read)}. Reason: the net premium is the only figure on the row that does not agree with the others. Arithmetic: gross ${fmt(gross)} x ${rate}% = commission ${fmt(Math.abs(printedComm))} (printed ${(Math.abs(printedComm) / 100).toFixed(2)}${printedComm < 0 ? '-' : ''}); gross ${fmt(gross)} + commission as printed ${fmt(printedComm)} = net ${fmt(-read)}; with ${fmt(-read)} the net premium column adds up exactly to the printed total ${fmt(printed)} (as read it added up to ${fmt(asRead)}). Commission and gross premium unchanged.`;
+        l.issues.push({ level: 'warning', code: 'utica_net_sign_read', text });
+        s.issues.push({ level: 'warning', code: 'utica_net_sign_read', text });
         report.netSignCorrectedRows.push(l.lineNo);
       }
     } else {
