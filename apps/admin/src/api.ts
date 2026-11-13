@@ -137,8 +137,8 @@ export const api = {
   recordRetainedCommission: (input: { requestId: string; policyId: string; statementPeriod: string; amountCents: number; transactionDate: string | null; classification: string; note: string }) =>
     call<typeof input, { entryId: string; duplicate: boolean }>('recordRetainedCommission', input),
   reverseLedgerEntry: (entryId: string, reason: string) => call<{ entryId: string; reason: string }, { reversalId: string }>('reverseLedgerEntry', { entryId, reason }),
-  getStatementFileUrl: (statementId: string) =>
-    call<{ statementId: string }, { url: string; expiresInSeconds: number }>('getStatementFileUrl', { statementId }),
+  getStatementFileUrl: (statementId: string, download = false) =>
+    call<{ statementId: string; download?: boolean }, { url: string; expiresInSeconds: number }>('getStatementFileUrl', download ? { statementId, download } : { statementId }),
   reassignPolicies: (policyIds: string[], brokerId: string) =>
     call<{ policyIds: string[]; brokerId: string }, { moved: number }>('reassignPolicies', { policyIds, brokerId }),
 };

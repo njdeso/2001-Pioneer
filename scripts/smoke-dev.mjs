@@ -195,6 +195,12 @@ async function putFile(bucket, path, bytes, contentType = 'application/pdf') {
 }
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const sha256hex = (b) => createHash('sha256').update(b).digest('hex');
+/** Fetch a signed link to a statement original: status, Content-Disposition and the exact bytes' SHA-256. */
+async function fetchOriginal(url) {
+  const r = await fetch(url);
+  const b = Buffer.from(await r.arrayBuffer());
+  return { ok: r.ok, disp: r.headers.get('content-disposition') ?? '', pdf: b.subarray(0, 5).toString('latin1') === '%PDF-', sha256: sha256hex(b), size: b.length };
+}
 
 const readOk = (p) => p && (p.status === 'needs_review' || p.status === 'discrepancy') && p.lines === 3 && p.reconciled === true;
 const describe = (p) => p.status === 'extraction_failed' ? `extraction_failed: ${p.failure?.code} — ${p.failure?.message}` : `${p.status}, ${p.lines} lines, reconciled=${p.reconciled}`;
@@ -483,7 +489,13 @@ async function expectRejected(promise) {
   try { await promise; return { rejected: false, message: 'succeeded' }; } catch (e) { return { rejected: true, message: e instanceof Error ? e.message : String(e) }; }
 }
 
-async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
+async function stage3c({ sid, ref, policiesBefore, linesBefore, bucket }) {
+  // This synthetic statement has no file of its own: store a real (synthetic) PDF in the dev bucket where
+  // processStatement keeps originals, and record its path and SHA-256 as the pipeline does — before approval.
+  const original = await syntheticStatement('posted-original');
+  const originalPath = `statements/${sid}/original.pdf`;
+  await putFile(bucket, originalPath, original.bytes);
+  await ref.update({ originalPath, sha256: original.sha256, size: original.bytes.length, fileName: original.fileName });
   summary('\n#### Stage 3C — approval, posting, reversal, retained commission (synthetic data)\n');
   summary('| | Check | Result |');
   summary('|---|---|---|');
@@ -569,6 +581,21 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
     `sum ${$(sum((e) => e.amountCents))}, broker ${$(sum((e) => e.brokerCents))}, agency ${$(sum((e) => e.agencyCents))}; suspense ${susp.length}; adjustment ${adj.length}; line 7 ${$(l7?.brokerCents)}/${$(l7?.agencyCents)} @${(l7?.brokerShareBps ?? 0) / 100}% ${l7?.brokerShareSource}`);
   const stmtPosted = (await ref.get()).data();
   record('Statement marked posted', stmtPosted.status === 'posted' && stmtPosted.postedCents === 41000, `${stmtPosted.status}, posted ${$(stmtPosted.postedCents)}`);
+
+  // 6b. The original stays viewable and downloadable once posted (admin and staff), byte-for-byte the file
+  // that was stored (SHA-256 recorded at upload), and that changes nothing.
+  const ledgerSnap = async () => JSON.stringify((await ledgerFor()).map((e) => [e.id, e.amountCents, e.brokerCents, e.agencyCents, e.postingStatus]).sort());
+  const ledgerBeforeView = await ledgerSnap();
+  const [vAdmin, dAdmin, vStaff, dStaff] = await Promise.all([
+    call('getStatementFileUrl', { statementId: sid }), call('getStatementFileUrl', { statementId: sid, download: true }),
+    call('getStatementFileUrl', { statementId: sid }, 1, STAFF_TOKEN), call('getStatementFileUrl', { statementId: sid, download: true }, 1, STAFF_TOKEN)]);
+  const got = await Promise.all([vAdmin, dAdmin, vStaff, dStaff].map((r) => fetchOriginal(r.url)));
+  const stmtAfterView = (await ref.get()).data();
+  const unchanged = stmtAfterView.status === 'posted' && stmtAfterView.postedCents === stmtPosted.postedCents && stmtAfterView.postingSeq === stmtPosted.postingSeq && (await ledgerSnap()) === ledgerBeforeView;
+  const sameBytes = got.every((g) => g.sha256 === original.sha256);
+  record('Posted statement: original viewable and downloadable by admin and staff, byte-identical to the stored upload; statement and ledger unchanged',
+    got.every((g) => g.ok && g.pdf) && sameBytes && /^inline/i.test(got[0].disp) && /^attachment/i.test(got[1].disp) && /^inline/i.test(got[2].disp) && /^attachment/i.test(got[3].disp) && unchanged,
+    `${got.map((g) => `${g.ok ? 'ok' : 'FAIL'} ${g.pdf ? 'PDF' : 'not PDF'} ${g.disp.split(';')[0]}`).join(' / ')}; SHA-256 ${sameBytes ? 'matches upload' : 'DIFFERS'} (${original.sha256.slice(0, 12)}…, ${got[0].size} bytes); statement ${stmtAfterView.status} ${$(stmtAfterView.postedCents)}; ledger ${unchanged ? 'unchanged' : 'CHANGED'}`);
 
   // 7. Reports: the rolling-12-month window moves by exactly the posted amounts
   const afterPost = await windowTotals();
@@ -690,7 +717,7 @@ async function buyoutStage() {
 }
 
 // ---------------------------------------------------------------- Same-month statements (duplicates)
-async function duplicateStage() {
+async function duplicateStage(cfg) {
   summary('\n#### Same-month statements — Personal / Commercial Lines vs a renamed copy (synthetic payer SYNDUP)\n');
   summary('| | Check | Result |');
   summary('|---|---|---|');
@@ -709,6 +736,15 @@ async function duplicateStage() {
   await write('SYNDUP-CL', 'Synthetic Commercial Lines Sep.pdf', CL, 'Commercial Lines Statement');
   await write('SYNDUP-COPY', 'scan_renamed_copy.pdf', [...PL].reverse().map((l, i) => ({ ...l, lineNo: i + 1 })), 'Personal Lines Statement');
   const ledgerBefore = (await db.collection('ledger').count().get()).data().count;
+
+  // These synthetic statements have no stored original: viewing one must say so clearly.
+  const noFile = await expectRejected(call('getStatementFileUrl', { statementId: 'SYNDUP-PL' }));
+  record('Original never stored: a clear explanation, no link', noFile.rejected && /never stored/.test(noFile.message), noFile.message.slice(0, 160));
+  // Recorded but absent from storage (fixed ID, overwritten each run; no file is ever written to this path).
+  await db.collection('statements').doc('SYNORIG-MISSING').set({ status: 'needs_review', fileName: 'Synthetic missing original.pdf', fileType: 'pdf', size: 1, sha256: null, payerId: 'SYNDUP', statementMonth: '2026-08',
+    originalPath: 'statements/SYNORIG-MISSING/original.pdf', postedCents: 0, synthetic: true, updatedAt: FieldValue.serverTimestamp() });
+  const gone = await expectRejected(call('getStatementFileUrl', { statementId: 'SYNORIG-MISSING' }));
+  record('Original recorded but missing from storage: a clear explanation, no link', gone.rejected && /missing from storage/.test(gone.message), gone.message.slice(0, 160));
 
   const c = await call('checkStatementDuplicates', { statementId: 'SYNDUP-PL' });
   const rel = Object.fromEntries((c.findings ?? []).map((f) => [f.otherId, f]));
@@ -817,6 +853,8 @@ try {
     await putFile(cfg.storageBucket, ra.uploadPath, a.bytes);
     const pa = await call('processStatement', { statementId: ra.statementId, method: 'auto' });
     record('AI reads a PDF and reconciles to the cent', readOk(pa), `${describe(pa)} (statement ${ra.statementId})`);
+    const fa = await fetchOriginal((await call('getStatementFileUrl', { statementId: ra.statementId, download: true })).url);
+    record('Uploaded PDF stored by the pipeline: the download is byte-identical to the upload', fa.ok && fa.sha256 === a.sha256 && /^attachment/i.test(fa.disp), `${fa.ok ? 'ok' : 'FAIL'}, SHA-256 ${fa.sha256 === a.sha256 ? 'matches' : 'DIFFERS'}, ${fa.size} bytes, ${fa.disp.split(';')[0]}`);
 
     // 3. Interrupted upload → resume into the same record
     const b = await syntheticStatement('resume');
@@ -861,10 +899,10 @@ try {
   // Stage 3B does not use Claude, so it runs even if the AI checks failed.
   let ctx3b = null;
   try { ctx3b = await stage3b(); } catch (err) { record('Stage 3B matching run', false, err instanceof Error ? err.message : String(err)); }
-  if (ctx3b) { try { await stage3c(ctx3b); } catch (err) { record('Stage 3C posting run', false, err instanceof Error ? err.message : String(err)); } }
+  if (ctx3b) { try { await stage3c({ ...ctx3b, bucket: cfg.storageBucket }); } catch (err) { record('Stage 3C posting run', false, err instanceof Error ? err.message : String(err)); } }
   try { await buyoutStage(); } catch (err) { record('Broker buyout run', false, err instanceof Error ? err.message : String(err)); }
   try { await exportStage(cfg); } catch (err) { record('Customer & Policy Export run', false, err instanceof Error ? err.message : String(err)); }
-  try { await duplicateStage(); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
+  try { await duplicateStage(cfg); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
   try { await detailedMvrStage(cfg); } catch (err) { record('DetailedStatement MVR run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
