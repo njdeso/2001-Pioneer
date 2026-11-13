@@ -224,7 +224,6 @@ export function StatementQueuePage() {
       <PageHeader title="AI Processing Queue" subtitle="Every uploaded statement, how it was read, and whether it reconciles to the carrier's totals."
         actions={<Link to="/statements"><Button>Upload statements</Button></Link>} />
       <ErrorNote message={error} />
-      {!original.available && <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">Original statement: {original.reason}</p>}
       <label className="flex items-center gap-2 text-xs text-slate-600">
         <input type="checkbox" checked={showDiscarded} onChange={(e) => setShowDiscarded(e.target.checked)} /> Show discarded
       </label>
@@ -360,6 +359,7 @@ export function StatementReviewPage() {
         </>}
       />
       <ErrorNote message={error} />
+      {!original.available && <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">Original statement: {original.reason}</p>}
 
       {stmt.status === 'extraction_failed' && stmt.failure && (
         <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
