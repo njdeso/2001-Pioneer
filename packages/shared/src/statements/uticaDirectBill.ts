@@ -40,6 +40,20 @@ export function isUticaDirectBill(s: Pick<ExtractedStatement, 'carrierName'>): b
 
 const fmt = (c: Cents) => `${c < 0 ? '-' : ''}$${(Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const neg = (c: Cents | null) => (c === null ? null : c === 0 ? 0 : -c);
+/** The row's printed GROSS PREMIUMS amount. The AI may put it in either premium field (both mean the same
+ *  column on this statement), so use whichever it filled. */
+const premium = (l: Pick<ExtractedLine, 'transactionPremiumCents' | 'premiumForCommissionCents'>) => l.transactionPremiumCents ?? l.premiumForCommissionCents;
+/**
+ * A row with NO gross premium: Utica's "commission chargebacks on unpaid direct bill premiums … and/or
+ * MVR/CLUE expense" entries (entry codes COMM / EXP, GROSS PREMIUMS .00). Their NET PREMIUMS column equals
+ * the commission, and the AI may copy that net figure into a premium field — which is not a gross premium
+ * and says nothing about the sign convention. Recognised by the entry code, or by a premium equal to the
+ * commission (impossible for a real policy row: that would be a 100 % commission rate).
+ */
+const noGrossPremium = (l: ExtractedLine) => {
+  const p = premium(l);
+  return !p || /^(COMM|EXP)$/i.test(l.transactionCodeRaw.trim()) || Math.abs(p) === Math.abs(l.paidCommissionCents ?? 0);
+};
 const sign = (c: Cents | null) => (c === null || c === 0 ? 0 : c > 0 ? 1 : -1);
 
 export interface UticaReport {
@@ -75,7 +89,8 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
 
   // ---- 1. verify the printed sign convention, then reverse every commission figure ----
   for (const l of s.lines) {
-    const c = sign(l.paidCommissionCents), p = sign(l.transactionPremiumCents);
+    if (noGrossPremium(l)) continue; // chargeback / expense rows carry no gross premium to compare with
+    const c = sign(l.paidCommissionCents), p = sign(premium(l));
     if (c === 0 || p === 0) continue;
     if (c !== p) report.evidenceRows++;
     else report.contradictingRows.push(l.lineNo);
@@ -83,10 +98,13 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
   const statedTotal = s.stated.commissionPayableCents;
   const linesTotal = s.lines.reduce((t, l) => t + (l.paidCommissionCents ?? 0), 0);
   const totalContradicts = statedTotal !== null && linesTotal !== 0 && sign(statedTotal) !== 0 && sign(statedTotal) !== sign(linesTotal);
-  if (report.contradictingRows.length || report.evidenceRows === 0 || totalContradicts) {
+  // With no row showing both a premium and a commission, the rows must at least add up exactly to the
+  // printed commission total (same convention, read faithfully) before anything is reversed.
+  const noEvidenceButTotalsAgree = report.evidenceRows === 0 && statedTotal !== null && statedTotal === linesTotal && linesTotal !== 0;
+  if (report.contradictingRows.length || (report.evidenceRows === 0 && !noEvidenceButTotalsAgree) || totalContradicts) {
     const why = report.contradictingRows.length
       ? `line(s) ${report.contradictingRows.join(', ')} print the commission with the same sign as the premium`
-      : report.evidenceRows === 0 ? 'no row has both a premium and a commission to confirm it'
+      : report.evidenceRows === 0 ? 'no row has both a premium and a commission to confirm it, and the rows do not add up to the printed commission total'
         : 'the printed commission total and the rows disagree in sign';
     s.issues.push({ level: 'error', code: 'utica_sign_unverified', text: `Utica direct-bill statement: commission signs were NOT reversed because ${why}. The commissions are shown as printed; check the statement manually.` });
     return { statement: s, report };
@@ -96,7 +114,7 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
   s.stated.monthCommissionPayableCents = neg(s.stated.monthCommissionPayableCents);
   s.stated.ytdCommissionPayableCents = neg(s.stated.ytdCommissionPayableCents);
   for (const a of s.adjustments) a.amountCents = neg(a.amountCents) ?? 0;
-  s.issues.push({ level: 'warning', code: 'utica_sign_convention', text: `Utica direct-bill statement: the COMMISSIONS column prints commission owed to the agency with a trailing minus. Signs were reversed for the agency's view after ${report.evidenceRows} row(s) confirmed it (premium and commission printed with opposite signs). Cancellations, chargebacks and MVR/CLUE expenses stay negative.` });
+  s.issues.push({ level: 'warning', code: 'utica_sign_convention', text: `Utica direct-bill statement: the COMMISSIONS column prints commission owed to the agency with a trailing minus. Signs were reversed for the agency's view after ${report.evidenceRows ? `${report.evidenceRows} row(s) confirmed it (premium and commission printed with opposite signs)` : 'the rows added up exactly to the printed commission total'}. Cancellations, chargebacks and MVR/CLUE expenses stay negative.` });
   report.applied = true;
 
   // ---- 3. a printed row the carrier left out of its totals ----
@@ -104,8 +122,9 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
   if (total !== null) {
     const diff = s.lines.reduce((t, l) => t + (l.paidCommissionCents ?? 0), 0) - total;
     if (diff !== 0) {
-      const premDiff = s.stated.transactionPremiumCents !== null ? s.lines.reduce((t, l) => t + (l.transactionPremiumCents ?? 0), 0) - s.stated.transactionPremiumCents : null;
-      const candidates = s.lines.filter((l) => l.paidCommissionCents === diff && (premDiff === null || l.transactionPremiumCents === premDiff));
+      const statedPremium = s.stated.transactionPremiumCents ?? s.stated.premiumForCommissionCents;
+      const premDiff = statedPremium !== null ? s.lines.reduce((t, l) => t + (premium(l) ?? 0), 0) - statedPremium : null;
+      const candidates = s.lines.filter((l) => l.paidCommissionCents === diff && (premDiff === null || premium(l) === premDiff));
       if (candidates.length === 1) {
         const l = candidates[0];
         report.rowsOutsideTotals.push(l.lineNo);
@@ -116,7 +135,7 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
     }
   }
   // ---- 4. MVR/CLUE expense rows → agency-only statement adjustments ----
-  const isMvrClue = (l: ExtractedLine) => /^EXP$/i.test(l.transactionCodeRaw.trim()) && /^MVR\s*CLU/i.test(l.policyNumberRaw.trim()) && !l.transactionPremiumCents;
+  const isMvrClue = (l: ExtractedLine) => /^EXP$/i.test(l.transactionCodeRaw.trim()) && /^MVR\s*CLU/i.test(l.policyNumberRaw.trim()) && noGrossPremium(l);
   const mvr = s.lines.filter(isMvrClue);
   const refunds = mvr.filter((l) => (l.paidCommissionCents ?? 0) > 0);
   if (refunds.length) {
