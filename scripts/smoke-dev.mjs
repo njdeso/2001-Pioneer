@@ -570,6 +570,20 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore }) {
   const stmtPosted = (await ref.get()).data();
   record('Statement marked posted', stmtPosted.status === 'posted' && stmtPosted.postedCents === 41000, `${stmtPosted.status}, posted ${$(stmtPosted.postedCents)}`);
 
+  // 6b. The original stays viewable and downloadable once posted (admin and staff), and that changes nothing.
+  const ledgerSnap = async () => JSON.stringify((await ledgerFor()).map((e) => [e.id, e.amountCents, e.brokerCents, e.agencyCents, e.postingStatus]).sort());
+  const ledgerBeforeView = await ledgerSnap();
+  const fetchOriginal = async (u) => { const r = await fetch(u); const b = Buffer.from(await r.arrayBuffer()); return { ok: r.ok, disp: r.headers.get('content-disposition') ?? '', pdf: b.subarray(0, 5).toString('latin1') === '%PDF-' }; };
+  const [vAdmin, dAdmin, vStaff, dStaff] = await Promise.all([
+    call('getStatementFileUrl', { statementId: sid }), call('getStatementFileUrl', { statementId: sid, download: true }),
+    call('getStatementFileUrl', { statementId: sid }, 1, STAFF_TOKEN), call('getStatementFileUrl', { statementId: sid, download: true }, 1, STAFF_TOKEN)]);
+  const got = await Promise.all([vAdmin, dAdmin, vStaff, dStaff].map((r) => fetchOriginal(r.url)));
+  const stmtAfterView = (await ref.get()).data();
+  const unchanged = stmtAfterView.status === 'posted' && stmtAfterView.postedCents === stmtPosted.postedCents && stmtAfterView.postingSeq === stmtPosted.postingSeq && (await ledgerSnap()) === ledgerBeforeView;
+  record('Posted statement: original viewable and downloadable by admin and staff; statement and ledger unchanged',
+    got.every((g) => g.ok && g.pdf) && /^inline/i.test(got[0].disp) && /^attachment/i.test(got[1].disp) && /^inline/i.test(got[2].disp) && /^attachment/i.test(got[3].disp) && unchanged,
+    `${got.map((g) => `${g.ok ? 'ok' : 'FAIL'} ${g.pdf ? 'PDF' : 'not PDF'} ${g.disp.split(';')[0]}`).join(' / ')}; statement ${stmtAfterView.status} ${$(stmtAfterView.postedCents)}; ledger ${unchanged ? 'unchanged' : 'CHANGED'}`);
+
   // 7. Reports: the rolling-12-month window moves by exactly the posted amounts
   const afterPost = await windowTotals();
   record('Rolling-12-month report includes the posting', afterPost.amount - before.amount === 41000 && afterPost.broker - before.broker === 14200,
@@ -709,6 +723,10 @@ async function duplicateStage() {
   await write('SYNDUP-CL', 'Synthetic Commercial Lines Sep.pdf', CL, 'Commercial Lines Statement');
   await write('SYNDUP-COPY', 'scan_renamed_copy.pdf', [...PL].reverse().map((l, i) => ({ ...l, lineNo: i + 1 })), 'Personal Lines Statement');
   const ledgerBefore = (await db.collection('ledger').count().get()).data().count;
+
+  // These synthetic statements have no stored original: viewing one must say so clearly.
+  const noFile = await expectRejected(call('getStatementFileUrl', { statementId: 'SYNDUP-PL' }));
+  record('Original never stored: a clear explanation, no link', noFile.rejected && /never stored/.test(noFile.message), noFile.message.slice(0, 160));
 
   const c = await call('checkStatementDuplicates', { statementId: 'SYNDUP-PL' });
   const rel = Object.fromEntries((c.findings ?? []).map((f) => [f.otherId, f]));

@@ -5,6 +5,7 @@ import { ref as storageRef, uploadBytesResumable } from 'firebase/storage';
 import {
   formatBps, formatMonth, STATEMENT_CLASSIFICATION_LABELS, TRANSACTION_TYPE_LABELS,
   type Cents, type StatementClassification, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment, type SourceAccounting,
+  originalFileAccess,
 } from '@asm/shared';
 import { db, storage } from '../firebase';
 import { api } from '../api';
@@ -29,6 +30,7 @@ interface StatementDoc {
   status: 'awaiting_upload' | 'processing' | 'needs_review' | 'discrepancy' | 'extraction_failed' | 'discarded' | 'approved' | 'posted';
   fileName: string;
   fileType: 'pdf' | 'xlsx' | 'csv';
+  originalPath?: string | null;
   size: number;
   method?: string;
   carrierName?: string;
@@ -222,6 +224,7 @@ export function StatementQueuePage() {
       <PageHeader title="AI Processing Queue" subtitle="Every uploaded statement, how it was read, and whether it reconciles to the carrier's totals."
         actions={<Link to="/statements"><Button>Upload statements</Button></Link>} />
       <ErrorNote message={error} />
+      {!original.available && <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">Original statement: {original.reason}</p>}
       <label className="flex items-center gap-2 text-xs text-slate-600">
         <input type="checkbox" checked={showDiscarded} onChange={(e) => setShowDiscarded(e.target.checked)} /> Show discarded
       </label>
@@ -290,6 +293,7 @@ export function StatementReviewPage() {
     unmatched: lines.filter(matchFilterFn('unmatched')).length, manual: lines.filter(matchFilterFn('manual')).length, not_run: lines.filter(matchFilterFn('not_run')).length,
   };
   const issuesCount = lines.filter((l) => l.issues?.length).length;
+  const original = originalFileAccess(stmt);
 
   async function act(fn: () => Promise<unknown>) {
     setBusy(true); setError(null);
@@ -300,6 +304,13 @@ export function StatementReviewPage() {
       const { url } = await api.getStatementFileUrl(stmt!.id);
       if (stmt!.fileType === 'pdf') setFileUrl(url);
       else window.open(url, '_blank', 'noopener');
+    });
+  }
+  async function downloadOriginal() {
+    await act(async () => {
+      const { url } = await api.getStatementFileUrl(stmt!.id, true); // signed link served as an attachment
+      const a = document.createElement('a');
+      a.href = url; a.rel = 'noopener'; document.body.appendChild(a); a.click(); a.remove();
     });
   }
 
@@ -342,7 +353,9 @@ export function StatementReviewPage() {
           {stmt.agencyCode && <> · agency code {stmt.agencyCode}</>}{stmt.statementDate && <> · dated {stmt.statementDate}</>}{stmt.pageCount ? <> · {stmt.pageCount} pages</> : null}
         </span>}
         actions={<>
-          <Button variant="secondary" disabled={busy || !['needs_review', 'discrepancy', 'extraction_failed'].includes(stmt.status)} onClick={() => void openOriginal()}>View original</Button>
+          {/* The original can be viewed and downloaded in every status (posted included) once stored. */}
+          <Button variant="secondary" disabled={busy || !original.available} title={original.available ? undefined : original.reason} onClick={() => void openOriginal()}>View original</Button>
+          <Button variant="ghost" disabled={busy || !original.available} title={original.available ? undefined : original.reason} onClick={() => void downloadOriginal()}>Download original</Button>
           {stmt.status !== 'discarded' && stmt.status !== 'processing' && <Button variant="ghost" onClick={() => setDiscarding(true)}>Discard…</Button>}
         </>}
       />
@@ -440,7 +453,7 @@ export function StatementReviewPage() {
       )}
 
       {fileUrl && (
-        <Card title="Original statement" actions={<Button size="sm" variant="ghost" onClick={() => setFileUrl(null)}>Close</Button>}>
+        <Card title="Original statement" actions={<><Button size="sm" variant="ghost" disabled={busy} onClick={() => void downloadOriginal()}>Download</Button><Button size="sm" variant="ghost" onClick={() => setFileUrl(null)}>Close</Button></>}>
           <iframe title="Original statement" src={fileUrl} className="h-[70vh] w-full rounded border border-slate-200" />
           <p className="mt-1 text-xs text-slate-500">Link expires in 5 minutes. Viewing is recorded in the audit log.</p>
         </Card>

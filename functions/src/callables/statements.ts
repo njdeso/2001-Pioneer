@@ -6,6 +6,7 @@ import { getStorage } from 'firebase-admin/storage';
 import type { DocumentData, DocumentReference } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import {
+  originalFileAccess, originalFileDisposition,
   DEFAULT_AI_MODEL, AI_PROMPT_VERSION, DETAILED_STATEMENT_READER, TRAVELERS_PL_PARSER, applyUticaDirectBillRules, extractWithClaude, isUticaDirectBill, readDetailedStatement, isTravelersPlStatement, normalizeName, sniffError, sniffSpreadsheet,
   parseCsv, parseTravelersPl, reconcileStatement, tableToText,
   type ExtractedStatement, type ExtractionMethod,
@@ -476,18 +477,28 @@ export const discardStatement = onCall(async (req) => {
 
 /** Short-lived link to view the preserved original. */
 export const getStatementFileUrl = onCall(async (req) => {
+  // Every status, including approved and posted: the original is evidence and viewing it changes nothing.
   const actor = requireRole(req, ['admin', 'staff']);
-  const statementId = idParam((req.data as { statementId?: unknown })?.statementId, 'statement');
+  const data = req.data as { statementId?: unknown; download?: unknown } | undefined;
+  const statementId = idParam(data?.statementId, 'statement');
   if (!statementId) throw new HttpsError('invalid-argument', 'Statement is required.');
+  const download = data?.download === true;
   const snap = await db.collection('statements').doc(statementId).get();
-  const path = snap.get('originalPath') as string | undefined;
-  if (!snap.exists || !path) throw new HttpsError('not-found', 'The original file is not available.');
-  const [url] = await getStorage().bucket().file(path).getSignedUrl({
+  if (!snap.exists) throw new HttpsError('not-found', 'The statement was not found.');
+  const access = originalFileAccess({ status: String(snap.get('status') ?? ''), originalPath: snap.get('originalPath') as string | null | undefined });
+  if (!access.available) throw new HttpsError('not-found', access.reason);
+  const path = snap.get('originalPath') as string;
+  const file = getStorage().bucket().file(path);
+  const [exists] = await file.exists();
+  if (!exists) throw new HttpsError('not-found', 'The original file is recorded for this statement but is missing from storage. Upload the statement again if you need the file.');
+  const [url] = await file.getSignedUrl({
     version: 'v4', action: 'read', expires: Date.now() + 5 * 60 * 1000,
-    responseDisposition: `inline; filename="${String(snap.get('fileName')).replace(/"/g, '')}"`,
+    responseDisposition: originalFileDisposition(snap.get('fileName'), download),
   });
   const b = db.batch();
-  audit(b, actor, { action: 'view_original', entityType: 'statement', entityId: statementId, summary: 'Viewed original statement file' });
+  audit(b, actor, download
+    ? { action: 'download_original', entityType: 'statement', entityId: statementId, summary: 'Downloaded original statement file' }
+    : { action: 'view_original', entityType: 'statement', entityId: statementId, summary: 'Viewed original statement file' });
   await b.commit();
   return { url, expiresInSeconds: 300 };
 });
