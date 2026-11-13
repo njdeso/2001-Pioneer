@@ -66,6 +66,7 @@ export interface AuditInput {
   entityId: string;
   summary: string;
   changes?: Record<string, { before: unknown; after: unknown }>;
+  detail?: Record<string, unknown>;
 }
 
 /** Anything that can stage a document write: a Transaction or a WriteBatch. */
@@ -84,6 +85,7 @@ export function audit(tx: Writer, actor: Actor, a: AuditInput): void {
     entityId: a.entityId,
     summary: a.summary,
     changes: a.changes ?? {},
+    ...(a.detail ? { detail: a.detail } : {}),
   });
   // Application log carries ids only — no names, numbers or amounts.
   logger.info('audit', { action: a.action, entityType: a.entityType, entityId: a.entityId });

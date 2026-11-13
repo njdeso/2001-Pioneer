@@ -103,6 +103,8 @@ export interface AuditEvent {
   entityId: string;
   summary: string;
   changes: Record<string, { before: unknown; after: unknown }>;
+  /** Structured record for some actions (e.g. ai_value_corrected). */
+  detail?: Record<string, unknown>;
 }
 
 export type { BasisPoints };

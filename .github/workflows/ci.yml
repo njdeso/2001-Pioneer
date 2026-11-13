@@ -81,6 +81,12 @@ jobs:
           printf 'OWNER_EMAILS=owner@example.test\n' > functions/.env.demo-asm-export
           npx firebase emulators:exec --only auth,firestore,functions --project demo-asm-export "node --import tsx --test scripts/book-export-emulator.test.mjs"
 
+      # Correction history of AI-extracted values survives statement re-reads (real replaceLines and
+      # audit writer, Firestore emulator, demo project, synthetic statement).
+      - name: AI-value correction history survives re-reads (Firestore emulator)
+        timeout-minutes: 5
+        run: npx firebase emulators:exec --only firestore --project demo-asm-audit "node --import tsx --test scripts/ai-correction-audit-emulator.test.mjs"
+
       - name: Function endpoints match the app and smoke test (region, callable, options)
         run: node scripts/check-functions-endpoints.mjs
 
