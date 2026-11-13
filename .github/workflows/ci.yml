@@ -92,3 +92,32 @@ jobs:
 
       - name: npm run test:rules (Firebase emulator, demo project)
         run: npm run test:rules
+
+  # Production Functions are deployed from a Windows PC: run the same local checks as the Windows deploy
+  # procedure (install, shared tests, typecheck, Functions build) on Windows, so path handling that only
+  # breaks there is caught here, not during a production deploy. Verification only; no deploy, no secrets.
+  windows-deploy-checks:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm install (workspaces; the repository has no lockfile)
+        run: npm.cmd install --no-audit --no-fund
+      - name: Unit tests (shared)
+        run: npm.cmd --workspace @asm/shared run test
+      - name: Typecheck (shared, functions)
+        run: |
+          npm.cmd --workspace @asm/shared run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm.cmd --workspace @asm/functions run typecheck
+      - name: Build Functions
+        run: |
+          npm.cmd --workspace @asm/functions run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path functions\lib\index.js)) { throw 'functions\lib\index.js was not produced' }
