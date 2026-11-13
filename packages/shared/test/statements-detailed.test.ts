@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { readDetailedStatement, summaryPairs, type DetailedReadResult } from '../src/statements/detailedStatement.ts';
 import { reconcileStatement } from '../src/statements/reconcile.ts';
@@ -287,7 +288,7 @@ test('posting with a 50 % broker share: the affected policy is split on GROSS; t
 });
 
 test('broker buyout cannot see agency-only MVR charges: the buyout engine does not read the ledger or statements', () => {
-  const dir = new URL('../src/buyout/', import.meta.url).pathname;
+  const dir = fileURLToPath(new URL('../src/buyout/', import.meta.url)); // not .pathname: that gives /C:/... on Windows
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.ts'))) {
     const src = readFileSync(join(dir, f), 'utf8');
     const imports = [...src.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
