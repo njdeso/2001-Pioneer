@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyUticaDirectBillRules, isUticaDirectBill } from '../src/statements/uticaDirectBill.ts';
+import { applyUticaDirectBillRules, aiCorrectionAuditEntries, isUticaDirectBill } from '../src/statements/uticaDirectBill.ts';
 import { reconcileStatement } from '../src/statements/reconcile.ts';
 import { parseMoneyToCents } from '../src/money.ts';
 import { normalizePolicyNumber } from '../src/normalize.ts';
@@ -520,4 +520,25 @@ test('May production re-read: MVR/CLUE stays 100 % agency, broker amounts identi
   assert.deepEqual(mvr.map((e) => [e.amountCents, e.brokerCents, e.agencyCents, e.policyId]), [[-1914, 0, -1914, null]]);
   assert.equal(prod.totals.amountCents, 91042);
   assert.deepEqual(prod.entries.map((e) => [e.level, e.amountCents, e.brokerCents, e.agencyCents]), clean.entries.map((e) => [e.level, e.amountCents, e.brokerCents, e.agencyCents]));
+});
+
+test('May production re-read: the correction is reported as a structured record for the permanent audit log', () => {
+  const { report } = applyUticaDirectBillRules(mayRereadNov12());
+  assert.deepEqual(report.corrections, [{
+    lineNo: 16, policyNumber: 'TMAY0010', field: 'transactionPremiumCents', fieldLabel: 'net premium', originalCents: -13600, correctedCents: 13600,
+    rule: 'utica-direct-bill-v1/net-sign', reason: 'the net premium is the only figure on the row that does not agree with the others',
+    arithmetic: 'gross $170.00 x 20.00% = commission $34.00 (printed 34.00-); gross $170.00 + commission as printed -$34.00 = net $136.00; with $136.00 the net premium column adds up exactly to the printed total $4,825.58 (as read it added up to $4,553.58)',
+  }]);
+  const [e] = aiCorrectionAuditEntries('STMT-1', 'RUN-1', report.corrections);
+  assert.equal(e.action, 'ai_value_corrected'); assert.equal(e.entityType, 'statement'); assert.equal(e.entityId, 'STMT-1');
+  assert.deepEqual(e.changes, { 'line 16 net premium': { before: -13600, after: 13600 } });
+  assert.deepEqual(e.detail, { statementId: 'STMT-1', runId: 'RUN-1', lineNo: 16, policyNumber: 'TMAY0010', field: 'transactionPremiumCents', originalCents: -13600, correctedCents: 13600, rule: 'utica-direct-bill-v1/net-sign', reason: report.corrections[0].reason, arithmetic: report.corrections[0].arithmetic });
+  assert.match(e.summary, /^Line 16 \(policy TMAY0010\): AI read the net premium as -\$136\.00; corrected to \$136\.00\. Reason: .* Arithmetic: .* Run RUN-1\.$/);
+});
+
+test('no correction → no audit entry; a blocked correction is not recorded as made', () => {
+  assert.deepEqual(applyUticaDirectBillRules(asProduction('May', 573600, 482558)).report.corrections, [], 'clean read');
+  const s0 = mayRereadNov12(); s0.stated.transactionPremiumCents = 482558 + 100;
+  assert.deepEqual(applyUticaDirectBillRules(s0).report.corrections, [], 'total does not confirm it');
+  assert.deepEqual(aiCorrectionAuditEntries('S', 'R', []), []);
 });

@@ -3,9 +3,10 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { logger } from 'firebase-functions';
 import { defineSecret } from 'firebase-functions/params';
 import { getStorage } from 'firebase-admin/storage';
-import type { DocumentData, DocumentReference } from 'firebase-admin/firestore';
+import type { DocumentData } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import {
+  type AiValueCorrection,
   DEFAULT_AI_MODEL, AI_PROMPT_VERSION, DETAILED_STATEMENT_READER, TRAVELERS_PL_PARSER, applyUticaDirectBillRules, extractWithClaude, isUticaDirectBill, readDetailedStatement, isTravelersPlStatement, normalizeName, sniffError, sniffSpreadsheet,
   parseCsv, parseTravelersPl, reconcileStatement, tableToText,
   type ExtractedStatement, type ExtractionMethod,
@@ -13,6 +14,7 @@ import {
 } from '@asm/shared';
 import { audit, db, FieldValue, idParam, meta, parse, requireRole, type Actor } from '../lib/core.js';
 import { duplicateFindings } from '../lib/duplicates.js';
+import { recordAiCorrections, replaceLines } from '../lib/statementLines.js';
 
 /**
  * Stage 3A — statement upload, extraction and reconciliation.
@@ -114,6 +116,8 @@ interface RunOutcome {
   usage: { inputTokens: number; outputTokens: number } | null;
   attempts: number;
   failure: FailureInfo | null;
+  /** AI-extracted figures corrected by a carrier reading rule (permanent audit log). */
+  corrections?: AiValueCorrection[];
 }
 
 /** Stored on the statement and the extraction run so the real cause is visible later. */
@@ -231,12 +235,14 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
   }
   // Carrier-specific reading rules for what the AI copied exactly as printed (Utica direct bill only).
   let statement = res.statement;
+  let corrections: AiValueCorrection[] = [];
   if (statement && isUticaDirectBill(statement)) {
     const u = applyUticaDirectBillRules(statement);
     statement = u.statement;
-    logger.info('Utica direct-bill rules', { fileName, applied: u.report.applied, evidenceRows: u.report.evidenceRows, contradicting: u.report.contradictingRows, filled: u.report.filledRows.length, outsideTotals: u.report.rowsOutsideTotals });
+    logger.info('Utica direct-bill rules', { fileName, applied: u.report.applied, evidenceRows: u.report.evidenceRows, contradicting: u.report.contradictingRows, filled: u.report.filledRows.length, outsideTotals: u.report.rowsOutsideTotals, netSignCorrected: u.report.netSignCorrectedRows });
+    corrections = u.report.corrections;
   }
-  return { statement, method: type === 'pdf' ? 'ai' : 'table-ai', model, usage: res.usage, attempts: res.attempts, failure: null };
+  return { statement, method: type === 'pdf' ? 'ai' : 'table-ai', model, usage: res.usage, attempts: res.attempts, failure: null, corrections };
 }
 
 /** Match the statement's carrier name / agency code to a set-up carrier or wholesaler. */
@@ -280,28 +286,6 @@ async function claimForProcessing(id: string, actor: Actor): Promise<DocumentDat
     tx.update(ref, { status: 'processing', ...meta(actor, false) });
     return snap.data()!;
   });
-}
-
-async function replaceLines(stmtRef: DocumentReference, s: ExtractedStatement, payerId: string | null): Promise<void> {
-  const existing = await stmtRef.collection('lines').listDocuments();
-  for (let i = 0; i < existing.length; i += 450) {
-    const b = db.batch();
-    existing.slice(i, i + 450).forEach((d) => b.delete(d));
-    await b.commit();
-  }
-  for (let i = 0; i < s.lines.length; i += 450) {
-    const b = db.batch();
-    for (const l of s.lines.slice(i, i + 450)) {
-      b.set(stmtRef.collection('lines').doc(String(l.lineNo).padStart(5, '0')), {
-        ...l,
-        statementId: stmtRef.id,
-        payerId,
-        status: l.kind === 'commission' ? 'pending' : 'info',
-        match: { status: 'not_started' },
-      });
-    }
-    await b.commit();
-  }
 }
 
 const processInput = z.object({ statementId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), method: z.enum(['auto', 'ai']).default('auto') });
@@ -381,7 +365,8 @@ export const processStatement = onCall(
       await replaceLines(ref, s, payer.payerId);
       const runRef = db.collection('extractionRuns').doc();
       const b = db.batch();
-      b.set(runRef, { ...runBase, ok: true, reconciled: rec.reconciled, lineCount: s.lines.length, durationMs: Date.now() - started, at: FieldValue.serverTimestamp(), by: actor.uid });
+      b.set(runRef, { ...runBase, ok: true, reconciled: rec.reconciled, lineCount: s.lines.length, aiValuesCorrected: out.corrections?.length ?? 0, durationMs: Date.now() - started, at: FieldValue.serverTimestamp(), by: actor.uid });
+      recordAiCorrections(b, actor, statementId, runRef.id, out.corrections ?? []);
       b.update(ref, {
         status: rec.reconciled ? 'needs_review' : 'discrepancy',
         failure: null,

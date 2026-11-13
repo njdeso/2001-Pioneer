@@ -84,6 +84,19 @@ function misreadNetField(l: ExtractedLine): PremField | null {
 }
 const sign = (c: Cents | null) => (c === null || c === 0 ? 0 : c > 0 ? 1 : -1);
 
+/** One AI-extracted figure corrected by a carrier reading rule: kept permanently in the audit log. */
+export interface AiValueCorrection {
+  lineNo: number;
+  policyNumber: string;
+  field: 'transactionPremiumCents' | 'premiumForCommissionCents';
+  fieldLabel: string;
+  originalCents: Cents;
+  correctedCents: Cents;
+  rule: string;
+  reason: string;
+  arithmetic: string;
+}
+
 export interface UticaReport {
   applied: boolean;
   /** Rows whose premium and commission confirm the printed sign convention. */
@@ -93,6 +106,8 @@ export interface UticaReport {
   filledRows: number[];
   /** Rows whose net premium was read with the wrong sign and corrected from the printed row arithmetic. */
   netSignCorrectedRows: number[];
+  /** The same corrections with the value read, the value used, reason and arithmetic (for the audit log). */
+  corrections: AiValueCorrection[];
   rowsOutsideTotals: number[];
   /** Original line numbers of MVR/CLUE expense rows moved to agency-only adjustments. */
   mvrClueRows: number[];
@@ -100,7 +115,7 @@ export interface UticaReport {
 
 export function applyUticaDirectBillRules(input: ExtractedStatement): { statement: ExtractedStatement; report: UticaReport } {
   const s: ExtractedStatement = { ...input, issues: [...input.issues], lines: input.lines.map((l) => ({ ...l, issues: [...l.issues] })), adjustments: input.adjustments.map((a) => ({ ...a })), stated: { ...input.stated } };
-  const report: UticaReport = { applied: false, evidenceRows: 0, contradictingRows: [], filledRows: [], netSignCorrectedRows: [], rowsOutsideTotals: [], mvrClueRows: [] };
+  const report: UticaReport = { applied: false, evidenceRows: 0, contradictingRows: [], filledRows: [], netSignCorrectedRows: [], corrections: [], rowsOutsideTotals: [], mvrClueRows: [] };
 
   // ---- 2. group-printed rows: policy number and insured from the row above (same page) ----
   let prev: ExtractedLine | null = null;
@@ -160,7 +175,10 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
         const read = l[f]!, gross = l[OTHER[f]]!, printedComm = neg(l.paidCommissionCents)!;
         l[f] = -read;
         const rate = (l.rateBps! / 100).toFixed(2);
-        const text = `Line ${l.lineNo}: AI read the net premium as ${fmt(read)}; corrected to ${fmt(-read)}. Reason: the net premium is the only figure on the row that does not agree with the others. Arithmetic: gross ${fmt(gross)} x ${rate}% = commission ${fmt(Math.abs(printedComm))} (printed ${(Math.abs(printedComm) / 100).toFixed(2)}${printedComm < 0 ? '-' : ''}); gross ${fmt(gross)} + commission as printed ${fmt(printedComm)} = net ${fmt(-read)}; with ${fmt(-read)} the net premium column adds up exactly to the printed total ${fmt(printed)} (as read it added up to ${fmt(asRead)}). Commission and gross premium unchanged.`;
+        const reason = 'the net premium is the only figure on the row that does not agree with the others';
+        const arithmetic = `gross ${fmt(gross)} x ${rate}% = commission ${fmt(Math.abs(printedComm))} (printed ${(Math.abs(printedComm) / 100).toFixed(2)}${printedComm < 0 ? '-' : ''}); gross ${fmt(gross)} + commission as printed ${fmt(printedComm)} = net ${fmt(-read)}; with ${fmt(-read)} the net premium column adds up exactly to the printed total ${fmt(printed)} (as read it added up to ${fmt(asRead)})`;
+        const text = `Line ${l.lineNo}: AI read the net premium as ${fmt(read)}; corrected to ${fmt(-read)}. Reason: ${reason}. Arithmetic: ${arithmetic}. Commission and gross premium unchanged.`;
+        report.corrections.push({ lineNo: l.lineNo, policyNumber: l.policyNumberRaw || l.policyNumberNormalized, field: f, fieldLabel: 'net premium', originalCents: read, correctedCents: -read, rule: `${UTICA_DIRECT_BILL_RULES}/net-sign`, reason, arithmetic });
         l.issues.push({ level: 'warning', code: 'utica_net_sign_read', text });
         s.issues.push({ level: 'warning', code: 'utica_net_sign_read', text });
         report.netSignCorrectedRows.push(l.lineNo);
@@ -226,3 +244,19 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
   return { statement: s, report };
 }
 
+
+/**
+ * Audit-log entries for AI-extracted figures corrected by a reading rule. Written by processStatement in
+ * the same batch as the extraction run, with a new auto-generated audit id each time: a later re-read
+ * replaces the statement's lines but never these entries (the audit log is append-only and admin-read).
+ */
+export function aiCorrectionAuditEntries(statementId: string, runId: string, corrections: readonly AiValueCorrection[]) {
+  return corrections.map((c) => ({
+    action: 'ai_value_corrected',
+    entityType: 'statement',
+    entityId: statementId,
+    summary: `Line ${c.lineNo} (policy ${c.policyNumber}): AI read the ${c.fieldLabel} as ${fmt(c.originalCents)}; corrected to ${fmt(c.correctedCents)}. Reason: ${c.reason}. Arithmetic: ${c.arithmetic}. Run ${runId}.`,
+    changes: { [`line ${c.lineNo} ${c.fieldLabel}`]: { before: c.originalCents, after: c.correctedCents } },
+    detail: { statementId, runId, lineNo: c.lineNo, policyNumber: c.policyNumber, field: c.field, originalCents: c.originalCents, correctedCents: c.correctedCents, rule: c.rule, reason: c.reason, arithmetic: c.arithmetic },
+  }));
+}

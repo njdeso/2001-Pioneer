@@ -11,6 +11,7 @@ import { api } from '../api';
 import { useData } from '../data';
 import { Badge, Button, Card, DataTable, Empty, ErrorNote, Field, Modal, Money, PageHeader, Select, Stat, TextArea, cx, type Column } from '../ui';
 import { PostingPanel, type PostingInfo } from './StatementPosting';
+import { AiCorrectionHistory } from './StatementCorrections';
 import { ClassificationPicker, DuplicateReview, useDuplicateCheck } from './StatementDuplicates';
 import { BrokerCell, MatchBadge, MatchDialog, MatchedTo, MatchingPanel, lineMatch, matchFilterFn, type MatchFilter, type MatchingInfo, type MatchLine } from './StatementMatching';
 
@@ -438,6 +439,8 @@ export function StatementReviewPage() {
           </Card>
         </>
       )}
+
+      <AiCorrectionHistory statementId={stmt.id} />
 
       {fileUrl && (
         <Card title="Original statement" actions={<Button size="sm" variant="ghost" onClick={() => setFileUrl(null)}>Close</Button>}>
