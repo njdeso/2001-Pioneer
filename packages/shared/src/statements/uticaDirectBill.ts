@@ -27,6 +27,14 @@ import type { ExtractedLine, ExtractedStatement } from './types.js';
  *    the premium figure the moved row carried, e.g. its NET PREMIUMS amount), and "lines + adjustments =
  *    Amount Due Producer" still checks the printed amount exactly. Each adjustment records its page, row and the
  *    printed policy text for the audit trail. A positive (refund) EXP row is held for review, not moved.
+ * 5. NET PREMIUM READ WITH THE WRONG SIGN. When the AI fills both premium fields, one is the row's GROSS and
+ *    the other its NET, and the printed row satisfies Net = Gross + Commission(printed). A row whose net
+ *    figure has the opposite sign of Gross + Commission (e.g. "136.00" read as -136.00 next to "34.00-") is a
+ *    misread of that one figure: its sign evidence comes from the gross figure — and only when the printed
+ *    rate confirms it (|Gross| x rate = |Commission|). The net figure is corrected to Gross + Commission only
+ *    when, after the signs are verified, the corrected net column adds up EXACTLY to the printed net total;
+ *    the line carries a note naming the figure read and the figure used. Otherwise the row is named in a
+ *    blocking message and nothing is corrected. Commissions and gross premiums are never changed by this.
  * 3. ROWS OUTSIDE THE CARRIER'S TOTALS. If the lines exceed the printed commission total by exactly one
  *    row's commission (and, when printed, the gross premium total by exactly that row's premium), that row
  *    is named in a blocking message: it is printed but the carrier did not include it in what it paid.
@@ -55,6 +63,25 @@ const noGrossPremium = (l: ExtractedLine) => {
   const p = premium(l);
   return !p || /^(COMM|EXP)$/i.test(l.transactionCodeRaw.trim()) || Math.abs(p) === Math.abs(l.paidCommissionCents ?? 0);
 };
+type PremField = 'transactionPremiumCents' | 'premiumForCommissionCents';
+const OTHER: Record<PremField, PremField> = { transactionPremiumCents: 'premiumForCommissionCents', premiumForCommissionCents: 'transactionPremiumCents' };
+/**
+ * A row whose two premium fields are its GROSS and NET with the net read with the wrong sign
+ * (-net = gross + commission as printed), the gross confirmed by the printed rate. Returns the field
+ * holding the misread net, or null. Commission is the PRINTED (carrier-view) figure.
+ */
+function misreadNetField(l: ExtractedLine): PremField | null {
+  const c = l.paidCommissionCents;
+  if (!c) return null;
+  for (const net of ['transactionPremiumCents', 'premiumForCommissionCents'] as const) {
+    const n = l[net], g = l[OTHER[net]];
+    if (n === null || g === null || !n || !g || n === g) continue;
+    if (g + c !== -n || sign(n) === sign(g)) continue;
+    if (l.rateBps && Math.round((Math.abs(g) * l.rateBps) / 10000) !== Math.abs(c)) continue;
+    return net;
+  }
+  return null;
+}
 const sign = (c: Cents | null) => (c === null || c === 0 ? 0 : c > 0 ? 1 : -1);
 
 export interface UticaReport {
@@ -64,6 +91,8 @@ export interface UticaReport {
   /** Rows that contradict it (blocks the reversal). */
   contradictingRows: number[];
   filledRows: number[];
+  /** Rows whose net premium was read with the wrong sign and corrected from the printed row arithmetic. */
+  netSignCorrectedRows: number[];
   rowsOutsideTotals: number[];
   /** Original line numbers of MVR/CLUE expense rows moved to agency-only adjustments. */
   mvrClueRows: number[];
@@ -71,7 +100,7 @@ export interface UticaReport {
 
 export function applyUticaDirectBillRules(input: ExtractedStatement): { statement: ExtractedStatement; report: UticaReport } {
   const s: ExtractedStatement = { ...input, issues: [...input.issues], lines: input.lines.map((l) => ({ ...l, issues: [...l.issues] })), adjustments: input.adjustments.map((a) => ({ ...a })), stated: { ...input.stated } };
-  const report: UticaReport = { applied: false, evidenceRows: 0, contradictingRows: [], filledRows: [], rowsOutsideTotals: [], mvrClueRows: [] };
+  const report: UticaReport = { applied: false, evidenceRows: 0, contradictingRows: [], filledRows: [], netSignCorrectedRows: [], rowsOutsideTotals: [], mvrClueRows: [] };
 
   // ---- 2. group-printed rows: policy number and insured from the row above (same page) ----
   let prev: ExtractedLine | null = null;
@@ -91,7 +120,8 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
   // ---- 1. verify the printed sign convention, then reverse every commission figure ----
   for (const l of s.lines) {
     if (noGrossPremium(l)) continue; // chargeback / expense rows carry no gross premium to compare with
-    const c = sign(l.paidCommissionCents), p = sign(premium(l));
+    const misread = misreadNetField(l);
+    const c = sign(l.paidCommissionCents), p = sign(misread ? l[OTHER[misread]] : premium(l)); // a misread net says nothing; use the gross
     if (c === 0 || p === 0) continue;
     if (c !== p) report.evidenceRows++;
     else report.contradictingRows.push(l.lineNo);
@@ -117,6 +147,28 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
   for (const a of s.adjustments) a.amountCents = neg(a.amountCents) ?? 0;
   s.issues.push({ level: 'warning', code: 'utica_sign_convention', text: `Utica direct-bill statement: the COMMISSIONS column prints commission owed to the agency with a trailing minus. Signs were reversed for the agency's view after ${report.evidenceRows ? `${report.evidenceRows} row(s) confirmed it (premium and commission printed with opposite signs)` : 'the rows added up exactly to the printed commission total'}. Cancellations, chargebacks and MVR/CLUE expenses stay negative.` });
   report.applied = true;
+
+  // ---- 5. a net premium read with the wrong sign: correct only if the printed net total confirms it ----
+  for (const f of ['transactionPremiumCents', 'premiumForCommissionCents'] as const) {
+    const rows = s.lines.filter((l) => misreadNetField({ ...l, paidCommissionCents: neg(l.paidCommissionCents) }) === f); // commissions already reversed
+    if (!rows.length) continue;
+    const printed = s.stated[f];
+    const corrected = s.lines.reduce((t, l) => t + (rows.includes(l) ? -(l[f] ?? 0) : (l[f] ?? 0)), 0);
+    if (printed !== null && corrected === printed) {
+      for (const l of rows) {
+        const read = l[f]!;
+        l[f] = -read;
+        l.issues.push({ level: 'warning', code: 'utica_net_sign_read', text: `Line ${l.lineNo}: net premium read as ${fmt(read)}; the printed row (gross ${fmt(l[OTHER[f]]!)} + commission as printed) and the printed net premium total both give ${fmt(-read)}, which is used. Commission and gross premium unchanged.` });
+        report.netSignCorrectedRows.push(l.lineNo);
+      }
+    } else {
+      for (const l of rows) {
+        const text = `Line ${l.lineNo}: net premium read as ${fmt(l[f]!)}, but the printed row gives ${fmt(-(l[f]!))} (gross + commission as printed)${printed === null ? '' : ' and correcting it does not make the printed net premium total add up'}. Not corrected; check this row on the statement.`;
+        l.issues.push({ level: 'error', code: 'utica_row_premium_inconsistent', text });
+        s.issues.push({ level: 'error', code: 'utica_row_premium_inconsistent', text });
+      }
+    }
+  }
 
   // ---- 3. a printed row the carrier left out of its totals ----
   const total = s.stated.commissionPayableCents;
