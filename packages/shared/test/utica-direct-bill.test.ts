@@ -349,17 +349,18 @@ test('a real policy row printed with the wrong sign is still caught (validation 
 // printed 7,519.33) and GROSS PREMIUMS to "premium for commission" (printed 8,804.00). The EXP MVR/CLUE row
 // (GROSS .00, COMMISSION 6.38, NET 6.38) is in the printed net total; after it became the agency-only
 // adjustment the policy lines' net premiums totalled 7,512.95 — a $6.38 "difference" that is only the moved row.
-function julyAsProduction(): ExtractedStatement {
-  const s = asExtracted('Jul');
+function asProduction(key: string, grossTotal: number, netTotal: number): ExtractedStatement {
+  const s = asExtracted(key);
   for (const l of s.lines) {
     const gross = l.transactionPremiumCents ?? 0;
     l.premiumForCommissionCents = gross;
     l.transactionPremiumCents = gross + (l.paidCommissionCents ?? 0); // NET = Gross + Commission(printed)
   }
-  s.stated.premiumForCommissionCents = 880400;
-  s.stated.transactionPremiumCents = 751933;
+  s.stated.premiumForCommissionCents = grossTotal;
+  s.stated.transactionPremiumCents = netTotal;
   return s;
 }
+const julyAsProduction = () => asProduction('Jul', 880400, 751933);
 
 test('July 2026: printed net-premium total includes the MVR/CLUE row; reconciles once that row is set aside, nothing else changes', () => {
   const s0 = julyAsProduction();
@@ -388,4 +389,51 @@ test('a real premium difference is still caught (only the moved row is set aside
   const rec = reconcileStatement(applyUticaDirectBillRules(s0).statement);
   assert.equal(rec.reconciled, false);
   assert.ok(rec.checks.find((c) => c.key === 'transactionPremium' && !c.ok));
+});
+
+// ---- May 2026 in production: same mapping as July. Printed GROSS 5,736.00, NET 4,825.58. The EXP MVR/CLUE row
+// (GROSS .00, COMMISSION 19.14, NET 19.14) is in the printed net total; the COMM chargeback (26.88) stays a line.
+test('May 2026: printed net-premium total includes the MVR/CLUE row; reconciles once that row is set aside, nothing else changes', () => {
+  const s0 = asProduction('May', 573600, 482558);
+  assert.equal(s0.lines.reduce((t, l) => t + (l.transactionPremiumCents ?? 0), 0), 482558, 'statement arithmetic: Σ net of all 20 printed rows = 4,825.58');
+  const policyBefore = s0.lines.filter((l) => l.transactionCodeRaw !== 'EXP').map((l) => [l.lineNo, l.transactionPremiumCents, l.premiumForCommissionCents, l.paidCommissionCents]);
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.equal(report.applied, true);
+  assert.deepEqual(report.mvrClueRows, [20]);
+  assert.equal(sum(s), 92956, 'policy commissions $929.56');
+  assert.deepEqual(s.adjustments.map((a) => a.amountCents), [-1914], 'MVR/CLUE −$19.14 agency only');
+  assert.equal(s.stated.monthCommissionPayableCents, 91042, 'net amount due $910.42');
+  assert.deepEqual(s.lines.map((l) => [l.lineNo, l.transactionPremiumCents, l.premiumForCommissionCents, 0 - (l.paidCommissionCents ?? 0)]), policyBefore,
+    'policy premiums unchanged; commissions only change sign (printed carrier view → agency view)');
+  assert.equal(s.stated.transactionPremiumCents, 480644, 'printed 4,825.58 less the MVR/CLUE row net 19.14');
+  assert.equal(s.stated.premiumForCommissionCents, 573600, 'gross total unchanged');
+  const rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+  assert.deepEqual(rec.checks.map((c) => [c.key, c.statedCents, c.extractedCents, c.ok]), [
+    ['commission', 92956, 92956, true], ['monthPayable', 91042, 91042, true],
+    ['premiumForCommission', 573600, 573600, true], ['transactionPremium', 480644, 480644, true],
+  ]);
+});
+
+test('May and July as mapped in production: MVR/CLUE stays 100 % agency, broker commissions identical to the premium-free read', () => {
+  const plan = (s: ExtractedStatement, key: string) => {
+    const lines: PostingLine[] = s.lines.map((l) => {
+      const amt = l.paidCommissionCents ?? 0; const sp = commissionSplit(amt, 5000);
+      return { id: String(l.lineNo).padStart(5, '0'), lineNo: l.lineNo, insuredName: l.insuredName, policyNumberRaw: l.policyNumberRaw, paidCommissionCents: l.paidCommissionCents, transactionType: l.transactionType, effectiveDate: l.effectiveDate,
+        match: { status: 'matched', method: 'auto', confidence: 'high', policyId: `P-${l.policyNumberRaw}`, clientId: 'C', carrierId: 'UTICA', brokerId: 'B50', brokerShareBps: 5000, brokerShareSource: 'broker', commissionCents: amt, brokerCents: sp.brokerCents, agencyCents: sp.agencyCents, reasons: [], candidates: [], policyNumberKey: null, nameEvidence: 'strong', engineVersion: 'test' } } as unknown as PostingLine;
+    });
+    const stmt: PostingStatement = { id: `UT-${key}`, status: 'needs_review', payerId: 'UTICA', payerKind: 'carrier', statementMonth: s.statementMonth, statementDate: null, adjustments: s.adjustments, postedCents: 0, postingSeq: 0, matching: { stale: false, balanced: true } };
+    return buildPostingPlan(stmt, lines);
+  };
+  for (const [key, gross, net, mvrCents] of [['May', 573600, 482558, -1914], ['Jul', 880400, 751933, -638]] as const) {
+    const prod = plan(applyUticaDirectBillRules(asProduction(key, gross, net)).statement, key);
+    const base = plan(applyUticaDirectBillRules(asExtracted(key)).statement, key);
+    const carrier = prod.entries.filter((e) => e.level === 'carrier');
+    assert.equal(carrier.length, 1, `${key}: MVR/CLUE posted once`);
+    assert.equal(carrier[0].amountCents, mvrCents); assert.equal(carrier[0].agencyCents, mvrCents);
+    assert.equal(carrier[0].brokerCents, 0); assert.equal(carrier[0].brokerShareBps, 0); assert.equal(carrier[0].policyId, null);
+    assert.equal(prod.totals.amountCents, STATEMENTS[key].agency, `${key}: posted total = Amount Due Producer`);
+    assert.deepEqual(prod.entries.map((e) => [e.level, e.amountCents, e.brokerCents, e.agencyCents]), base.entries.map((e) => [e.level, e.amountCents, e.brokerCents, e.agencyCents]),
+      `${key}: every commission, broker and agency amount identical whichever premium field the AI used`);
+  }
 });
