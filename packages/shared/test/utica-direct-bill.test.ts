@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyUticaDirectBillRules, isUticaDirectBill } from '../src/statements/uticaDirectBill.ts';
+import { applyUticaDirectBillRules, aiCorrectionAuditEntries, isUticaDirectBill } from '../src/statements/uticaDirectBill.ts';
 import { reconcileStatement } from '../src/statements/reconcile.ts';
 import { parseMoneyToCents } from '../src/money.ts';
 import { normalizePolicyNumber } from '../src/normalize.ts';
@@ -436,4 +436,109 @@ test('May and July as mapped in production: MVR/CLUE stays 100 % agency, broker 
     assert.deepEqual(prod.entries.map((e) => [e.level, e.amountCents, e.brokerCents, e.agencyCents]), base.entries.map((e) => [e.level, e.amountCents, e.brokerCents, e.agencyCents]),
       `${key}: every commission, broker and agency amount identical whichever premium field the AI used`);
   }
+});
+
+// ---- May 2026, production re-read of 12 Nov 2026 (after PR #16): the AI read line 16's NET PREMIUMS "136.00"
+// as -136.00 (gross 170.00, 20 %, commission "34.00-"). Line 16 then looked like premium and commission with
+// the same sign, so nothing was reversed (commission -$910.42, transaction premium $4,553.58 vs $4,825.58 =
+// $272.00 = 2 x 136.00, MVR/CLUE never separated).
+function mayRereadNov12(): ExtractedStatement {
+  const s = asProduction('May', 573600, 482558);
+  assert.equal(s.lines[15].transactionPremiumCents, 13600);
+  s.lines[15].transactionPremiumCents = -13600; // the misread
+  return s;
+}
+
+test('May 2026 production re-read: line 16 net read as -136.00 — sign verified from its gross, net corrected only because the printed total confirms it', () => {
+  const s0 = mayRereadNov12();
+  assert.equal(s0.lines.reduce((t, l) => t + (l.transactionPremiumCents ?? 0), 0), 455358, 'as reported: extracted $4,553.58');
+  assert.equal(sum(s0), -91042, 'as reported: commission -$910.42 as printed');
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(report.contradictingRows, [], 'line 16 is no longer a contradiction: its gross 170.00 and commission 34.00- confirm the convention');
+  assert.equal(report.applied, true);
+  assert.deepEqual(report.netSignCorrectedRows, [16]);
+  const l16 = s.lines.find((l) => l.lineNo === 16)!;
+  assert.deepEqual([l16.premiumForCommissionCents, l16.transactionPremiumCents, l16.paidCommissionCents], [17000, 13600, 3400]);
+  const note = l16.issues.find((i) => i.code === 'utica_net_sign_read')!;
+  assert.equal(note.text, 'Line 16: AI read the net premium as -$136.00; corrected to $136.00. Reason: the net premium is the only figure on the row that does not agree with the others. Arithmetic: gross $170.00 x 20.00% = commission $34.00 (printed 34.00-); gross $170.00 + commission as printed -$34.00 = net $136.00; with $136.00 the net premium column adds up exactly to the printed total $4,825.58 (as read it added up to $4,553.58). Commission and gross premium unchanged.');
+  assert.ok(s.issues.some((i) => i.code === 'utica_net_sign_read' && i.text === note.text), 'also shown at the top of the statement');
+  assert.deepEqual(report.mvrClueRows, [20]);
+  assert.deepEqual(s.adjustments.map((a) => [a.amountCents, a.source?.kind]), [[-1914, 'mvr']], 'MVR/CLUE −$19.14 still an agency-only adjustment');
+  assert.equal(sum(s), 92956);
+  const rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+  assert.deepEqual(rec.checks.map((c) => [c.key, c.statedCents, c.extractedCents, c.ok]), [
+    ['commission', 92956, 92956, true], ['monthPayable', 91042, 91042, true],
+    ['premiumForCommission', 573600, 573600, true], ['transactionPremium', 480644, 480644, true],
+  ]);
+  // Everything except line 16's net figure is exactly what the clean read gives.
+  const clean = applyUticaDirectBillRules(asProduction('May', 573600, 482558)).statement;
+  assert.deepEqual(s.lines.map((l) => [l.lineNo, l.paidCommissionCents, l.premiumForCommissionCents, l.transactionPremiumCents]), clean.lines.map((l) => [l.lineNo, l.paidCommissionCents, l.premiumForCommissionCents, l.transactionPremiumCents]));
+  assert.deepEqual(s.adjustments, clean.adjustments);
+});
+
+test('the net figure is NOT corrected when the printed net total does not confirm it (blocked, row named)', () => {
+  const s0 = mayRereadNov12();
+  s0.stated.transactionPremiumCents = 482558 + 100;
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(report.netSignCorrectedRows, []);
+  assert.equal(s.lines.find((l) => l.lineNo === 16)!.transactionPremiumCents, -13600, 'left as read');
+  assert.ok(errors(s).includes('utica_row_premium_inconsistent'));
+  assert.equal(reconcileStatement(s).reconciled, false);
+});
+
+test('a misread net with no printed rate is not corrected and still blocks the sign reversal', () => {
+  const s0 = mayRereadNov12();
+  s0.lines[15].rateBps = null;
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(report.contradictingRows, [16]);
+  assert.equal(report.applied, false);
+  assert.equal(s.lines[15].transactionPremiumCents, -13600);
+  assert.equal(reconcileStatement(s).reconciled, false);
+});
+
+test('a misread net whose gross is not confirmed by the printed rate still blocks the sign reversal', () => {
+  const s0 = mayRereadNov12();
+  s0.lines[15].rateBps = 1500; // 170.00 x 15 % ≠ 34.00
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(report.contradictingRows, [16]);
+  assert.equal(report.applied, false);
+  assert.ok(errors(s).includes('utica_sign_unverified'));
+});
+
+test('May production re-read: MVR/CLUE stays 100 % agency, broker amounts identical to the clean read', () => {
+  const posting = (s: ExtractedStatement) => buildPostingPlan(
+    { id: 'UT-May', status: 'needs_review', payerId: 'UTICA', payerKind: 'carrier', statementMonth: s.statementMonth, statementDate: null, adjustments: s.adjustments, postedCents: 0, postingSeq: 0, matching: { stale: false, balanced: true } },
+    s.lines.map((l) => {
+      const amt = l.paidCommissionCents ?? 0; const sp = commissionSplit(amt, 5000);
+      return { id: String(l.lineNo).padStart(5, '0'), lineNo: l.lineNo, insuredName: l.insuredName, policyNumberRaw: l.policyNumberRaw, paidCommissionCents: l.paidCommissionCents, transactionType: l.transactionType, effectiveDate: l.effectiveDate,
+        match: { status: 'matched', method: 'auto', confidence: 'high', policyId: `P-${l.policyNumberRaw}`, clientId: 'C', carrierId: 'UTICA', brokerId: 'B50', brokerShareBps: 5000, brokerShareSource: 'broker', commissionCents: amt, brokerCents: sp.brokerCents, agencyCents: sp.agencyCents, reasons: [], candidates: [], policyNumberKey: null, nameEvidence: 'strong', engineVersion: 'test' } } as unknown as PostingLine;
+    }));
+  const prod = posting(applyUticaDirectBillRules(mayRereadNov12()).statement);
+  const clean = posting(applyUticaDirectBillRules(asExtracted('May')).statement);
+  const mvr = prod.entries.filter((e) => e.level === 'carrier');
+  assert.deepEqual(mvr.map((e) => [e.amountCents, e.brokerCents, e.agencyCents, e.policyId]), [[-1914, 0, -1914, null]]);
+  assert.equal(prod.totals.amountCents, 91042);
+  assert.deepEqual(prod.entries.map((e) => [e.level, e.amountCents, e.brokerCents, e.agencyCents]), clean.entries.map((e) => [e.level, e.amountCents, e.brokerCents, e.agencyCents]));
+});
+
+test('May production re-read: the correction is reported as a structured record for the permanent audit log', () => {
+  const { report } = applyUticaDirectBillRules(mayRereadNov12());
+  assert.deepEqual(report.corrections, [{
+    lineNo: 16, policyNumber: 'TMAY0010', field: 'transactionPremiumCents', fieldLabel: 'net premium', originalCents: -13600, correctedCents: 13600,
+    rule: 'utica-direct-bill-v1/net-sign', reason: 'the net premium is the only figure on the row that does not agree with the others',
+    arithmetic: 'gross $170.00 x 20.00% = commission $34.00 (printed 34.00-); gross $170.00 + commission as printed -$34.00 = net $136.00; with $136.00 the net premium column adds up exactly to the printed total $4,825.58 (as read it added up to $4,553.58)',
+  }]);
+  const [e] = aiCorrectionAuditEntries('STMT-1', 'RUN-1', report.corrections);
+  assert.equal(e.action, 'ai_value_corrected'); assert.equal(e.entityType, 'statement'); assert.equal(e.entityId, 'STMT-1');
+  assert.deepEqual(e.changes, { 'line 16 net premium': { before: -13600, after: 13600 } });
+  assert.deepEqual(e.detail, { statementId: 'STMT-1', runId: 'RUN-1', lineNo: 16, policyNumber: 'TMAY0010', field: 'transactionPremiumCents', originalCents: -13600, correctedCents: 13600, rule: 'utica-direct-bill-v1/net-sign', reason: report.corrections[0].reason, arithmetic: report.corrections[0].arithmetic });
+  assert.match(e.summary, /^Line 16 \(policy TMAY0010\): AI read the net premium as -\$136\.00; corrected to \$136\.00\. Reason: .* Arithmetic: .* Run RUN-1\.$/);
+});
+
+test('no correction → no audit entry; a blocked correction is not recorded as made', () => {
+  assert.deepEqual(applyUticaDirectBillRules(asProduction('May', 573600, 482558)).report.corrections, [], 'clean read');
+  const s0 = mayRereadNov12(); s0.stated.transactionPremiumCents = 482558 + 100;
+  assert.deepEqual(applyUticaDirectBillRules(s0).report.corrections, [], 'total does not confirm it');
+  assert.deepEqual(aiCorrectionAuditEntries('S', 'R', []), []);
 });
