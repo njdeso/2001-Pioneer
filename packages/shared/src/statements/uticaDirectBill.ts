@@ -23,8 +23,9 @@ import type { ExtractedLine, ExtractedStatement } from './types.js';
  *    rule, same as Progressive MVR charges): after the sign is verified each such row becomes ONE
  *    statement-level adjustment — carrier level, no policy, broker 0, never a policy commission line and
  *    never in broker commission or buyout figures. The printed Producers Total includes it, so the policy
- *    commission check uses that total less the MVR/CLUE amount, and "lines + adjustments = Amount Due
- *    Producer" still checks the printed amount exactly. Each adjustment records its page, row and the
+ *    commission check uses that total less the MVR/CLUE amount (likewise each printed premium total less
+ *    the premium figure the moved row carried, e.g. its NET PREMIUMS amount), and "lines + adjustments =
+ *    Amount Due Producer" still checks the printed amount exactly. Each adjustment records its page, row and the
  *    printed policy text for the audit trail. A positive (refund) EXP row is held for review, not moved.
  * 3. ROWS OUTSIDE THE CARRIER'S TOTALS. If the lines exceed the printed commission total by exactly one
  *    row's commission (and, when printed, the gross premium total by exactly that row's premium), that row
@@ -154,6 +155,12 @@ export function applyUticaDirectBillRules(input: ExtractedStatement): { statemen
     }
     s.lines = s.lines.filter((l) => !isMvrClue(l)); // line numbers keep the printed order (audit trail)
     if (s.stated.commissionPayableCents !== null) s.stated.commissionPayableCents -= mvrTotal;
+    // The printed premium totals include the MVR/CLUE rows too (GROSS .00, NET = the expense): the
+    // NET PREMIUMS total is Σ(Gross + Commission) over EVERY printed row. Compare the policy lines with the
+    // printed totals less exactly what the moved rows carried in that field. Line premiums are unchanged.
+    const moved = (f: 'transactionPremiumCents' | 'premiumForCommissionCents') => mvr.reduce((t, l) => t + (l[f] ?? 0), 0);
+    if (s.stated.transactionPremiumCents !== null) s.stated.transactionPremiumCents -= moved('transactionPremiumCents');
+    if (s.stated.premiumForCommissionCents !== null) s.stated.premiumForCommissionCents -= moved('premiumForCommissionCents');
     s.checkLabels = {
       commission: 'Policy commissions = Producers Total less MVR/CLUE expenses',
       monthPayable: 'Policy commissions + MVR/CLUE expenses (agency only) = Amount Due Producer',

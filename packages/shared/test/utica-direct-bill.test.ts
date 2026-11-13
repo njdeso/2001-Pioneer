@@ -344,3 +344,48 @@ test('a real policy row printed with the wrong sign is still caught (validation 
   assert.equal(s.lines.length, 20, 'all entries kept');
   assert.equal(reconcileStatement(s).reconciled, false);
 });
+
+// ---- July 2026 in production: the AI mapped NET PREMIUMS to "transaction premium" (rows and total,
+// printed 7,519.33) and GROSS PREMIUMS to "premium for commission" (printed 8,804.00). The EXP MVR/CLUE row
+// (GROSS .00, COMMISSION 6.38, NET 6.38) is in the printed net total; after it became the agency-only
+// adjustment the policy lines' net premiums totalled 7,512.95 — a $6.38 "difference" that is only the moved row.
+function julyAsProduction(): ExtractedStatement {
+  const s = asExtracted('Jul');
+  for (const l of s.lines) {
+    const gross = l.transactionPremiumCents ?? 0;
+    l.premiumForCommissionCents = gross;
+    l.transactionPremiumCents = gross + (l.paidCommissionCents ?? 0); // NET = Gross + Commission(printed)
+  }
+  s.stated.premiumForCommissionCents = 880400;
+  s.stated.transactionPremiumCents = 751933;
+  return s;
+}
+
+test('July 2026: printed net-premium total includes the MVR/CLUE row; reconciles once that row is set aside, nothing else changes', () => {
+  const s0 = julyAsProduction();
+  assert.equal(s0.lines.reduce((t, l) => t + (l.transactionPremiumCents ?? 0), 0), 751933, 'statement arithmetic: Σ net of all 8 printed rows = 7,519.33');
+  const linePremiumsBefore = s0.lines.filter((l) => l.transactionCodeRaw !== 'EXP').map((l) => [l.lineNo, l.transactionPremiumCents, l.premiumForCommissionCents]);
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.equal(report.applied, true);
+  assert.deepEqual(report.mvrClueRows, [8]);
+  assert.equal(sum(s), 129105, 'policy commissions $1,291.05');
+  assert.deepEqual(s.adjustments.map((a) => a.amountCents), [-638], 'MVR/CLUE −$6.38 agency only');
+  assert.equal(s.stated.monthCommissionPayableCents, 128467, 'net commission $1,284.67');
+  assert.deepEqual(s.lines.map((l) => [l.lineNo, l.transactionPremiumCents, l.premiumForCommissionCents]), linePremiumsBefore, 'policy premiums unchanged');
+  assert.equal(s.stated.transactionPremiumCents, 751295, 'printed 7,519.33 less the MVR/CLUE row net 6.38');
+  assert.equal(s.stated.premiumForCommissionCents, 880400, 'gross total unchanged (the MVR/CLUE row has no gross premium)');
+  const rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+  assert.deepEqual(rec.checks.map((c) => [c.key, c.statedCents, c.extractedCents, c.ok]), [
+    ['commission', 129105, 129105, true], ['monthPayable', 128467, 128467, true],
+    ['premiumForCommission', 880400, 880400, true], ['transactionPremium', 751295, 751295, true],
+  ]);
+});
+
+test('a real premium difference is still caught (only the moved row is set aside)', () => {
+  const s0 = julyAsProduction();
+  s0.stated.transactionPremiumCents = 751933 + 100; // printed total one dollar off
+  const rec = reconcileStatement(applyUticaDirectBillRules(s0).statement);
+  assert.equal(rec.reconciled, false);
+  assert.ok(rec.checks.find((c) => c.key === 'transactionPremium' && !c.ok));
+});
