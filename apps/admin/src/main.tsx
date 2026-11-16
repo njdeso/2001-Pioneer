@@ -18,6 +18,9 @@ import { LedgerPage } from './pages/Ledger';
 import { ReportsPage } from './pages/BookExport';
 import { DueDiligencePage } from './pages/DueDiligence';
 import { BrokerBuyoutPage } from './pages/BrokerBuyout';
+import { ReviewerPortal } from './pages/ReviewerPortal';
+import { ExternalAccessPage } from './pages/ExternalAccess';
+import { isExternalRole } from '@asm/shared';
 import { configMissing, previewTargetsWrongProject } from './firebase';
 
 function Gate() {
@@ -40,6 +43,9 @@ function Gate() {
   }
   if (loading) return <div className="p-10 text-sm text-slate-500">Loading…</div>;
   if (!user || !role) return <LoginPage />;
+  // External reviewers (Pioneer Bank, due-diligence company): only the read-only reviewer portal. None of
+  // the internal pages, routes or data subscriptions are mounted (Firestore would refuse them anyway).
+  if (isExternalRole(role)) return <ReviewerPortal />;
   return (
     <DataProvider>
       <AppLayout>
@@ -60,6 +66,8 @@ function Gate() {
           <Route path="/package" element={<DueDiligencePage />} />
           <Route path="/buyout" element={<BrokerBuyoutPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          {role === 'admin' && <Route path="/external-access" element={<ExternalAccessPage />} />}
+          {role === 'admin' && <Route path="/reviewer-preview" element={<ReviewerPortal preview />} />}
           <Route path="*" element={<ComingSoonPage />} />
         </Routes>
       </AppLayout>
