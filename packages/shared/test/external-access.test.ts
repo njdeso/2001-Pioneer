@@ -163,3 +163,9 @@ test('response guard fails closed on any forbidden field or broker identifier, a
   assert.throws(() => guardReviewerPayload({ rows: [{ owner: CANARY.brokerId }] }, brokerIds), /broker identifier/);
   assert.throws(() => guardReviewerPayload({ rows: [{ owner: 'canbrk' }] }, brokerIds), /broker identifier/, 'case-insensitive');
 });
+
+test('download responses pass the guard (their shape is { downloadName, csv })', () => {
+  const o = reviewerOverview({ settings, entries, carriers, policies, statements });
+  assert.doesNotThrow(() => guardReviewerPayload({ downloadName: 'Due-diligence-summary-2026-11-16.csv', csv: reviewerSummaryCsv(o, '2026-11-16T00:00:00Z') }, brokerIds));
+  assert.throws(() => guardReviewerPayload({ fileName: 'x.csv', csv: '' }, brokerIds), /forbidden field/, 'stored statement file names stay blocked');
+});

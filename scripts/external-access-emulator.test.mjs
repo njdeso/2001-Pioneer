@@ -62,7 +62,7 @@ function assertNoLeak(payload, label) {
   for (const v of [CANARY.brokerName, CANARY.brokerId, CANARY.brokerCode, CANARY.note, CANARY.email, CANARY.phone, CANARY.file, CANARY.advance, 'UNASSIGNED']) assert.ok(!json.includes(v), `${label}: contains "${v}"`);
   for (const n of [CANARY.shareBps, CANARY.brokerCents, '777.77', '43.21']) assert.ok(!new RegExp(`(?<![0-9.])${String(n).replace('.', '\\.')}(?![0-9])`).test(json), `${label}: contains ${n}`);
   const keys = typeof payload === 'string' ? [] : [...json.matchAll(/"([^"]+)":/g)].map((m) => m[1]);
-  for (const k of keys) assert.ok(!/broker|share|split|advance|buyout|note|email|phone|contact|approv|createdBy|updatedBy|fileName|agencyCents/i.test(k) || k === 'fileName' && label.includes('export'), `${label}: key ${k}`);
+  for (const k of keys) assert.ok(!/broker|share|split|advance|buyout|note|email|phone|contact|approv|createdBy|updatedBy|fileName|agencyCents/i.test(k), `${label}: key ${k}`);
 }
 
 const T = {}; const U = {};
@@ -125,7 +125,7 @@ test('each reviewer sees every acquisition view and download, live, with no brok
     }
     for (const kind of EXPORTS) {
       const r = await call('getReviewerExport', { kind }, T[k]);
-      assert.match(r.fileName, new RegExp(`^Due-diligence-${kind}-\\d{4}-\\d{2}-\\d{2}\\.csv$`));
+      assert.match(r.downloadName, new RegExp(`^Due-diligence-${kind}-\\d{4}-\\d{2}-\\d{2}\\.csv$`));
       assertNoLeak(r.csv, `${k}/${kind} export`);
     }
   }

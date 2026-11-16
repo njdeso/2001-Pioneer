@@ -93,7 +93,7 @@ async function deliver<T>(caller: ReviewerCaller, what: string, payload: T): Pro
   try {
     guardReviewerPayload(payload, await brokerIdentifiers());
   } catch (err) {
-    logger.error('reviewer payload blocked', { what, message: String((err as Error).message).slice(0, 200) }); // field path only
+    logger.error('reviewer payload blocked', { what, guard: String((err as Error).message).slice(0, 200) }); // field path only, never values
     throw new HttpsError('internal', 'The data could not be prepared. The agency owner has been notified in the logs.');
   }
   if (caller.role !== 'admin') {
@@ -133,7 +133,7 @@ export const getReviewerExport = onCall({ memory: '512MiB', timeoutSeconds: 120 
     const [settings, { statements }] = await Promise.all([settingsDoc(), buildView('statements') as Promise<{ statements: ReturnType<typeof reviewerStatements> }>]);
     csv = reviewerStatementsCsv(statements, settings.agencyName, at);
   }
-  return deliver(caller, `${kind} export`, { fileName: `Due-diligence-${kind}-${date}.csv`, csv });
+  return deliver(caller, `${kind} export`, { downloadName: `Due-diligence-${kind}-${date}.csv`, csv });
 });
 
 // ---------------------------------------------------------------- owner provisioning

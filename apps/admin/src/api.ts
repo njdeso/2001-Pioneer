@@ -76,7 +76,7 @@ export interface InviteResult { uid: string; organization: string; expiresOn: st
 export const api = {
   // External due-diligence access (read-only reviewers; owner provisioning)
   getReviewerData: <T>(view: ReviewerView) => call<{ view: ReviewerView }, T & { role: ExternalRole | 'admin'; organization: string; view: ReviewerView }>('getReviewerData', { view }, 120_000),
-  getReviewerExport: (kind: ReviewerExport) => call<{ kind: ReviewerExport }, { fileName: string; csv: string }>('getReviewerExport', { kind }, 120_000),
+  getReviewerExport: (kind: ReviewerExport) => call<{ kind: ReviewerExport }, { downloadName: string; csv: string }>('getReviewerExport', { kind }, 120_000),
   inviteExternalUser: (data: ExternalInviteInput) => call<ExternalInviteInput, InviteResult>('inviteExternalUser', data),
   revokeExternalUser: (uid: string, reason: string) => call<{ uid: string; reason: string }, { ok: true }>('revokeExternalUser', { uid, reason }),
   claimOwner: () => call<Record<string, never>, { role: string }>('claimOwner', {}),

@@ -60,7 +60,7 @@ export function ReviewerPortal({ preview = false }: { preview?: boolean }) {
 
   const exportCsv = async (kind: ReviewerExport) => {
     setError(null); setBusy(kind);
-    try { const r = await api.getReviewerExport(kind); download(r.fileName, r.csv); } catch (e) { setError(e instanceof Error ? e.message : 'Download failed'); } finally { setBusy(null); }
+    try { const r = await api.getReviewerExport(kind); download(r.downloadName, r.csv); } catch (e) { setError(e instanceof Error ? e.message : 'Download failed'); } finally { setBusy(null); }
   };
 
   const d = data[tab];
