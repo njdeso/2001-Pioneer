@@ -104,17 +104,23 @@ test('views built from FULL records (broker fields, notes, contacts, audit field
   };
   for (const [k, v] of Object.entries(views)) assertNoLeak(v, k);
   assert.deepEqual(Object.keys(views.carriers[0]).sort(), ['commissionMethod', 'id', 'kind', 'name', 'status']);
-  assert.deepEqual(Object.keys(views.book.policies[0]).sort(), ['agencyCommissionRateBps', 'alternateNumbers', 'annualPremiumCents', 'carrier', 'client', 'clientId', 'effectiveDate', 'expirationDate', 'id', 'line', 'namedInsured', 'policyNumber', 'policyType', 'status', 'wholesaler', 'windowCommissionCents']);
+  assert.deepEqual(Object.keys(views.book.policies[0]).sort(), ['agencyCommissionRateBps', 'alternateNumbers', 'annualPremiumCents', 'carrier', 'client', 'clientId', 'effectiveDate', 'expirationDate', 'id', 'line', 'namedInsured', 'policyNumber', 'policyType', 'status', 'statusLabel', 'wholesaler', 'windowCommissionCents']);
   assert.deepEqual(Object.keys(views.transactions[0]).sort(), ['amountCents', 'carrier', 'category', 'classification', 'client', 'id', 'isReversal', 'payer', 'policyNumber', 'postingStatus', 'statementId', 'statementPeriod', 'transactionDate']);
-  assert.deepEqual(Object.keys(views.statements[0]).sort(), ['carrierTotalCents', 'checks', 'extractedCents', 'id', 'payer', 'postedCents', 'reconciled', 'statementDate', 'statementMonth', 'status', 'statusLabel']);
+  assert.deepEqual(Object.keys(views.statements[0]).sort(), ['carrierTotalCents', 'checks', 'extractedCents', 'fileType', 'hasOriginal', 'id', 'payer', 'postedCents', 'reconciled', 'statementDate', 'statementMonth', 'status', 'statusLabel']);
 });
 
-test('active book only: active policies and the clients that hold them; posted window commission per policy', () => {
+test('every policy status is listed and labelled (active first); posted window commission per policy, cancelled included', () => {
   const b = reviewerBook({ clients, policies, carriers, entries, start: '2025-11', months: 12 });
-  assert.deepEqual(b.policies.map((p) => p.policyNumber), ['SYN-001', 'SYN-002']);
-  assert.deepEqual(b.clients.map((c) => [c.name, c.activePolicies]), [['Alpha Synthetic LLC', 1], ['Bravo Synthetic', 1]]);
-  assert.deepEqual(b.policies.map((p) => p.windowCommissionCents), [150_000, 150_000], 'the June 2025 entry is outside the window');
+  assert.deepEqual(b.policies.map((p) => [p.policyNumber, p.status, p.statusLabel]), [['SYN-001', 'active', 'Active'], ['SYN-002', 'active', 'Active'], ['SYN-003', 'cancelled', 'Cancelled']]);
+  assert.deepEqual(b.policiesByStatus, { active: 2, cancelled: 1 });
+  assert.deepEqual(b.clients.map((c) => [c.name, c.activePolicies, c.policyCount]), [['Alpha Synthetic LLC', 1, 1], ['Bravo Synthetic', 1, 1], ['Charlie Lapsed', 0, 1]]);
+  assert.deepEqual(b.policies.map((p) => p.windowCommissionCents), [150_000, 150_000, 10_000], 'the June 2025 entry is outside the window; the cancelled policy keeps its posted commission');
+  assert.equal(b.windowCommissionCents, 310_000);
+  assert.equal(b.activeWindowCommissionCents, 300_000);
   assert.equal(b.policies[1].wholesaler, 'Synthetic MGA');
+  const csv = reviewerBookCsv(b, 'Test Agency LLC', '2026-11-16T00:00:00Z');
+  assert.match(csv, /Policies by status: Active 2, Cancelled 1/);
+  assert.match(csv, /SYN-003,.*,Cancelled,/);
 });
 
 test('statements: posted vs not posted vs disputed are distinct; discarded uploads are not part of the record', () => {
@@ -187,7 +193,7 @@ test('free text never passes through: check labels are fixed by check type; fail
   for (const c of o.checks) assert.ok(!/broker|agency [0-9-]|undefined|split/i.test(c.detail), c.detail);
   assert.ok(failed.every((c) => c.detail === 'This check did not pass. Details are available from the agency.'));
   const b = reviewerBook({ clients, policies, carriers, entries, start: '2025-11', months: 12 });
-  assert.deepEqual(Object.keys(b.clients[0]).sort(), ['activePolicies', 'classification', 'id', 'name', 'status']);
+  assert.deepEqual(Object.keys(b.clients[0]).sort(), ['activePolicies', 'classification', 'id', 'name', 'policyCount', 'status']);
   assert.ok(!reviewerBookCsv(b, 'A', 'now').includes('1001'), 'agency-system client IDs are not exported');
   assert.deepEqual(Object.keys(o.postedTotal), ['commission', 'unmatched', 'adjustment', 'retained', 'manual', 'total']);
 });

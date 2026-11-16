@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
   formatMonth, DILIGENCE_CATEGORY_LABELS,
-  type ReviewerBook, type ReviewerCarrier, type ReviewerOverview, type ReviewerStatement, type ReviewerTransaction, type ReviewerView, type ReviewerExport,
+  type ReviewerBook, type ReviewerCarrier, type ReviewerOverview, type ReviewerStatement, type ReviewerStatementDetail, type ReviewerTransaction, type ReviewerView, type ReviewerExport,
 } from '@asm/shared';
 import { api } from '../api';
 import { useAuth } from '../auth';
@@ -25,7 +25,8 @@ const TABS: { view: ReviewerView; label: string }[] = [
 const EXPORTS: { kind: ReviewerExport; label: string }[] = [
   { kind: 'summary', label: 'Commission summary (CSV)' },
   { kind: 'statements', label: 'Statements & reconciliation (CSV)' },
-  { kind: 'book', label: 'Active clients & policies (CSV)' },
+  { kind: 'statementLines', label: 'All statement lines & adjustments (CSV)' },
+  { kind: 'book', label: 'Clients & policies, every status (CSV)' },
   { kind: 'transactions', label: 'Posted transactions (CSV)' },
 ];
 
@@ -38,11 +39,19 @@ const STATUS_SHORT: Record<ReviewerStatement['status'], string> = {
   posted: 'Posted', approved_not_posted: 'Approved — not posted', reconciled_not_posted: 'Reconciled — not posted', disputed: 'Disputed', not_yet_read: 'Not yet read',
 };
 
-function download(name: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }));
+function saveBlob(name: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const download = (name: string, text: string) => saveBlob(name, new Blob([text], { type: 'text/csv;charset=utf-8' }));
+/** The original file's exact bytes (decoded from the response; never altered). */
+function originalBlob(r: { base64: string; contentType: string }): Blob {
+  const bin = atob(r.base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: r.contentType });
 }
 
 export function ReviewerPortal({ preview = false }: { preview?: boolean }) {
@@ -155,32 +164,114 @@ function OverviewView({ o }: { o: ReviewerOverview }) {
 }
 
 function StatementsView({ rows }: { rows: ReviewerStatement[] }) {
+  const [openId, setOpenId] = useState<string | null>(null);
   return (
-    <Section title="Commission statements">
-      <p className="mb-2 text-xs text-slate-600">Only <b>Posted</b> statements are included in the commission totals. Disputed statements do not reconcile to the carrier's printed total and are shown with both figures.</p>
-      <DataTable rows={rows} searchText={(r) => `${r.payer} ${r.statementMonth ?? ''} ${STATUS_SHORT[r.status]}`} pageSize={50}
-        columns={[
-          { key: 'month', header: 'Month', render: (r) => (r.statementMonth ? formatMonth(r.statementMonth) : '—'), sort: (r) => r.statementMonth ?? '' },
-          { key: 'payer', header: 'Carrier / wholesaler', render: (r) => r.payer, sort: (r) => r.payer },
-          { key: 'status', header: 'Status', render: (r) => <Badge tone={STATUS_TONE[r.status]}>{STATUS_SHORT[r.status]}</Badge>, sort: (r) => r.status },
-          { key: 'carrier', header: 'Carrier printed total', align: 'right', render: (r) => <Money cents={r.carrierTotalCents} /> },
-          { key: 'extracted', header: 'Extracted', align: 'right', render: (r) => <Money cents={r.extractedCents} /> },
-          { key: 'posted', header: 'Posted', align: 'right', render: (r) => <Money cents={r.postedCents} /> },
-        ]} />
-    </Section>
+    <div className="space-y-4">
+      <Section title="Commission statements">
+        <p className="mb-2 text-xs text-slate-600">Only <b>Posted</b> statements are included in the commission totals. Disputed statements do not reconcile to the carrier's printed total and are shown with both figures. Open a statement for its commission lines and the carrier's original document.</p>
+        <DataTable rows={rows} searchText={(r) => `${r.payer} ${r.statementMonth ?? ''} ${STATUS_SHORT[r.status]}`} pageSize={50}
+          columns={[
+            { key: 'month', header: 'Month', render: (r) => (r.statementMonth ? formatMonth(r.statementMonth) : '—'), sort: (r) => r.statementMonth ?? '' },
+            { key: 'payer', header: 'Carrier / wholesaler', render: (r) => r.payer, sort: (r) => r.payer },
+            { key: 'status', header: 'Status', render: (r) => <Badge tone={STATUS_TONE[r.status]}>{STATUS_SHORT[r.status]}</Badge>, sort: (r) => r.status },
+            { key: 'carrier', header: 'Carrier printed total', align: 'right', render: (r) => <Money cents={r.carrierTotalCents} /> },
+            { key: 'extracted', header: 'Extracted', align: 'right', render: (r) => <Money cents={r.extractedCents} /> },
+            { key: 'posted', header: 'Posted', align: 'right', render: (r) => <Money cents={r.postedCents} /> },
+            { key: 'open', header: '', render: (r) => <Button size="sm" variant={openId === r.id ? 'primary' : 'secondary'} onClick={() => setOpenId(openId === r.id ? null : r.id)}>{openId === r.id ? 'Close' : 'Open'}</Button> },
+          ]} />
+      </Section>
+      {openId && <StatementDetailView key={openId} statementId={openId} onClose={() => setOpenId(null)} />}
+    </div>
+  );
+}
+
+function StatementDetailView({ statementId, onClose }: { statementId: string; onClose: () => void }) {
+  const [d, setD] = useState<ReviewerStatementDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>('load');
+  const [viewer, setViewer] = useState<string | null>(null);
+  useEffect(() => {
+    api.getReviewerData<{ statement: ReviewerStatementDetail }>('statement', statementId)
+      .then((r) => setD(r.statement)).catch((e) => setError(e instanceof Error ? e.message : 'Could not load')).finally(() => setBusy(null));
+    return () => { setViewer((u) => { if (u) URL.revokeObjectURL(u); return null; }); };
+  }, [statementId]);
+  const original = async (mode: 'view' | 'download') => {
+    setError(null); setBusy(mode);
+    try {
+      const r = await api.getReviewerStatementFile(statementId);
+      const blob = originalBlob(r);
+      if (mode === 'download' || r.contentType !== 'application/pdf') saveBlob(r.downloadName, blob);
+      else setViewer((u) => { if (u) URL.revokeObjectURL(u); return URL.createObjectURL(blob); });
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not open the original'); } finally { setBusy(null); }
+  };
+  const csv = async () => {
+    setError(null); setBusy('csv');
+    try { const r = await api.getReviewerExport('statement', statementId); download(r.downloadName, r.csv); } catch (e) { setError(e instanceof Error ? e.message : 'Download failed'); } finally { setBusy(null); }
+  };
+  const st = d?.statement;
+  return (
+    <Card title={st ? `${st.payer} — ${st.statementMonth ? formatMonth(st.statementMonth) : 'undated'}` : 'Statement'}
+      actions={<div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="secondary" disabled={!!busy || !st?.hasOriginal} title={st && !st.hasOriginal ? 'The original document was not stored for this statement.' : undefined} onClick={() => void original('view')}>{busy === 'view' ? 'Opening…' : 'View original'}</Button>
+        <Button size="sm" variant="secondary" disabled={!!busy || !st?.hasOriginal} onClick={() => void original('download')}>{busy === 'download' ? 'Preparing…' : 'Download original'}</Button>
+        <Button size="sm" variant="secondary" disabled={!!busy || !d} onClick={() => void csv()}>{busy === 'csv' ? 'Preparing…' : 'Statement detail (CSV)'}</Button>
+        <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
+      </div>}>
+      <ErrorNote message={error} />
+      {busy === 'load' && <p className="text-sm text-slate-500">Loading…</p>}
+      {st && !st.hasOriginal && <p className="mb-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">The carrier's original document was not stored for this statement. Contact the agency for a copy.</p>}
+      {viewer && <iframe title="Original statement" src={viewer} className="mb-3 h-[75vh] w-full rounded border border-slate-200" />}
+      {d && st && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <Badge tone={STATUS_TONE[st.status]}>{STATUS_SHORT[st.status]}</Badge>
+            <span>Carrier printed total <b><Money cents={d.carrierPrinted.statementTotalCents} /></b></span>
+            <span>Extracted <b><Money cents={st.extractedCents} /></b></span>
+            <span>Posted <b><Money cents={st.postedCents} /></b></span>
+            <span>{st.reconciled ? <Badge tone="green">Reconciles to carrier total</Badge> : <Badge tone="red">Does not reconcile</Badge>}</span>
+          </div>
+          {st.checks.length > 0 && (
+            <table className="min-w-full text-sm"><thead><tr className="text-left text-xs uppercase text-slate-500"><th>Check</th><th className="text-right">Carrier printed</th><th className="text-right">Extracted</th><th className="text-right">Difference</th><th /></tr></thead><tbody>
+              {st.checks.map((c, i) => <tr key={i} className="border-t border-slate-100"><td className="py-1">{c.label}</td><td className="text-right"><Money cents={c.carrierPrintedCents} /></td><td className="text-right"><Money cents={c.extractedCents} /></td><td className="text-right"><Money cents={c.differenceCents} /></td><td className="pl-2">{c.ok ? <Badge tone="green">OK</Badge> : <Badge tone="red">Differs</Badge>}</td></tr>)}
+            </tbody></table>
+          )}
+          <DataTable rows={d.lines.map((l) => ({ ...l, id: String(l.lineNo) }))} searchText={(l) => `${l.insured} ${l.policyNumber} ${l.transactionCode} ${l.matchedClient ?? ''}`} pageSize={100}
+            columns={[
+              { key: 'n', header: 'Line', render: (l) => l.lineNo, sort: (l) => l.lineNo },
+              { key: 'ins', header: 'Insured (as printed)', render: (l) => l.insured || '—', sort: (l) => l.insured },
+              { key: 'pol', header: 'Policy', render: (l) => l.policyNumber || '—' },
+              { key: 'code', header: 'Transaction', render: (l) => l.transactionCode || l.transactionType },
+              { key: 'eff', header: 'Effective', render: (l) => l.effectiveDate ?? '—' },
+              { key: 'pfc', header: 'Premium for commission', align: 'right', render: (l) => <Money cents={l.premiumForCommissionCents} /> },
+              { key: 'tp', header: 'Transaction premium', align: 'right', render: (l) => <Money cents={l.transactionPremiumCents} /> },
+              { key: 'rate', header: 'Rate', align: 'right', render: (l) => (l.rateBps === null ? '—' : `${(l.rateBps / 100).toFixed(2)}%`) },
+              { key: 'comm', header: 'Commission', align: 'right', render: (l) => <Money cents={l.commissionCents} />, sort: (l) => l.commissionCents ?? 0 },
+              { key: 'fee', header: 'Fee', align: 'right', render: (l) => <Money cents={l.feeCents} /> },
+              { key: 'm', header: 'Matched policy', render: (l) => (l.matched ? `${l.matchedPolicyNumber ?? ''} · ${l.matchedClient ?? ''}` : <Badge tone="slate">Not matched</Badge>) },
+            ]} />
+          {d.adjustments.length > 0 && (
+            <table className="min-w-full text-sm"><thead><tr className="text-left text-xs uppercase text-slate-500"><th>Adjustment</th><th>Kind</th><th className="text-right">Amount</th></tr></thead><tbody>
+              {d.adjustments.map((a, i) => <tr key={i} className="border-t border-slate-100"><td className="py-1">{a.label}</td><td>{a.kind}</td><td className="text-right"><Money cents={a.amountCents} /></td></tr>)}
+            </tbody></table>
+          )}
+          <p className="text-xs text-slate-600">{d.totals.lines} lines · commission <Money cents={d.totals.commissionCents} /> · adjustments <Money cents={d.totals.adjustmentsCents} /> · premium for commission <Money cents={d.totals.premiumForCommissionCents} />. Commission amounts are the full amounts paid by the carrier.</p>
+        </div>
+      )}
+    </Card>
   );
 }
 
 function BookView({ b }: { b: ReviewerBook }) {
   return (
-    <Section title={`Active policies (${b.policies.length}) · clients (${b.clients.length})`}>
-      <DataTable rows={b.policies} searchText={(p) => `${p.client} ${p.policyNumber} ${p.carrier} ${p.policyType}`} pageSize={50}
+    <Section title={`Policies (${b.policies.length}: ${Object.entries(b.policiesByStatus).map(([k, v]) => `${v} ${k}`).join(', ')}) · clients (${b.clients.length})`}>
+      <DataTable rows={b.policies} searchText={(p) => `${p.client} ${p.policyNumber} ${p.carrier} ${p.policyType} ${p.statusLabel}`} pageSize={50}
         columns={[
           { key: 'client', header: 'Client', render: (p) => p.client, sort: (p) => p.client },
           { key: 'num', header: 'Policy', render: (p) => p.policyNumber, sort: (p) => p.policyNumber },
           { key: 'carrier', header: 'Carrier', render: (p) => p.carrier + (p.wholesaler ? ` (via ${p.wholesaler})` : ''), sort: (p) => p.carrier },
           { key: 'type', header: 'Type', render: (p) => p.policyType || p.line },
           { key: 'term', header: 'Term', render: (p) => `${p.effectiveDate ?? '—'} → ${p.expirationDate ?? '—'}` },
+          { key: 'status', header: 'Status', render: (p) => <Badge tone={p.status === 'active' ? 'green' : p.status === 'pending' ? 'blue' : 'slate'}>{p.statusLabel}</Badge>, sort: (p) => p.status },
           { key: 'prem', header: 'Annual premium', align: 'right', render: (p) => <Money cents={p.annualPremiumCents} /> },
           { key: 'comm', header: 'Posted commission (period)', align: 'right', render: (p) => <Money cents={p.windowCommissionCents} />, sort: (p) => p.windowCommissionCents },
         ]} />
