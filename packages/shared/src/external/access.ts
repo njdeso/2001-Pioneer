@@ -75,7 +75,21 @@ export function externalAccessDecision(claimRole: unknown, record: Partial<Exter
 /** Reviewer views and exports (input of the reviewer callables). Anything else is rejected. */
 export const REVIEWER_VIEWS = ['overview', 'statements', 'book', 'carriers', 'transactions'] as const;
 export type ReviewerView = (typeof REVIEWER_VIEWS)[number];
-export const reviewerViewInput = z.object({ view: z.enum(REVIEWER_VIEWS) }).strict();
-export const REVIEWER_EXPORTS = ['summary', 'book', 'transactions', 'statements'] as const;
+/** Statement IDs only (no paths): the server looks the statement up itself. */
+const reviewerStatementId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, 'Unknown statement');
+export const reviewerViewInput = z.union([
+  z.object({ view: z.enum(REVIEWER_VIEWS) }).strict(),
+  /** One statement in detail: its commission lines, premiums, rates, fees and adjustments. */
+  z.object({ view: z.literal('statement'), statementId: reviewerStatementId }).strict(),
+]);
+export type ReviewerViewRequest = z.infer<typeof reviewerViewInput>;
+export const REVIEWER_EXPORTS = ['summary', 'book', 'transactions', 'statements', 'statementLines'] as const;
 export type ReviewerExport = (typeof REVIEWER_EXPORTS)[number];
-export const reviewerExportInput = z.object({ kind: z.enum(REVIEWER_EXPORTS) }).strict();
+export const reviewerExportInput = z.union([
+  z.object({ kind: z.enum(REVIEWER_EXPORTS) }).strict(),
+  /** One statement's detail (lines and adjustments). */
+  z.object({ kind: z.literal('statement'), statementId: reviewerStatementId }).strict(),
+]);
+export type ReviewerExportRequest = z.infer<typeof reviewerExportInput>;
+/** The original statement file (the carrier's document, unchanged). */
+export const reviewerFileInput = z.object({ statementId: reviewerStatementId }).strict();

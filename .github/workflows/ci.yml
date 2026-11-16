@@ -83,13 +83,14 @@ jobs:
 
       # External due-diligence reviewers (Pioneer Bank, independent due-diligence company): owner provisioning,
       # read-only allowlisted views and exports, broker-data isolation, every internal callable refused,
-      # forged and cross-role claims, direct database access, revocation, expiry, concurrent owner updates.
-      - name: External reviewer access end to end (auth + firestore + functions emulators)
+      # forged and cross-role claims, direct database access, revocation, expiry, concurrent owner updates;
+      # statement detail, the original statement file byte for byte, statement CSVs, direct Storage access.
+      - name: External reviewer access end to end (auth + firestore + functions + storage emulators)
         timeout-minutes: 10
         run: |
           printf 'ANTHROPIC_API_KEY=emulator-only-not-a-key\n' > functions/.secret.local
           printf 'OWNER_EMAILS=owner@example.test\n' > functions/.env.demo-asm-external
-          npx firebase emulators:exec --only auth,firestore,functions --project demo-asm-external "node --import tsx --test scripts/external-access-emulator.test.mjs"
+          npx firebase emulators:exec --only auth,firestore,functions,storage --project demo-asm-external "node --import tsx --test scripts/external-access-emulator.test.mjs"
 
       # Correction history of AI-extracted values survives statement re-reads (real replaceLines and
       # audit writer, Firestore emulator, demo project, synthetic statement).

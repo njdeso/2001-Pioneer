@@ -1,10 +1,13 @@
+import { createHash } from 'node:crypto';
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { logger } from 'firebase-functions';
+import { getStorage } from 'firebase-admin/storage';
 import {
   EXTERNAL_ROLE_LABELS, externalAccessDecision, externalInviteInput, externalRevokeInput, guardReviewerPayload, isExternalRole,
   reviewerBook, reviewerBookCsv, reviewerCarriers, reviewerExportInput, reviewerOverview, reviewerStatements, reviewerStatementsCsv,
   reviewerSummaryCsv, reviewerTransactions, reviewerTransactionsCsv, reviewerViewInput, reviewerSettings,
-  type ExternalAccessRecord, type ExternalRole, type ReportEntry,
+  reviewerStatementDetail, reviewerStatementDetailCsv, reviewerStatementLinesCsv, reviewerFileInput, reviewerOriginalName, originalFileAccess,
+  type ExternalAccessRecord, type ExternalRole, type ReportEntry, type ReviewerStatementDetail, type ReviewerViewRequest,
 } from '@asm/shared';
 import { audit, auth, db, FieldValue, parse, requireRole, type Actor } from '../lib/core.js';
 import { OWNER_EMAILS } from './admin.js';
@@ -16,11 +19,14 @@ import { OWNER_EMAILS } from './admin.js';
  * diligence) is set only here, through the Admin SDK; the access record externalAccess/{uid} is the source
  * of truth checked on every reviewer request (status, role, expiry), so revocation is immediate.
  *
- * Reviewer data (getReviewerData / getReviewerExport): external users have no Firestore or Storage access.
+ * Reviewer data (getReviewerData / getReviewerExport / getReviewerStatementFile): external users have no
+ * Firestore or Storage access.
  * These callables read ONLY allowlisted fields (Firestore field selection, so broker IDs, shares and
  * amounts, notes, contact details and audit fields are never even loaded), build the views in
  * @asm/shared external/reviewerViews.ts, and pass every response through guardReviewerPayload (fail closed).
  * Broker records are read only as IDs and codes, for that guard. Nothing here writes business data.
+ * Original statement files are returned byte for byte (the carrier's document, unchanged) by
+ * getReviewerStatementFile — as bytes in the response, never as a link that could be passed on.
  */
 
 const DENIED = 'Access is not authorized or has ended. Contact the agency owner.';
@@ -52,15 +58,42 @@ const CARRIER_FIELDS = ['name', 'kind', 'commissionMethod', 'status'];
 const CLIENT_FIELDS = ['name', 'classification', 'status'];
 const POLICY_FIELDS = ['clientId', 'carrierId', 'wholesalerId', 'policyNumber', 'alternateNumbers', 'line', 'policyType', 'namedInsured', 'effectiveDate', 'expirationDate', 'status', 'premiumCents', 'commissionRateBps'];
 const LEDGER_FIELDS = ['amountCents', 'statementPeriod', 'postingStatus', 'payerId', 'carrierId', 'clientId', 'policyId', 'sourceType', 'level', 'classification', 'transactionDate', 'reversalOf', 'statementId', 'postingId'];
-const STATEMENT_FIELDS = ['status', 'statementMonth', 'statementDate', 'payerId', 'statementTotalCents', 'postedCents', 'reconciliation.reconciled', 'reconciliation.checks', 'reconciliation.totals.commissionCents', 'reconciliation.totals.adjustmentsCents'];
+// originalPath is loaded only to say whether the original exists (hasOriginal); it is never returned.
+const STATEMENT_FIELDS = ['status', 'statementMonth', 'statementDate', 'payerId', 'statementTotalCents', 'postedCents', 'reconciliation.reconciled', 'reconciliation.checks', 'reconciliation.totals.commissionCents', 'reconciliation.totals.adjustmentsCents', 'originalPath', 'fileType'];
+const STATEMENT_DETAIL_FIELDS = [...STATEMENT_FIELDS, 'stated', 'adjustments'];
+/** Statement line fields shared with reviewers. Not loaded: match details beyond the policy, broker data, raw text, notes and checks. */
+const LINE_FIELDS = ['lineNo', 'page', 'insuredName', 'policyNumberRaw', 'transactionCodeRaw', 'transactionType', 'effectiveDate', 'premiumForCommissionCents', 'transactionPremiumCents', 'rateBps', 'paidCommissionCents', 'termCommissionCents', 'feeCents', 'paymentReceivedCents', 'match.policyId'];
+const MAX_ORIGINAL_BYTES = 20 * 1024 * 1024; // the upload limit (storage rules)
+const CONTENT_TYPE: Record<string, string> = { pdf: 'application/pdf', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', csv: 'text/csv' };
 const settingsDoc = async () => {
   const snap = await db.collection('settings').doc('app').get();
   return reviewerSettings(snap.exists ? snap.data() : null);
 };
 const ledger = async () => (await read('ledger', LEDGER_FIELDS)) as unknown as ReportEntry[];
+const readOne = async (col: string, id: string, fields: string[]): Promise<Doc | null> => {
+  const snap = await db.collection(col).where('__name__', '==', db.collection(col).doc(id)).select(...fields).get();
+  return snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
+};
+const statementLines = async (id: string): Promise<Doc[]> =>
+  (await db.collection('statements').doc(id).collection('lines').select(...LINE_FIELDS).get()).docs.map((d) => ({ id: d.id, ...d.data() }));
+/** One statement in detail; null for a missing or discarded statement (not part of the record). */
+async function statementDetail(id: string, ctx?: { carriers: Doc[]; policies: Doc[]; clients: Doc[] }): Promise<ReviewerStatementDetail | null> {
+  const st = await readOne('statements', id, STATEMENT_DETAIL_FIELDS);
+  if (!st) return null;
+  const [lines, carriers, policies, clients] = await Promise.all([
+    statementLines(id),
+    ctx?.carriers ?? read('carriers', CARRIER_FIELDS), ctx?.policies ?? read('policies', ['policyNumber', 'clientId']), ctx?.clients ?? read('clients', ['name']),
+  ]);
+  return reviewerStatementDetail({ statement: st, lines, carriers, policies, clients });
+}
 const brokerIdentifiers = async () => (await db.collection('brokers').select('code').get()).docs.flatMap((d) => [d.id, String(d.get('code') ?? '')]);
 
-async function buildView(view: string) {
+async function buildView(view: string, statementId?: string) {
+  if (view === 'statement') {
+    const detail = await statementDetail(String(statementId));
+    if (!detail) throw new HttpsError('not-found', 'This statement is not available.');
+    return { statement: detail };
+  }
   const settings = await settingsDoc();
   const win = { start: settings.snapshotStartMonth, months: settings.snapshotMonths };
   switch (view) {
@@ -108,18 +141,31 @@ async function deliver<T>(caller: ReviewerCaller, what: string, payload: T): Pro
 
 export const getReviewerData = onCall({ memory: '512MiB', timeoutSeconds: 120 }, async (req) => {
   const caller = await requireReviewer(req);
-  const { view } = parse(reviewerViewInput, req.data);
-  const payload = { role: caller.role, organization: caller.role === 'admin' ? 'Owner preview' : EXTERNAL_ROLE_LABELS[caller.role], view, ...(await buildView(view)) };
-  return deliver(caller, view, payload);
+  const input: ReviewerViewRequest = parse(reviewerViewInput, req.data);
+  const statementId = input.view === 'statement' ? input.statementId : undefined;
+  const payload = { role: caller.role, organization: caller.role === 'admin' ? 'Owner preview' : EXTERNAL_ROLE_LABELS[caller.role], view: input.view, ...(await buildView(input.view, statementId)) };
+  return deliver(caller, statementId ? `statement ${statementId}` : input.view, payload);
 });
 
 export const getReviewerExport = onCall({ memory: '512MiB', timeoutSeconds: 120 }, async (req) => {
   const caller = await requireReviewer(req);
-  const { kind } = parse(reviewerExportInput, req.data);
+  const input = parse(reviewerExportInput, req.data);
+  const kind = input.kind;
   const at = new Date().toISOString();
   const date = at.slice(0, 10);
   let csv: string;
-  if (kind === 'summary') {
+  let name = `Due-diligence-${kind}-${date}.csv`;
+  if (input.kind === 'statement') {
+    const [settings, detail] = await Promise.all([settingsDoc(), statementDetail(input.statementId)]);
+    if (!detail) throw new HttpsError('not-found', 'This statement is not available.');
+    csv = reviewerStatementDetailCsv(detail, settings.agencyName, at);
+    name = `Due-diligence-statement-${(detail.statement.payer + ' ' + (detail.statement.statementMonth ?? '')).replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '')}-${date}.csv`;
+  } else if (kind === 'statementLines') {
+    const [settings, statements, carriers, policies, clients] = await Promise.all([settingsDoc(), read('statements', STATEMENT_FIELDS), read('carriers', CARRIER_FIELDS), read('policies', ['policyNumber', 'clientId']), read('clients', ['name'])]);
+    const listed = reviewerStatements(statements, carriers); // discarded uploads excluded; newest first
+    const details = (await Promise.all(listed.map((x) => statementDetail(x.id, { carriers, policies, clients })))).filter((x): x is ReviewerStatementDetail => !!x);
+    csv = reviewerStatementLinesCsv(details, settings.agencyName, at);
+  } else if (kind === 'summary') {
     const { overview } = (await buildView('overview')) as { overview: ReturnType<typeof reviewerOverview> };
     if (overview.status === 'CHECKS_FAILED' || overview.status === 'NO_PERIOD') throw new HttpsError('failed-precondition', `The commission summary is not available: ${overview.statusLabel}.`);
     csv = reviewerSummaryCsv(overview, at);
@@ -133,7 +179,37 @@ export const getReviewerExport = onCall({ memory: '512MiB', timeoutSeconds: 120 
     const [settings, { statements }] = await Promise.all([settingsDoc(), buildView('statements') as Promise<{ statements: ReturnType<typeof reviewerStatements> }>]);
     csv = reviewerStatementsCsv(statements, settings.agencyName, at);
   }
-  return deliver(caller, `${kind} export`, { downloadName: `Due-diligence-${kind}-${date}.csv`, csv });
+  return deliver(caller, input.kind === 'statement' ? `statement ${input.statementId} export` : `${kind} export`, { downloadName: name, csv });
+});
+
+/**
+ * The carrier's original statement file, byte for byte (PDF, or the workbook for spreadsheet statements).
+ * Returned in the response — not as a link — after the same access checks as every reviewer request, for
+ * listed statements only (discarded uploads excluded). The download name is neutral (carrier, month), never
+ * the uploaded file name. Every access is audited.
+ */
+export const getReviewerStatementFile = onCall({ memory: '1GiB', timeoutSeconds: 120 }, async (req) => {
+  const caller = await requireReviewer(req);
+  const { statementId } = parse(reviewerFileInput, req.data);
+  const st = await readOne('statements', statementId, STATEMENT_FIELDS);
+  const [listed] = st ? reviewerStatements([st], await read('carriers', CARRIER_FIELDS)) : [];
+  if (!st || !listed) throw new HttpsError('not-found', 'This statement is not available.');
+  const access = originalFileAccess({ status: String(st.status ?? ''), originalPath: st.originalPath as string | null | undefined });
+  if (!access.available) throw new HttpsError('not-found', access.reason);
+  const file = getStorage().bucket().file(String(st.originalPath));
+  const [exists] = await file.exists();
+  if (!exists) throw new HttpsError('not-found', 'The original file is recorded for this statement but is missing from storage. Contact the agency.');
+  const [meta] = await file.getMetadata();
+  if (Number(meta.size ?? 0) > MAX_ORIGINAL_BYTES) throw new HttpsError('failed-precondition', 'This original file is too large to open here. Contact the agency for a copy.');
+  const [bytes] = await file.download();
+  const payload = {
+    downloadName: reviewerOriginalName(listed),
+    contentType: CONTENT_TYPE[listed.fileType ?? 'pdf'] ?? 'application/octet-stream',
+    size: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    base64: bytes.toString('base64'),
+  };
+  return deliver(caller, `original statement ${statementId}`, payload);
 });
 
 // ---------------------------------------------------------------- owner provisioning

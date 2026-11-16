@@ -1,7 +1,7 @@
 // External due-diligence access, end to end against the Firebase EMULATORS (auth, firestore, functions) —
 // demo project, no credentials, never dev or production. Run by CI:
 //
-//   npx firebase emulators:exec --only auth,firestore,functions --project demo-asm-external \
+//   npx firebase emulators:exec --only auth,firestore,functions,storage --project demo-asm-external \
 //     "node --import tsx --test scripts/external-access-emulator.test.mjs"
 //
 // Three representative accounts: the owner, a Pioneer Bank reviewer (role buyer) and an independent
@@ -9,7 +9,10 @@
 // email + password like real users. Synthetic data is seeded full of confidential "canary" broker data;
 // every reviewer response and download is checked for it. Covers direct database access, manipulated
 // requests, cross-role access, forged claims, every internal callable, unauthorized downloads, revoked and
-// expired access, concurrent owner updates and disputed statements.
+// expired access, concurrent owner updates and disputed statements. With the Storage emulator: statement
+// detail (every commission line), the carrier's original document byte for byte, statement CSVs, policies of
+// every status, and every refused path (no file, missing file, discarded, unknown, manipulated, revoked,
+// direct Storage access).
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -17,13 +20,15 @@ import { readFileSync } from 'node:fs';
 import { initializeApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
+import { getStorage } from 'firebase-admin/storage';
 
 const PROJECT = process.env.GCLOUD_PROJECT || 'demo-asm-external';
 if (!PROJECT.startsWith('demo-')) throw new Error(`Refusing: ${PROJECT} is not a demo (emulator-only) project`);
-if (!process.env.FIRESTORE_EMULATOR_HOST || !process.env.FIREBASE_AUTH_EMULATOR_HOST) throw new Error('Run inside firebase emulators:exec (emulator hosts not set)');
+if (!process.env.FIRESTORE_EMULATOR_HOST || !process.env.FIREBASE_AUTH_EMULATOR_HOST || !process.env.FIREBASE_STORAGE_EMULATOR_HOST) throw new Error('Run inside firebase emulators:exec with auth, firestore, functions and storage (emulator hosts not set)');
 const FUNCTIONS = `http://127.0.0.1:5001/${PROJECT}/us-central1`;
 const AUTH = `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}/identitytoolkit.googleapis.com/v1`;
-initializeApp({ projectId: PROJECT });
+const BUCKET = `${PROJECT}.appspot.com`; // the default bucket the functions emulator uses for a demo project
+initializeApp({ projectId: PROJECT, storageBucket: BUCKET });
 const db = getFirestore();
 const adminAuth = getAuth();
 
@@ -67,7 +72,15 @@ function assertNoLeak(payload, label) {
 
 const T = {}; const U = {};
 const VIEWS = ['overview', 'statements', 'book', 'carriers', 'transactions'];
-const EXPORTS = ['summary', 'statements', 'book', 'transactions'];
+const EXPORTS = ['summary', 'statements', 'statementLines', 'book', 'transactions'];
+/** A small, real PDF: the synthetic "carrier document" (no customer data). */
+const ORIGINAL_PDF = Buffer.from([
+  '%PDF-1.4', '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj', '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj',
+  '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<<>>>>endobj',
+  '4 0 obj<</Length 44>>stream', 'BT /F1 12 Tf 72 720 Td (SYNTHETIC CARRIER) Tj ET', 'endstream endobj',
+  'trailer<</Root 1 0 R>>', '%%EOF', '',
+].join('\n'), 'latin1');
+const ORIGINAL_SHA = createHash('sha256').update(ORIGINAL_PDF).digest('hex');
 
 before(async () => {
   const w = [];
@@ -81,12 +94,25 @@ before(async () => {
   w.push(['policies/P1', { clientId: 'C1', carrierId: 'CA', wholesalerId: null, policyNumber: 'SYN-001', alternateNumbers: [], line: 'commercial', policyType: 'BOP', namedInsured: '', status: 'active', premiumCents: 250000, commissionRateBps: 1500, brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps }]);
   w.push(['policies/P2', { clientId: 'C2', carrierId: 'CA', wholesalerId: 'W1', policyNumber: 'SYN-002', line: 'personal', status: 'active', premiumCents: 120000, commissionRateBps: 1000, brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps }]);
   w.push(['ledger/L1', { level: 'policy', payerId: 'CA', carrierId: 'CA', clientId: 'C1', policyId: 'P1', classification: 'renewal', amountCents: 150000, statementPeriod: monthsAgo(2), sourceType: 'statement', statementId: 'S1', postingStatus: 'posted', reversalOf: null, postingId: 'PST1', note: CANARY.note, brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps, brokerCents: CANARY.brokerCents, agencyCents: 150000 - CANARY.brokerCents, approvedBy: 'owner1' }]);
-  w.push(['statements/S1', { status: 'posted', statementMonth: monthsAgo(2), payerId: 'CA', statementTotalCents: 150000, postedCents: 150000, fileName: CANARY.file, approval: { email: CANARY.email, totals: { brokerCents: CANARY.brokerCents } }, posting: { brokerCents: CANARY.brokerCents }, reconciliation: { reconciled: true, checks: [{ key: 'commission', label: 'Paid commission (sum of lines)', statedCents: 150000, extractedCents: 150000, differenceCents: 0, ok: true, required: true }], totals: { commissionCents: 150000, adjustmentsCents: 0 }, blockingReasons: [] } }]);
+  w.push(['policies/P3', { clientId: 'C2', carrierId: 'CA', policyNumber: 'SYN-003', line: 'personal', status: 'cancelled', premiumCents: 90000, commissionRateBps: 1000, brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps }]);
+  w.push(['statements/S1', { status: 'posted', statementMonth: monthsAgo(2), payerId: 'CA', statementTotalCents: 150000, postedCents: 150000, fileName: CANARY.file,
+    originalPath: 'statements/S1/original.pdf', fileType: 'pdf', sha256: ORIGINAL_SHA,
+    stated: { commissionPayableCents: 150000, monthCommissionPayableCents: 150000, premiumForCommissionCents: 1000000, transactionPremiumCents: null, feeCents: null, paymentReceivedCents: null },
+    adjustments: [{ label: 'MVR/CLUE expense (statement page 1, line 3)', amountCents: -1914, source: { sheet: 'page 1', sheetRow: 3, kind: 'mvr', policyNumberRaw: 'MVRCLU', lineNo: null } }], approval: { email: CANARY.email, totals: { brokerCents: CANARY.brokerCents } }, posting: { brokerCents: CANARY.brokerCents }, reconciliation: { reconciled: true, checks: [{ key: 'commission', label: 'Paid commission (sum of lines)', statedCents: 150000, extractedCents: 150000, differenceCents: 0, ok: true, required: true }], totals: { commissionCents: 150000, adjustmentsCents: 0 }, blockingReasons: [] } }]);
   w.push(['statements/S2', { status: 'discrepancy', statementMonth: monthsAgo(1), payerId: 'CA', statementTotalCents: 390000, postedCents: 0, fileName: CANARY.file, reconciliation: { reconciled: false, checks: [{ key: 'monthPayable', label: 'Statement total', statedCents: 390000, extractedCents: 270000, differenceCents: -120000, ok: false, required: true }], totals: { commissionCents: 270000, adjustmentsCents: 0 }, blockingReasons: [`${CANARY.note} ${CANARY.brokerName}`] } }]);
+  for (const [id, line] of [['00001', { lineNo: 1, policyNumberRaw: 'SYN-001', paidCommissionCents: 150000, premiumForCommissionCents: 1000000, rateBps: 1500, match: { status: 'matched', policyId: 'P1', clientId: 'C1', brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps, brokerCents: CANARY.brokerCents, agencyCents: 150000 - CANARY.brokerCents, reasons: [CANARY.note] } }],
+    ['00002', { lineNo: 2, policyNumberRaw: 'SYN-002', paidCommissionCents: 1914, premiumForCommissionCents: 0, rateBps: null, match: { status: 'unmatched', brokerId: CANARY.brokerId } }]]) {
+    w.push([`statements/S1/lines/${id}`, { page: 1, insuredName: 'ALPHA SYNTHETIC LLC', transactionCodeRaw: 'REN', transactionType: 'renewal', effectiveDate: `${monthsAgo(2)}-01`, transactionPremiumCents: null, feeCents: null, termCommissionCents: null, paymentReceivedCents: null, kind: 'commission', rawText: `${CANARY.brokerName} ${CANARY.note}`, issues: [{ level: 'warning', code: 'x', text: CANARY.note }], ...line }]);
+  }
+  // A discarded upload with a stored file, and a statement whose recorded file is missing from storage.
+  w.push(['statements/S3', { status: 'discarded', statementMonth: monthsAgo(3), payerId: 'CA', statementTotalCents: 1, postedCents: 0, originalPath: 'statements/S3/original.pdf', fileType: 'pdf', fileName: CANARY.file }]);
+  w.push(['statements/S4', { status: 'needs_review', statementMonth: monthsAgo(3), payerId: 'CA', statementTotalCents: 5000, postedCents: 0, originalPath: 'statements/S4/original.pdf', fileType: 'pdf', fileName: CANARY.file, reconciliation: { reconciled: true, checks: [], totals: { commissionCents: 5000, adjustmentsCents: 0 } } }]);
   w.push(['statements/S2/lines/00001', { insuredName: 'X', paidCommissionCents: 100, match: { brokerId: CANARY.brokerId, brokerCents: CANARY.brokerCents }, rawText: CANARY.note }]);
   w.push(['brokerAdvances/A1', { brokerId: CANARY.brokerId, policyId: 'P1', amountPaidCents: 50000, note: CANARY.advance, status: 'active' }]);
   w.push(['buyoutSettlements/B1', { state: 'finalized', brokerId: CANARY.brokerId, note: CANARY.advance }]);
   const b = db.batch(); for (const [p, v] of w) b.set(db.doc(p), v); await b.commit();
+  await getStorage().bucket().file('statements/S1/original.pdf').save(ORIGINAL_PDF, { contentType: 'application/pdf', resumable: false });
+  await getStorage().bucket().file('statements/S3/original.pdf').save(ORIGINAL_PDF, { contentType: 'application/pdf', resumable: false });
 
   T.owner = await customToken('owner1', { role: 'admin', email: 'owner@example.test' });
   T.staff = await customToken('staff1', { role: 'staff' });
@@ -126,13 +152,14 @@ test('each reviewer sees every acquisition view and download, live, with no brok
     for (const kind of EXPORTS) {
       const r = await call('getReviewerExport', { kind }, T[k]);
       assert.match(r.downloadName, new RegExp(`^Due-diligence-${kind}-\\d{4}-\\d{2}-\\d{2}\\.csv$`));
+      assert.ok(!r.csv.includes("'-"), `${k}/${kind}: negative amounts are numbers`);
       assertNoLeak(r.csv, `${k}/${kind} export`);
     }
   }
   const after = Object.fromEntries(await Promise.all(BUSINESS.map(async (c) => [c, await hash(c)])));
   assert.deepEqual(after, before_, 'reviewer access changed no business record');
   const views = (await db.collection('auditLog').where('action', '==', 'external_view').get()).docs.map((d) => d.data());
-  assert.ok(views.length >= 18 && views.some((v) => v.entityId === U.pioneer.uid) && views.some((v) => v.entityId === U.diligence.uid), 'every reviewer access is in the audit log');
+  assert.ok(views.length >= 20 && views.some((v) => v.entityId === U.pioneer.uid) && views.some((v) => v.entityId === U.diligence.uid), 'every reviewer access is in the audit log');
   assert.ok((await db.collection('externalAccess').doc(U.pioneer.uid).get()).get('lastAccessAtIso'));
 });
 
@@ -150,7 +177,7 @@ test('disputed statements: shown as disputed with both figures, never in the pos
 test('reviewers cannot call ANY internal callable (writes, approvals, posting, imports, broker data, downloads, provisioning)', async () => {
   const src = readFileSync('functions/src/index.ts', 'utf8');
   const all = [...src.matchAll(/^export\s*\{([^}]*)\}\s*from/gm)].flatMap((m) => m[1].split(',').map((x) => x.trim()).filter(Boolean));
-  const reviewerOk = new Set(['getReviewerData', 'getReviewerExport']);
+  const reviewerOk = new Set(['getReviewerData', 'getReviewerExport', 'getReviewerStatementFile']);
   const internal = all.filter((n) => !reviewerOk.has(n));
   assert.ok(internal.length >= 40, `found ${internal.length} internal callables`);
   for (const k of ['pioneer', 'diligence']) {
@@ -226,11 +253,100 @@ test('expired access is refused at the next request', async () => {
   await call('getReviewerData', { view: 'carriers' }, T.pioneer);
 });
 
+test('statement detail: every commission line at the FULL carrier commission (a broker services P1), premiums, rates and adjustments; no broker data', async () => {
+  for (const k of ['pioneer', 'diligence']) {
+    const { statement: d } = await call('getReviewerData', { view: 'statement', statementId: 'S1' }, T[k]);
+    assertNoLeak(d, `${k}/statement S1`);
+    assert.deepEqual(d.lines.map((l) => [l.lineNo, l.policyNumber, l.commissionCents, l.premiumForCommissionCents, l.rateBps, l.matched]), [[1, 'SYN-001', 150000, 1000000, 1500, true], [2, 'SYN-002', 1914, 0, null, false]]);
+    assert.equal(d.lines[0].matchedClient, 'Alpha Synthetic LLC');
+    assert.deepEqual(d.adjustments, [{ label: 'MVR/CLUE expense (statement page 1, line 3)', kind: 'MVR / CLUE charge', amountCents: -1914 }]);
+    assert.deepEqual([d.statement.status, d.statement.hasOriginal, d.statement.fileType, d.carrierPrinted.premiumForCommissionCents], ['posted', true, 'pdf', 1000000]);
+    for (const key of ['issues', 'rawText', 'match', 'brokerCents', 'originalPath', 'fileName']) assert.ok(!JSON.stringify(d).includes(`"${key}"`), `${k}: no ${key}`);
+  }
+  const { statements } = await call('getReviewerData', { view: 'statements' }, T.pioneer);
+  assert.deepEqual(statements.map((x) => [x.id, x.hasOriginal]).sort(), [['S1', true], ['S2', false], ['S4', true]], 'discarded S3 is not listed');
+});
+
+test('original statement file: the carrier\'s document byte for byte, for both organizations, audited, nothing changed', async () => {
+  const before_ = Object.fromEntries(await Promise.all(BUSINESS.map(async (c) => [c, await hash(c)])));
+  const before = await getStorage().bucket().file('statements/S1/original.pdf').getMetadata().then(([m]) => [m.md5Hash, m.generation]);
+  for (const k of ['pioneer', 'diligence']) {
+    const r = await call('getReviewerStatementFile', { statementId: 'S1' }, T[k]);
+    const bytes = Buffer.from(r.base64, 'base64');
+    assert.ok(bytes.equals(ORIGINAL_PDF), `${k}: identical bytes`);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), ORIGINAL_SHA);
+    assert.deepEqual([r.sha256, r.size, r.contentType], [ORIGINAL_SHA, ORIGINAL_PDF.length, 'application/pdf']);
+    assert.equal(r.downloadName, `Synthetic Mutual (TEST) ${monthsAgo(2)} commission statement.pdf`, 'neutral name, not the uploaded file name');
+    const { base64, ...rest } = r;
+    assertNoLeak(rest, `${k}/original`);
+  }
+  assert.deepEqual(await getStorage().bucket().file('statements/S1/original.pdf').getMetadata().then(([m]) => [m.md5Hash, m.generation]), before, 'the stored original is unchanged');
+  assert.deepEqual(Object.fromEntries(await Promise.all(BUSINESS.map(async (c) => [c, await hash(c)]))), before_, 'no business record changed');
+  const audits = (await db.collection('auditLog').where('action', '==', 'external_view').get()).docs.map((d) => d.data().summary);
+  assert.ok(audits.filter((x) => /viewed original statement S1$/.test(x)).length >= 2, 'each original access is audited');
+  // The owner preview can open it too.
+  assert.ok(Buffer.from((await call('getReviewerStatementFile', { statementId: 'S1' }, T.owner)).base64, 'base64').equals(ORIGINAL_PDF));
+});
+
+test('original file and statement detail refused for: no stored file, missing file, discarded, unknown, manipulated requests and every non-reviewer', async () => {
+  const notFound = async (data) => { try { await call('getReviewerStatementFile', data, T.pioneer); return null; } catch (e) { return [e.status, e.message]; } };
+  assert.deepEqual(await notFound({ statementId: 'S2' }), ['NOT_FOUND', 'The original file was never stored for this statement (the upload did not complete), so it cannot be shown. Upload the statement again if you need the file.']);
+  assert.deepEqual(await notFound({ statementId: 'S4' }), ['NOT_FOUND', 'The original file is recorded for this statement but is missing from storage. Contact the agency.']);
+  assert.deepEqual(await notFound({ statementId: 'S3' }), ['NOT_FOUND', 'This statement is not available.'], 'a discarded upload is not part of the record, though its file exists');
+  assert.deepEqual(await notFound({ statementId: 'NOPE' }), ['NOT_FOUND', 'This statement is not available.']);
+  for (const data of [{}, null, { statementId: 'statements/S1/original.pdf' }, { statementId: '../S1' }, { statementId: 'S1', path: 'statements/S3/original.pdf' }, { statementId: 'S1', bucket: 'other' }]) {
+    assert.equal(await refused(call('getReviewerStatementFile', data, T.pioneer)), 'INVALID_ARGUMENT', JSON.stringify(data));
+  }
+  assert.equal(await refused(call('getReviewerData', { view: 'statement', statementId: 'S3' }, T.pioneer)), 'NOT_FOUND');
+  assert.equal(await refused(call('getReviewerData', { view: 'statement', statementId: 'S1', fields: ['match'] }, T.pioneer)), 'INVALID_ARGUMENT');
+  assert.equal(await refused(call('getReviewerExport', { kind: 'statement', statementId: 'S3' }, T.pioneer)), 'NOT_FOUND');
+  const forged = await customToken('forger2', { role: 'diligence' });
+  for (const t of [T.staff, T.none, forged, await customToken(U.pioneer.uid, { role: 'diligence' })]) {
+    assert.equal(await refused(call('getReviewerStatementFile', { statementId: 'S1' }, t)), 'PERMISSION_DENIED');
+    assert.equal(await refused(call('getReviewerData', { view: 'statement', statementId: 'S1' }, t)), 'PERMISSION_DENIED');
+    assert.equal(await refused(call('getReviewerExport', { kind: 'statementLines' }, t)), 'PERMISSION_DENIED');
+  }
+  assert.equal(await refused(call('getReviewerStatementFile', { statementId: 'S1' }, null)), 'UNAUTHENTICATED');
+});
+
+test('direct Storage access with a reviewer\'s own ID token is refused (download and upload)', async () => {
+  const obj = `http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST}/v0/b/${BUCKET}/o/${encodeURIComponent('statements/S1/original.pdf')}`;
+  for (const k of ['pioneer', 'diligence']) {
+    const get = await fetch(`${obj}?alt=media`, { headers: { authorization: `Firebase ${T[k]}` } });
+    assert.equal(get.status, 403, `${k} download: HTTP ${get.status}`);
+    const up = await fetch(`http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST}/v0/b/${BUCKET}/o?name=${encodeURIComponent('statements/S1/original.pdf')}`, { method: 'POST', headers: { authorization: `Firebase ${T[k]}`, 'content-type': 'application/pdf' }, body: Buffer.from('%PDF-1.4 replaced') });
+    assert.equal(up.status, 403, `${k} upload: HTTP ${up.status}`);
+  }
+  const [still] = await getStorage().bucket().file('statements/S1/original.pdf').download();
+  assert.ok(still.equals(ORIGINAL_PDF), 'the original is unchanged');
+});
+
+test('statement CSVs: one statement and all statements, lines and adjustments, no broker data; policies of every status, labelled', async () => {
+  const one = await call('getReviewerExport', { kind: 'statement', statementId: 'S1' }, T.pioneer);
+  assert.match(one.downloadName, /^Due-diligence-statement-Synthetic-Mutual-TEST-\d{4}-\d{2}-\d{4}-\d{2}-\d{2}\.csv$/);
+  assertNoLeak(one.csv, 'statement CSV');
+  assert.match(one.csv, /\r\n1,1,ALPHA SYNTHETIC LLC,SYN-001,REN,renewal,[0-9-]+,10000\.00,,15\.00,1500\.00,/);
+  assert.match(one.csv, /MVR \/ CLUE charge,-19\.14\r\n/);
+  const all = await call('getReviewerExport', { kind: 'statementLines' }, T.diligence);
+  assertNoLeak(all.csv, 'all lines CSV');
+  assert.equal(all.csv.split('\r\n').filter((r) => r.includes(',Commission line,')).length, 3, 'S1 (2 lines) + S2 (1) + S4 (none); discarded S3 excluded');
+  const { book } = await call('getReviewerData', { view: 'book' }, T.pioneer);
+  assert.deepEqual(book.policies.map((p) => [p.policyNumber, p.statusLabel]), [['SYN-001', 'Active'], ['SYN-002', 'Active'], ['SYN-003', 'Cancelled']]);
+  assert.deepEqual(book.policiesByStatus, { active: 2, cancelled: 1 });
+  const csv = (await call('getReviewerExport', { kind: 'book' }, T.pioneer)).csv;
+  assert.match(csv, /SYN-003,.*,Cancelled,/);
+  assertNoLeak(csv, 'book CSV');
+});
+
 test('revocation is immediate: the still-valid old token is refused, sign-in is disabled, the claim is removed, and it is audited', async () => {
   await call('revokeExternalUser', { uid: U.diligence.uid, reason: 'Engagement ended (test)' }, T.owner);
   // (PERMISSION_DENIED from the access record; UNAUTHENTICATED if the platform also rejects the disabled account's token)
   assert.ok(['PERMISSION_DENIED', 'UNAUTHENTICATED'].includes(await refused(call('getReviewerData', { view: 'overview' }, T.diligence))), 'old ID token no longer works');
   assert.ok(['PERMISSION_DENIED', 'UNAUTHENTICATED'].includes(await refused(call('getReviewerExport', { kind: 'book' }, T.diligence))));
+  assert.ok(['PERMISSION_DENIED', 'UNAUTHENTICATED'].includes(await refused(call('getReviewerData', { view: 'statement', statementId: 'S1' }, T.diligence))), 'statement detail refused');
+  assert.ok(['PERMISSION_DENIED', 'UNAUTHENTICATED'].includes(await refused(call('getReviewerStatementFile', { statementId: 'S1' }, T.diligence))), 'original file refused');
+  assert.ok(['PERMISSION_DENIED', 'UNAUTHENTICATED'].includes(await refused(call('getReviewerExport', { kind: 'statement', statementId: 'S1' }, T.diligence))), 'statement CSV refused');
+  assert.ok(['PERMISSION_DENIED', 'UNAUTHENTICATED'].includes(await refused(call('getReviewerExport', { kind: 'statementLines' }, T.diligence))), 'all-lines CSV refused');
   await assert.rejects(passwordSignIn(U.diligence.email, 'Synthetic-diligence-Pass-1!'), /USER_DISABLED/);
   const user = await adminAuth.getUser(U.diligence.uid);
   assert.equal(user.disabled, true); assert.deepEqual(user.customClaims ?? {}, {});
