@@ -20,6 +20,7 @@ export const NAV = [
   { to: '/valuation', label: 'Book Valuation', icon: '$', phase: 5 },
   { to: '/package', label: 'Due Diligence Package', icon: '⎙' },
   { to: '/buyout', label: 'Broker Buyout', icon: '⇄', adminOnly: true },
+  { to: '/external-access', label: 'External Reviewer Access', icon: '⚿', adminOnly: true },
   { to: '/settings', label: 'Administration & Settings', icon: '⚙' },
 ] as const;
 

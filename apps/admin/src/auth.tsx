@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { onIdTokenChanged, signOut, type User } from 'firebase/auth';
-import type { Role } from '@asm/shared';
+import { isExternalRole, type Role } from '@asm/shared';
 import { auth } from './firebase';
 
 interface AuthState {
@@ -27,7 +27,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (u) {
           const token = await u.getIdTokenResult();
           const r = token.claims.role;
-          setRole(r === 'admin' || r === 'staff' ? r : null);
+          setRole(r === 'admin' || r === 'staff' || isExternalRole(r) ? (r as Role) : null);
         } else {
           setRole(null);
         }

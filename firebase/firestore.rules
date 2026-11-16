@@ -63,6 +63,11 @@ service cloud.firestore {
     // Collection-group reads of coverage terms (the advance review lists every policy's terms).
     match /{path=**}/terms/{termId} { allow read: if isStaff(); allow write: if false; }
 
+    // External due-diligence access records (owner only). External users (roles buyer / diligence) have
+    // NO direct Firestore access at all: isStaff() and isAdmin() are false for them, so every rule above
+    // denies them; they receive allowlisted data only through the reviewer callables.
+    match /externalAccess/{uid}    { allow read: if isAdmin(); allow write: if false; }
+
     // A user can read their own profile.
     match /users/{uid}             { allow read: if signedIn() && request.auth.uid == uid; allow write: if false; }
 

@@ -1,6 +1,7 @@
 import type { Cents, BasisPoints } from './money.js';
 import type { IsoDate, Month } from './period.js';
 import type { BrokerInput, CarrierInput, ClientInput, PolicyInput, SettingsInput } from './schemas.js';
+import type { ExternalRole } from './external/access.js';
 
 /** Firestore timestamps are kept opaque in shared code. */
 export type Stamp = unknown;
@@ -20,7 +21,8 @@ export type Policy = PolicyInput &
   Meta & { normalizedPolicyNumber: string; searchTokens: string[] };
 export type Settings = SettingsInput;
 
-export type Role = 'admin' | 'staff';
+/** admin = owner; staff = internal; buyer / diligence = external, read-only due-diligence reviewers (external/access.ts). */
+export type Role = 'admin' | 'staff' | ExternalRole;
 
 export const LEDGER_CLASSIFICATIONS = [
   'new_business',

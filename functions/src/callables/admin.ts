@@ -4,7 +4,7 @@ import { settingsInput, trailingTwelveStart, UNASSIGNED_BROKER_ID } from '@asm/s
 import { audit, auth, db, diff, meta, parse, requireRole, type Actor } from '../lib/core.js';
 
 /** Comma-separated owner email(s), set at deploy time: OWNER_EMAILS="you@example.com" */
-const OWNER_EMAILS = defineString('OWNER_EMAILS');
+export const OWNER_EMAILS = defineString('OWNER_EMAILS');
 
 /**
  * First-run bootstrap. A signed-in user whose email is listed in OWNER_EMAILS
