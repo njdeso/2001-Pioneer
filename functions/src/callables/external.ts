@@ -49,7 +49,7 @@ type Doc = Record<string, unknown> & { id: string };
 const read = async (col: string, fields: string[]): Promise<Doc[]> =>
   (await db.collection(col).select(...fields).get()).docs.map((d) => ({ id: d.id, ...d.data() }));
 const CARRIER_FIELDS = ['name', 'kind', 'commissionMethod', 'status'];
-const CLIENT_FIELDS = ['name', 'externalId', 'classification', 'status'];
+const CLIENT_FIELDS = ['name', 'classification', 'status'];
 const POLICY_FIELDS = ['clientId', 'carrierId', 'wholesalerId', 'policyNumber', 'alternateNumbers', 'line', 'policyType', 'namedInsured', 'effectiveDate', 'expirationDate', 'status', 'premiumCents', 'commissionRateBps'];
 const LEDGER_FIELDS = ['amountCents', 'statementPeriod', 'postingStatus', 'payerId', 'carrierId', 'clientId', 'policyId', 'sourceType', 'level', 'classification', 'transactionDate', 'reversalOf', 'statementId', 'postingId'];
 const STATEMENT_FIELDS = ['status', 'statementMonth', 'statementDate', 'payerId', 'statementTotalCents', 'postedCents', 'reconciliation.reconciled', 'reconciliation.checks', 'reconciliation.totals.commissionCents', 'reconciliation.totals.adjustmentsCents'];

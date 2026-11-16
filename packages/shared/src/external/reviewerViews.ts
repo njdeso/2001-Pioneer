@@ -70,6 +70,19 @@ function reviewerStatus(status: string, postedCents: number): ReviewerStatementS
   if (status === 'discrepancy') return 'disputed';
   return 'not_yet_read';
 }
+/**
+ * Fixed reviewer labels by check type. Stored labels are NOT passed through: they are free text and can carry
+ * printed statement wording (e.g. a section subtotal named after a sub-producer).
+ */
+const CHECK_LABELS: Record<string, string> = {
+  commission: 'Commission total (carrier printed vs extracted)',
+  monthPayable: 'Statement total (carrier printed vs extracted)',
+  section: 'Section subtotal (carrier printed vs extracted)',
+  paymentReceived: 'Payments received (carrier printed vs extracted)',
+  premiumForCommission: 'Premium for commission (carrier printed vs extracted)',
+  transactionPremium: 'Transaction premium (carrier printed vs extracted)',
+  fee: 'Fees (carrier printed vs extracted)',
+};
 export interface ReviewerCheck { label: string; carrierPrintedCents: Cents | null; extractedCents: Cents; differenceCents: Cents | null; ok: boolean }
 export interface ReviewerStatement {
   id: string;
@@ -109,7 +122,7 @@ export function reviewerStatements(statements: Doc[], carriers: Doc[]): Reviewer
       postedCents: posted,
       reconciled: rec?.reconciled === true,
       checks: checks.map((c) => ({
-        label: s(c.label),
+        label: CHECK_LABELS[s(c.key)] ?? 'Other check (carrier printed vs extracted)',
         carrierPrintedCents: n(c.statedCents),
         extractedCents: n(c.extractedCents) ?? 0,
         differenceCents: n(c.differenceCents),
@@ -129,7 +142,7 @@ export interface ReviewerPolicy {
   /** Posted commission on this policy in the reporting window (carrier-paid commission, all categories). */
   windowCommissionCents: Cents;
 }
-export interface ReviewerClient { id: string; name: string; externalId: string; classification: string; status: string; activePolicies: number }
+export interface ReviewerClient { id: string; name: string; classification: string; status: string; activePolicies: number }
 export interface ReviewerBook { clients: ReviewerClient[]; policies: ReviewerPolicy[]; windowCommissionCents: Cents }
 
 /** Active policies (status 'active') and the clients that hold them: the book being sold. */
@@ -168,7 +181,7 @@ export function reviewerBook(input: { clients: Doc[]; policies: Doc[]; carriers:
   const clients: ReviewerClient[] = [...activeCount.keys()]
     .map((id) => clientById.get(id))
     .filter((c): c is Doc => !!c)
-    .map((c) => ({ id: c.id, name: displayName(s(c.name)), externalId: s(c.externalId), classification: s(c.classification), status: s(c.status) || 'active', activePolicies: activeCount.get(c.id) ?? 0 }))
+    .map((c) => ({ id: c.id, name: displayName(s(c.name)), classification: s(c.classification), status: s(c.status) || 'active', activePolicies: activeCount.get(c.id) ?? 0 }))
     .sort((a, b) => a.name.localeCompare(b.name));
   return { clients, policies, windowCommissionCents: policies.reduce((t, p) => t + p.windowCommissionCents, 0) };
 }
@@ -238,13 +251,14 @@ export function reviewerOverview(input: { settings: Record<string, unknown> | nu
     settings,
     status: summary.status, statusLabel: summary.statusLabel, statusText: summary.statusText, notices: [...summary.notices],
     from: summary.from, to: summary.to,
-    postedTotal: { ...summary.total },
+    postedTotal: { commission: summary.total.commission, unmatched: summary.total.unmatched, adjustment: summary.total.adjustment, retained: summary.total.retained, manual: summary.total.manual, total: summary.total.total },
     byMonth: summary.byMonth.map((m) => ({ month: m.month, totalCents: m.totals.total, hasPostedStatement: m.hasPostedStatement })),
     byPayer: summary.byPayer.map((p) => ({ name: p.name, kind: p.kind, totalCents: p.totals.total, monthsWithPostings: p.monthsWithPostings, byMonth: Object.fromEntries(p.byMonth) })),
     byCarrier: summary.byCarrier.map((c) => ({ name: c.name, totalCents: c.total })),
     missingMonths: [...summary.missingMonths],
     carrierGaps: summary.carrierGaps.map((g) => ({ name: g.name, missingMonths: [...g.missingMonths] })),
-    checks: summary.checks.map((c) => ({ name: c.name, pass: c.pass, detail: c.detail })),
+    // A failed check's detail can quote ledger-audit wording (broker/agency columns); reviewers get a generic detail.
+    checks: summary.checks.map((c) => ({ name: c.name, pass: c.pass, detail: !c.pass || /broker|agency|split|share/i.test(c.detail) ? 'This check did not pass. Details are available from the agency.' : c.detail })),
     notPosted,
   };
 }
@@ -273,9 +287,9 @@ export function reviewerSummaryCsv(o: ReviewerOverview, preparedAtIso: string): 
 }
 export function reviewerBookCsv(b: ReviewerBook, agency: string, preparedAtIso: string): string {
   const out = banner('Active clients and policies', agency, preparedAtIso);
-  out.push(row(['Client', 'Client ID', 'Classification', 'Policy number', 'Alternate numbers', 'Carrier', 'Wholesaler', 'Line', 'Policy type', 'Named insured', 'Effective', 'Expiration', 'Status', 'Annual premium', 'Agency commission rate %', 'Posted commission in period']));
+  out.push(row(['Client', 'Classification', 'Policy number', 'Alternate numbers', 'Carrier', 'Wholesaler', 'Line', 'Policy type', 'Named insured', 'Effective', 'Expiration', 'Status', 'Annual premium', 'Agency commission rate %', 'Posted commission in period']));
   const ext = new Map(b.clients.map((c) => [c.id, c]));
-  for (const p of b.policies) out.push(row([p.client, ext.get(p.clientId)?.externalId ?? '', ext.get(p.clientId)?.classification ?? '', p.policyNumber, p.alternateNumbers.join('; '), p.carrier, p.wholesaler, p.line, p.policyType, p.namedInsured, p.effectiveDate, p.expirationDate, p.status, money(p.annualPremiumCents), p.agencyCommissionRateBps === null ? null : (p.agencyCommissionRateBps / 100).toFixed(2), money(p.windowCommissionCents)]));
+  for (const p of b.policies) out.push(row([p.client, ext.get(p.clientId)?.classification ?? '', p.policyNumber, p.alternateNumbers.join('; '), p.carrier, p.wholesaler, p.line, p.policyType, p.namedInsured, p.effectiveDate, p.expirationDate, p.status, money(p.annualPremiumCents), p.agencyCommissionRateBps === null ? null : (p.agencyCommissionRateBps / 100).toFixed(2), money(p.windowCommissionCents)]));
   return out.join('\r\n') + '\r\n';
 }
 export function reviewerTransactionsCsv(t: ReviewerTransaction[], agency: string, preparedAtIso: string): string {

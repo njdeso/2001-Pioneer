@@ -122,7 +122,7 @@ test('statements: posted vs not posted vs disputed are distinct; discarded uploa
   assert.deepEqual(st.map((x) => [x.id, x.status]), [['S2', 'disputed'], ['S3', 'reconciled_not_posted'], ['S5', 'approved_not_posted'], ['S1', 'posted']], 'newest month first, then carrier name');
   const s2 = st.find((x) => x.id === 'S2')!;
   assert.deepEqual([s2.carrierTotalCents, s2.extractedCents, s2.postedCents, s2.reconciled], [390_000, 270_000, 0, false]);
-  assert.deepEqual(s2.checks, [{ label: 'Statement total (final net commission as printed)', carrierPrintedCents: 390_000, extractedCents: 270_000, differenceCents: -120_000, ok: false }]);
+  assert.deepEqual(s2.checks, [{ label: 'Statement total (carrier printed vs extracted)', carrierPrintedCents: 390_000, extractedCents: 270_000, differenceCents: -120_000, ok: false }]);
 });
 
 test('overview: commission totals are the POSTED ledger only; disputed and unposted statements are reported separately, never added', () => {
@@ -168,4 +168,26 @@ test('download responses pass the guard (their shape is { downloadName, csv })',
   const o = reviewerOverview({ settings, entries, carriers, policies, statements });
   assert.doesNotThrow(() => guardReviewerPayload({ downloadName: 'Due-diligence-summary-2026-11-16.csv', csv: reviewerSummaryCsv(o, '2026-11-16T00:00:00Z') }, brokerIds));
   assert.throws(() => guardReviewerPayload({ fileName: 'x.csv', csv: '' }, brokerIds), /forbidden field/, 'stored statement file names stay blocked');
+});
+
+test('free text never passes through: check labels are fixed by check type; failed check details are generic; no client external IDs', () => {
+  const withSection = [{ id: 'SX', status: 'discrepancy', statementMonth: '2026-04', payerId: 'CA', statementTotalCents: 100, postedCents: 0,
+    reconciliation: { reconciled: false, checks: [
+      { key: 'section', label: `Section subtotal: ${CANARY.brokerName} (sub-producer)`, statedCents: 100, extractedCents: 90, differenceCents: -10, ok: false },
+      { key: 'futureKey', label: `Broker ${CANARY.brokerCode}`, statedCents: 1, extractedCents: 1, differenceCents: 0, ok: true },
+    ], totals: { commissionCents: 90, adjustmentsCents: 0 } } }];
+  const st = reviewerStatements(withSection, carriers);
+  assert.deepEqual(st[0].checks.map((c) => c.label), ['Section subtotal (carrier printed vs extracted)', 'Other check (carrier printed vs extracted)']);
+  assertNoLeak(st, 'statements with printed section names');
+  // A reversal that does not offset its original fails the ledger check; the audit wording is not shown.
+  const bad = [...entries, e('L9', '2026-03', 500), e('L9__rev', '2026-03', -400, { reversalOf: 'L9', postingStatus: 'posted' })];
+  const o = reviewerOverview({ settings, entries: bad, carriers, policies, statements });
+  const failed = o.checks.filter((c) => !c.pass);
+  assert.ok(failed.length >= 1);
+  for (const c of o.checks) assert.ok(!/broker|agency [0-9-]|undefined|split/i.test(c.detail), c.detail);
+  assert.ok(failed.every((c) => c.detail === 'This check did not pass. Details are available from the agency.'));
+  const b = reviewerBook({ clients, policies, carriers, entries, start: '2025-11', months: 12 });
+  assert.deepEqual(Object.keys(b.clients[0]).sort(), ['activePolicies', 'classification', 'id', 'name', 'status']);
+  assert.ok(!reviewerBookCsv(b, 'A', 'now').includes('1001'), 'agency-system client IDs are not exported');
+  assert.deepEqual(Object.keys(o.postedTotal), ['commission', 'unmatched', 'adjustment', 'retained', 'manual', 'total']);
 });
