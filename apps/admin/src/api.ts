@@ -70,7 +70,18 @@ export interface BookExportResponse {
   customers: number; policies: number; rows: number; orphanPolicies: number; totalClientRecords: number; totalPolicyRecords: number;
 }
 
+import type { ExternalInviteInput, ExternalRole, ReviewerView, ReviewerExport } from '@asm/shared';
+type ReviewerExportKind = ReviewerExport | 'statement';
+export interface InviteResult { uid: string; organization: string; expiresOn: string; setupLink: string }
+
 export const api = {
+  // External due-diligence access (read-only reviewers; owner provisioning)
+  getReviewerData: <T>(view: ReviewerView | 'statement', statementId?: string) => call<{ view: string; statementId?: string }, T & { role: ExternalRole | 'admin'; organization: string; view: string }>('getReviewerData', statementId ? { view, statementId } : { view }, 120_000),
+  getReviewerExport: (kind: ReviewerExportKind, statementId?: string) => call<{ kind: string; statementId?: string }, { downloadName: string; csv: string }>('getReviewerExport', statementId ? { kind, statementId } : { kind }, 120_000),
+  /** The carrier's original statement file, byte for byte (base64). */
+  getReviewerStatementFile: (statementId: string) => call<{ statementId: string }, { downloadName: string; contentType: string; size: number; sha256: string; base64: string }>('getReviewerStatementFile', { statementId }, 120_000),
+  inviteExternalUser: (data: ExternalInviteInput) => call<ExternalInviteInput, InviteResult>('inviteExternalUser', data),
+  revokeExternalUser: (uid: string, reason: string) => call<{ uid: string; reason: string }, { ok: true }>('revokeExternalUser', { uid, reason }),
   claimOwner: () => call<Record<string, never>, { role: string }>('claimOwner', {}),
   saveSettings: (data: SettingsInput) => call<SettingsInput, { ok: true }>('saveSettings', data),
   saveCarrier: (data: CarrierInput, id?: string) =>

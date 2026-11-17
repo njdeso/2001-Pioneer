@@ -235,3 +235,59 @@ describe('storage', () => {
     await assertFails(uploadString(ref(an, 'incoming/x/SYN-S5/upload.pdf'), '%PDF', 'raw', pdf));
   });
 });
+
+// External due-diligence reviewers (Pioneer Bank = buyer; independent due-diligence company = diligence).
+// They have NO direct database or file access: everything they see comes from the allowlisted reviewer
+// callables. These tests use exactly the custom claims the owner's invite sets.
+describe('external due-diligence reviewers (buyer, diligence)', () => {
+  const ext = (role: 'buyer' | 'diligence') => env.authenticatedContext(`${role}1`, { role, email: `${role}@example.test` });
+  const ALL_DOCS = [
+    'carriers/SYN-CA', 'brokers/SYN-B1', 'clients/SYN-C1', 'policies/SYN-P1', 'policies/SYN-P1/terms/2025-07-02', 'settings/app', 'ledger/SYN-L1',
+    'statements/SYN-S1', 'statements/SYN-S1/lines/00001', 'importBatches/SYN-I1', 'reconExceptions/SYN-R1', 'valuations/SYN-V1', 'packages/SYN-K1',
+    'extractionRuns/SYN-E1', 'aiUsage/2026-11', 'auditLog/SYN-A1', 'brokerAdvances/SYN-ADV1', 'advanceImports/SYN-IMP1', 'advanceImports/SYN-IMP1/rows/00002',
+    'buyoutSettlements/SYN-S1', 'buyoutSettlements/SYN-S1/policyRows/SYN-P1', 'buyoutCounters/2027-01-15', 'buyoutConfig/current',
+    'externalAccess/buyer1', 'externalAccess/diligence1', 'users/admin1', 'policyKeys/k__SYN100',
+  ];
+  const ALL_COLLECTIONS = ['carriers', 'brokers', 'clients', 'policies', 'settings', 'ledger', 'statements', 'importBatches', 'auditLog', 'brokerAdvances', 'buyoutSettlements', 'buyoutConfig', 'externalAccess', 'users'];
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, 'externalAccess/buyer1'), { email: 'buyer@example.test', role: 'buyer', status: 'active', expiresOn: '2099-12-31' });
+      await setDoc(doc(db, 'externalAccess/diligence1'), { email: 'diligence@example.test', role: 'diligence', status: 'active', expiresOn: '2099-12-31' });
+      await setDoc(doc(db, 'brokers/SYN-B1'), { name: 'Synthetic Broker', shareBps: 5000 });
+      await setDoc(doc(db, 'statements/SYN-S1'), { status: 'discrepancy' });
+      await setDoc(doc(db, 'statements/SYN-S1/lines/00001'), { paidCommissionCents: 100 });
+    });
+  });
+  for (const role of ['buyer', 'diligence'] as const) {
+    it(`${role}: cannot read any document, including their own access record and broker, advance and buyout data`, async () => {
+      const db = ext(role).firestore();
+      for (const path of ALL_DOCS) await assertFails(getDoc(doc(db, path)));
+    });
+    it(`${role}: cannot list or query any collection`, async () => {
+      const db = ext(role).firestore();
+      for (const c of ALL_COLLECTIONS) await assertFails(getDocs(collection(db, c)));
+    });
+    it(`${role}: cannot create, change or delete anything (including granting themselves access or a role)`, async () => {
+      const db = ext(role).firestore();
+      await assertFails(setDoc(doc(db, `externalAccess/${role}1`), { status: 'active', role: 'admin', expiresOn: '2099-12-31' }));
+      await assertFails(setDoc(doc(db, `users/${role}1`), { role: 'admin' }));
+      await assertFails(setDoc(doc(db, 'clients/SYN-C1'), { name: 'changed' }));
+      await assertFails(setDoc(doc(db, 'ledger/SYN-NEW'), { amountCents: 1 }));
+      await assertFails(setDoc(doc(db, 'statements/SYN-S1'), { status: 'approved' }));
+      await assertFails(deleteDoc(doc(db, 'policies/SYN-P1')));
+    });
+    it(`${role}: no file storage access (no upload, no read of statement originals)`, async () => {
+      const s = ext(role).storage();
+      await assertFails(uploadString(ref(s, `incoming/${role}1/SYN-S9/upload.pdf`), '%PDF', 'raw', { contentType: 'application/pdf' }));
+      await assertFails(getBytes(ref(s, 'statements/SYN-S1/original.pdf')));
+    });
+  }
+  it('the external access registry is readable by the owner only (not staff, not reviewers); writable by nobody from the browser', async () => {
+    await assertSucceeds(getDoc(doc(admin(), 'externalAccess/buyer1')));
+    await assertSucceeds(getDocs(collection(admin(), 'externalAccess')));
+    await assertFails(getDoc(doc(staff(), 'externalAccess/buyer1')));
+    await assertFails(getDoc(doc(noRole(), 'externalAccess/buyer1')));
+    await assertFails(setDoc(doc(admin(), 'externalAccess/x'), { role: 'buyer', status: 'active' }));
+  });
+});
