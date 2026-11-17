@@ -565,6 +565,14 @@ async function syntheticUticaPdf(nonce) {
   return { bytes, fileName: `SMOKE-rev-utica-${nonce}.pdf` };
 }
 
+/** Reviewer fixtures are never posted; they are discarded through the app before the DetailedStatement stage
+ *  (an identical earlier copy would be a duplicate there) and again when the reviewer stage ends. */
+async function discardReviewerFixtures() {
+  for (const d of (await db.collection('statements').where('status', 'in', ['needs_review', 'discrepancy', 'extraction_failed']).get()).docs.filter((x) => String(x.get('fileName') ?? '').startsWith('SMOKE-rev-'))) {
+    await call('discardStatement', { statementId: d.id, reason: 'Synthetic reviewer fixture cleanup (dev only)' });
+  }
+}
+
 async function reviewerStage(cfg) {
   summary('\n#### External reviewers (Pioneer Bank, due diligence) — statement detail, original files, exports, policy statuses, read-only (dev test accounts, synthetic real-format statements)\n');
   summary('| | Check | Result |');
@@ -574,9 +582,7 @@ async function reviewerStage(cfg) {
   const secrets = await brokerSecrets();
 
   // 0. Housekeeping: earlier runs' reviewer fixtures (never posted) are discarded through the app.
-  for (const d of (await db.collection('statements').where('status', 'in', ['needs_review', 'discrepancy', 'extraction_failed']).get()).docs.filter((x) => String(x.get('fileName') ?? '').startsWith('SMOKE-rev-'))) {
-    await call('discardStatement', { statementId: d.id, reason: 'Superseded synthetic reviewer fixture (dev only)' });
-  }
+  await discardReviewerFixtures();
   // 1. Synthetic payer for the Utica-format statement, and one policy in each status.
   const stamp = { synthetic: true, updatedAt: FieldValue.serverTimestamp() };
   await db.collection('carriers').doc('SYNREV-UTICA').set({ name: 'Utica National (TEST)', code: 'SYNREVUTICA', kind: 'carrier', commissionMethod: 'statement', agencyCodes: ['DEV001'], aliases: ['Utica Mutual Ins Co. - ERO'], status: 'active', defaultRateBps: null, contact: { name: '', phone: '', email: '', address: '', notes: 'Synthetic test carrier' }, ...stamp }, { merge: true });
@@ -673,7 +679,8 @@ async function reviewerStage(cfg) {
     call('getReviewerExport', { kind: 'statementLines' }, 1, RT.pioneer), call('getReviewerExport', { kind: 'statement', statementId: prog.sid }, 1, RT.dd),
   ].map((p) => expectRejected(p)));
   record('Revoked accounts: statement detail, original and CSVs refused at once (old tokens)', after.every((r) => r.rejected && /PERMISSION_DENIED|UNAUTHENTICATED/.test(r.message)), after.map((r) => (r.rejected ? r.message.split(' ')[1] : 'ANSWERED')).join(', '));
-  summary(`\n_Fixtures left for browser review (dev, synthetic): Progressive ${prog.sid}, Utica ${ut.sid}; policies SYNREV-*. Reviewer test accounts revoked._\n`);
+  await discardReviewerFixtures();
+  summary(`\n_Reviewer fixtures discarded (Progressive ${prog.sid}, Utica ${ut.sid}); policies SYNREV-* kept for the status check; reviewer test accounts revoked._\n`);
 }
 
 async function exportStage(cfg) {
@@ -1157,6 +1164,7 @@ try {
   try { await buyoutStage(); } catch (err) { record('Broker buyout run', false, err instanceof Error ? err.message : String(err)); }
   try { await exportStage(cfg); } catch (err) { record('Customer & Policy Export run', false, err instanceof Error ? err.message : String(err)); }
   try { await duplicateStage(cfg); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
+  try { await discardReviewerFixtures(); } catch (err) { record('Reviewer fixture cleanup', false, err instanceof Error ? err.message : String(err)); }
   try { await detailedMvrStage(cfg); } catch (err) { record('DetailedStatement MVR run', false, err instanceof Error ? err.message : String(err)); }
   try { await reviewerStage(cfg); } catch (err) { record('External reviewer run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {

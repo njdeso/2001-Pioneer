@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   guardReviewerPayload, reviewerExportInput, reviewerFileInput, reviewerOriginalName, reviewerStatementDetail,
-  reviewerStatementDetailCsv, reviewerStatementLinesCsv, reviewerStatements, reviewerViewInput,
+  reviewerOverview, reviewerStatementDetailCsv, reviewerStatementLinesCsv, reviewerStatements, reviewerViewInput,
 } from '../src/index.ts';
 
 // Statement lines and statements exactly as stored: full match details (broker, shares, splits), raw extracted
@@ -132,4 +132,20 @@ test('the response guard still blocks a broker field or a broker ID anywhere in 
   const d = reviewerStatementDetail({ statement: statementS1, lines, carriers, policies, clients })!;
   assert.throws(() => guardReviewerPayload({ ...d, lines: [{ ...d.lines[0], brokerCents: 1 }] }, brokerIds), /forbidden field/);
   assert.throws(() => guardReviewerPayload({ ...d, lines: [{ ...d.lines[0], insured: CANARY.brokerId }] }, brokerIds), /broker identifier/);
+});
+
+// Regression (found in dev, 16 Nov 2026): the reviewer summary reported "Ledger balanced … ✗" for a ledger the
+// app's own summary reports as balanced, so the commission summary CSV was withheld. The reviewer read leaves
+// out broker/agency splits by design; it also left out `reversalId`, the original's link to its reversal.
+const reversedPair = (withLink: boolean) => [
+  { id: 'O1', amountCents: 50_000, statementPeriod: '2026-05', postingStatus: 'reversed', payerId: 'CA', carrierId: 'CA', clientId: 'C1', policyId: 'P1', sourceType: 'statement', level: 'policy', classification: 'commission', transactionDate: null, reversalOf: null, statementId: 'S9', postingId: 'PST1', ...(withLink ? { reversalId: 'R1' } : {}) },
+  { id: 'R1', amountCents: -50_000, statementPeriod: '2026-05', postingStatus: 'posted', payerId: 'CA', carrierId: 'CA', clientId: 'C1', policyId: 'P1', sourceType: 'statement', level: 'policy', classification: 'commission', transactionDate: null, reversalOf: 'O1', statementId: 'S9', postingId: 'PST1' },
+];
+const overviewOf = (entries: Record<string, unknown>[]) => reviewerOverview({ settings: { agencyName: 'Test', snapshotStartMonth: '2025-11', snapshotMonths: 12 }, entries: entries as never, carriers, policies: [{ id: 'P1', clientId: 'C1', carrierId: 'CA', policyNumber: 'SYN-001', status: 'active' }], statements: [] });
+test('reviewer summary: a reversed posting (no broker splits loaded) is balanced when the reversal link is read', () => {
+  const ok = overviewOf(reversedPair(true));
+  assert.ok(ok.checks.every((c) => c.pass), ok.checks.filter((c) => !c.pass).map((c) => c.name).join('; '));
+  assert.notEqual(ok.status, 'CHECKS_FAILED');
+  const without = overviewOf(reversedPair(false));
+  assert.deepEqual(without.checks.filter((c) => !c.pass).map((c) => c.name), ['Ledger balanced: every reversal exactly offsets its original; no partial reversals'], 'without the link the same ledger looks unbalanced (the dev failure)');
 });
