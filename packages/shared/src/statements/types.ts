@@ -59,6 +59,12 @@ export interface ExtractedLine {
   /** The row exactly as read from the document (audit trail). */
   rawText: string;
   issues: LineIssue[];
+  /**
+   * Multi-section statements (several writing companies or product lines, each with its own printed
+   * subtotal): the label of the section whose printed subtotal includes this row, as in
+   * ExtractedStatement.sections. Absent when the statement prints no section subtotals.
+   */
+  section?: string;
 }
 
 /** Totals printed by the carrier. `null` = not printed on this statement. */
@@ -70,6 +76,19 @@ export interface StatedTotals {
   transactionPremiumCents: Cents | null;
   feeCents: Cents | null;
   ytdCommissionPayableCents: Cents | null; // informational
+}
+
+/**
+ * One printed section subtotal of a multi-section statement (a writing company's "Month Total", a product
+ * line's "Total Private Passenger Auto"…). Exactly as printed, sign included; never calculated.
+ */
+export interface StatedSection {
+  label: string;
+  /** Agent / company code printed for the section, if any. */
+  code: string | null;
+  commissionCents: Cents | null;
+  premiumCents: Cents | null;
+  page: number | null;
 }
 
 export interface StatementAdjustment {
@@ -105,6 +124,8 @@ export interface ExtractedStatement {
   title: string;
   pageCount: number | null;
   stated: StatedTotals;
+  /** Printed section subtotals (multi-company / multi-product statements). Absent or empty if none. */
+  sections?: StatedSection[];
   /** Carrier-level items between line totals and the month payable (fees, shared cost…). */
   adjustments: StatementAdjustment[];
   lines: ExtractedLine[];
@@ -112,6 +133,12 @@ export interface ExtractedStatement {
   issues: LineIssue[];
   /** Deterministic spreadsheet readers: how each source row was used. */
   sourceAccounting?: SourceAccounting;
+  /**
+   * Set only by the AI reader when the statement prints a final figure (e.g. "Net Commission") but no separate
+   * grand total of the commission column. Reconciliation then checks lines + adjustments against that printed
+   * final figure. Deterministic readers never set it: a missing column total there stays a blocking error.
+   */
+  finalTotalOnly?: boolean;
   /** Labels for the two required reconciliation checks, in the statement's own terms. */
   checkLabels?: { commission: string; monthPayable: string };
 }
@@ -119,8 +146,10 @@ export interface ExtractedStatement {
 export type ExtractionMethod = 'travelers-pl-v1' | 'detailed-statement-v1' | 'ai' | 'table-ai';
 
 export interface ReconciliationCheck {
-  key: 'commission' | 'monthPayable' | 'paymentReceived' | 'premiumForCommission' | 'transactionPremium' | 'fee';
+  key: 'commission' | 'monthPayable' | 'section' | 'paymentReceived' | 'premiumForCommission' | 'transactionPremium' | 'fee';
   label: string;
+  /** key 'section': the printed section this check compares. */
+  section?: string;
   required: boolean;
   statedCents: Cents | null;
   extractedCents: Cents;
@@ -151,4 +180,9 @@ export interface ReconciliationResult {
   errorCount: number;
   warningCount: number;
   blockingReasons: string[];
+  /**
+   * Explanations that separate a reading problem from a carrier-side difference (e.g. every printed section
+   * subtotal agrees with its lines but the carrier's final total does not). Informational; never balances anything.
+   */
+  findings?: string[];
 }

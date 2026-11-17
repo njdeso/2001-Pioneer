@@ -1,5 +1,5 @@
 import { applyBasisPoints, sumCents, type Cents } from '../money.js';
-import type { ExtractedStatement, ReconciliationCheck, ReconciliationResult } from './types.js';
+import type { ExtractedStatement, ReconciliationCheck, ReconciliationResult, StatedSection } from './types.js';
 import { NEGATIVE_TYPES } from './travelers.js';
 
 /**
@@ -9,7 +9,27 @@ import { NEGATIVE_TYPES } from './travelers.js';
  *
  * Revenue = paid commission only. Payment received and premiums are reconciled as
  * completeness checks, never counted as commission.
+ *
+ * Multi-section statements (several writing companies or product lines, each with a printed subtotal,
+ * then one final figure such as Main Street America's "Net Commission"):
+ *   - every printed section subtotal is checked exactly against the lines of that section (negative
+ *     subtotals included);
+ *   - when the carrier prints no separate grand total of the commission column, only the final figure,
+ *     that final figure is the statement total (the required "month payable" check). Nothing is added up
+ *     to stand in for a carrier total;
+ *   - when every section subtotal agrees with its lines but the final total does not, a finding says so:
+ *     the difference is not in any printed section (a carrier-side or missing-page question), as opposed
+ *     to a reading error. Nothing is ever added, removed or balanced.
  */
+
+const fmtC = (c: number) => `${c < 0 ? '-' : ''}$${(Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export const sectionKey = (label: string | null | undefined) => (label ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+/** Printed sections with a commission subtotal, or null when the labels are not unique (cannot attribute lines). */
+function usableSections(s: ExtractedStatement): StatedSection[] | null {
+  const xs = (s.sections ?? []).filter((x) => x.commissionCents !== null && sectionKey(x.label));
+  const keys = xs.map((x) => sectionKey(x.label));
+  return new Set(keys).size === keys.length ? xs : null;
+}
 
 export interface ReconcileOptions {
   /** Allowed difference between rate × premium and the printed paid commission, per line. */
@@ -18,6 +38,8 @@ export interface ReconcileOptions {
 
 export function reconcileStatement(s: ExtractedStatement, opts: ReconcileOptions = {}): ReconciliationResult {
   const tol = opts.rateToleranceCents ?? 1;
+  const sections = usableSections(s);
+  const sectionKeys = new Set((sections ?? []).map((x) => sectionKey(x.label)));
 
   // Per-line validation (adds issues to the lines in place, idempotently)
   for (const l of s.lines) {
@@ -41,6 +63,9 @@ export function reconcileStatement(s: ExtractedStatement, opts: ReconcileOptions
         && Math.sign(l.premiumForCommissionCents) !== Math.sign(l.paidCommissionCents) && l.paidCommissionCents !== 0) {
         l.issues.push({ level: 'warning', code: 'chk_sign_premium', text: 'Commission and premium have opposite signs' });
       }
+    }
+    if (sections?.length && l.kind === 'commission' && !sectionKeys.has(sectionKey(l.section))) {
+      l.issues.push({ level: 'error', code: 'chk_section', text: l.section ? `Section "${l.section}" is not one of the statement's printed section subtotals` : 'Not assigned to any printed section subtotal' });
     }
     if (l.kind === 'payment_only' && l.paidCommissionCents !== null) {
       l.issues.push({ level: 'error', code: 'chk_kind', text: 'Payment-only row carries a commission' });
@@ -70,11 +95,33 @@ export function reconcileStatement(s: ExtractedStatement, opts: ReconcileOptions
     ok: stated === null ? !required : extracted === stated,
   });
   const st = s.stated;
-  const checks: ReconciliationCheck[] = [
-    check('commission', s.checkLabels?.commission ?? 'Paid commission (sum of lines)', st.commissionPayableCents, totals.commissionCents, true),
-    check('monthPayable', s.checkLabels?.monthPayable ?? 'Total month commission payable', st.monthCommissionPayableCents ?? st.commissionPayableCents,
-      totals.commissionCents + totals.adjustmentsCents, true),
-  ];
+  // A statement that prints only a final figure (no separate grand total of the commission column) is
+  // checked by that printed final figure alone: lines + adjustments = final total, exactly.
+  const finalOnly = s.finalTotalOnly === true && st.commissionPayableCents === null && st.monthCommissionPayableCents !== null;
+  const checks: ReconciliationCheck[] = [];
+  if (!finalOnly) checks.push(check('commission', s.checkLabels?.commission ?? 'Paid commission (sum of lines)', st.commissionPayableCents, totals.commissionCents, true));
+  checks.push(check('monthPayable', s.checkLabels?.monthPayable ?? (finalOnly ? 'Statement total (final net commission as printed)' : 'Total month commission payable'),
+    st.monthCommissionPayableCents ?? st.commissionPayableCents, totals.commissionCents + totals.adjustmentsCents, true));
+  const findings: string[] = [];
+  let sectionsAgreeFinalDiffers = false;
+  if (s.sections?.length && !sections) {
+    findings.push('The printed section labels are not unique, so lines could not be checked section by section.');
+  }
+  if (sections?.length) {
+    const sectionChecks = sections.map((x) => {
+      const k = sectionKey(x.label);
+      const ext = v(s.lines.filter((l) => sectionKey(l.section) === k).map((l) => l.paidCommissionCents));
+      return { ...check('section', `Section subtotal: ${x.label}${x.code ? ` (${x.code})` : ''}`, x.commissionCents, ext, true), section: x.label };
+    });
+    checks.push(...sectionChecks);
+    const final = checks.find((c) => c.key === 'monthPayable')!;
+    const printedSections = sumCents(sections.map((x) => x.commissionCents ?? 0));
+    if (sectionChecks.every((c) => c.ok) && final.statedCents !== null && !final.ok) {
+      const d = final.statedCents - (printedSections + totals.adjustmentsCents);
+      sectionsAgreeFinalDiffers = true;
+      findings.push(`Every printed section subtotal matches its lines (${sections.length} section${sections.length === 1 ? '' : 's'}, together ${fmtC(printedSections)}${totals.adjustmentsCents ? ` plus adjustments ${fmtC(totals.adjustmentsCents)}` : ''}), but the carrier's statement total is ${fmtC(final.statedCents)}: ${fmtC(Math.abs(d))} ${d > 0 ? 'more' : 'less'} than all printed sections together. This difference is not in any printed section of this document, so it is not a reading error: a section or page may be missing from the file, or the carrier's total includes an amount it does not itemize. Confirm with the carrier. Nothing has been added, removed or balanced.`);
+    }
+  }
   if (st.paymentReceivedCents !== null) checks.push(check('paymentReceived', 'Payment received (not revenue)', st.paymentReceivedCents, totals.paymentReceivedCents, true));
   if (st.premiumForCommissionCents !== null) checks.push(check('premiumForCommission', 'Premium for commission', st.premiumForCommissionCents, totals.premiumForCommissionCents, true));
   if (st.transactionPremiumCents !== null) checks.push(check('transactionPremium', 'Transaction premium', st.transactionPremiumCents, totals.transactionPremiumCents, true));
@@ -94,6 +141,8 @@ export function reconcileStatement(s: ExtractedStatement, opts: ReconcileOptions
   }
   if (lineErrors) blockingReasons.push(`${lineErrors} line error${lineErrors === 1 ? '' : 's'}`);
   if (stmtErrors) blockingReasons.push(...s.issues.filter((i) => i.level === 'error').map((i) => i.text));
+  // The section finding explains a failed final-total check; show it with the blocking reasons.
+  if (sectionsAgreeFinalDiffers) blockingReasons.push(findings[findings.length - 1]);
 
   return {
     reconciled: blockingReasons.length === 0,
@@ -102,5 +151,6 @@ export function reconcileStatement(s: ExtractedStatement, opts: ReconcileOptions
     errorCount: lineErrors + stmtErrors,
     warningCount: lineWarnings + stmtWarnings,
     blockingReasons,
+    findings,
   };
 }

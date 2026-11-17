@@ -17,7 +17,7 @@ import { TRANSACTION_TYPES, type ExtractedLine, type ExtractedStatement, type Li
  *   Claude cannot approve, match or post anything.
  */
 
-export const AI_PROMPT_VERSION = 'statement-extract-v2'; // v2: native structured output, "" for blank cells
+export const AI_PROMPT_VERSION = 'statement-extract-v3'; // v3: section subtotals + final statement total (multi-company statements); v2: native structured output, "" for blank cells
 export const DEFAULT_AI_MODEL = 'claude-sonnet-5-5';
 
 // ---------------------------------------------------------------------------
@@ -42,8 +42,11 @@ const AMOUNT = 'Exactly as printed, including any sign, trailing minus, parenthe
 const str = (description: string) => ({ type: 'string', description }) as const;
 
 const TOTALS_PROPS = {
-  commissionPayable: str('Printed total of the commission column for the statement (commission paid/payable). ' + AMOUNT),
-  monthCommissionPayable: str('Printed final amount payable for the month after any adjustments, if shown separately. ' + AMOUNT),
+  commissionPayable: str('Printed grand total of the commission column for the WHOLE statement (commission paid/payable). '
+    + 'If the statement is split into sections (writing companies, agent codes or product lines) and prints only a subtotal per section plus one final figure, '
+    + 'leave this "" and put the final figure in monthCommissionPayable. Never copy a single section\'s subtotal here. ' + AMOUNT),
+  monthCommissionPayable: str('Printed final amount for the whole statement after any adjustments, e.g. "Net Commission", "Final Net Commission", "Total Compensation", "Net", "Amount Due Producer". '
+    + 'Copy it even when it equals commissionPayable. On a statement with several companies or sections this is the one final figure for all of them, which may be printed on the last page only. ' + AMOUNT),
   paymentReceived: str('Printed total of payments received. ' + AMOUNT),
   premiumForCommission: str('Printed total premium for commission. ' + AMOUNT),
   transactionPremium: str('Printed total transaction premium. ' + AMOUNT),
@@ -63,6 +66,15 @@ const LINE_PROPS = {
   effectiveDate: str('Policy or transaction effective date as printed. Empty string if blank.'),
   transactionCode: str('Transaction code or description as printed. Empty string if blank.'),
   transactionType: { type: 'string', enum: [...TRANSACTION_TYPES], description: 'Type of transaction.' },
+  section: str('Label of the section whose printed subtotal includes this row, exactly as in sections[].label. Empty string if the statement prints no section subtotals.'),
+} as const;
+
+const SECTION_PROPS = {
+  label: str('Section heading as printed: the writing company (e.g. "NGM Insurance Company") or product line (e.g. "Private Passenger Auto (PPA)") that the subtotal belongs to. Unique per section.'),
+  code: str('Agent or company code printed for the section, if any. Empty string if none.'),
+  commissionTotal: str('The section\'s printed commission subtotal (e.g. its "Month Total" or "Total …" commission figure). ' + AMOUNT),
+  premiumTotal: str('The section\'s printed premium subtotal, if printed. ' + AMOUNT),
+  page: { type: 'integer', description: 'Page on which the subtotal is printed (1 = first page).' },
 } as const;
 
 const TOP_PROPS = {
@@ -75,6 +87,12 @@ const TOP_PROPS = {
     type: 'array',
     description: 'Statement-level items between the line total and the month payable (fees, shared costs, bonuses). Not individual policies. Empty array if none.',
     items: { type: 'object', additionalProperties: false, required: ['label', 'amount'], properties: { label: str('Label as printed.'), amount: str(AMOUNT) } },
+  },
+  sections: {
+    type: 'array',
+    description: 'Every printed section subtotal when the statement is split into writing companies, agent codes or product lines, in printed order, including negative subtotals. '
+      + 'A heading without its own printed subtotal belongs to the section whose subtotal includes its rows. Do not include the final statement total. Empty array if there are no section subtotals.',
+    items: { type: 'object', additionalProperties: false, required: Object.keys(SECTION_PROPS), properties: SECTION_PROPS },
   },
   lines: {
     type: 'array',
@@ -103,6 +121,8 @@ const SYSTEM_PROMPT = [
   'Copy every amount exactly as printed, including signs, trailing minus signs, parentheses and "CR". Never calculate, round, total or infer an amount. Use an empty string "" for blank cells.',
   '"Paid commission" is the commission actually paid on the row. Do not put policy term commission, premium or payment received in that field.',
   'Use transactionType "installment_payment" for rows that show a payment but no paid commission.',
+  'Read every page. Statements split into several companies or product lines print a subtotal for each and one final total, often on the last page: record each subtotal in sections, tag each row with its section, and record the final total.',
+  'A trailing minus belongs to the amount it is printed after: copy each column\'s sign from that column only.',
   'Do not output bank account numbers, routing numbers, or any account identifiers other than the agency code.',
 ].join('\n');
 const FORMAT_INSTRUCTION = {
@@ -128,6 +148,13 @@ export const aiStatementSchema = z.object({
     ytdCommissionPayable: amt,
   }),
   adjustments: z.array(z.object({ label: z.string().max(120), amount: z.string().max(40) })).max(50).optional().default([]),
+  sections: z.array(z.object({
+    label: z.string().max(160),
+    code: z.string().max(40).nullable().optional(),
+    commissionTotal: amt,
+    premiumTotal: amt,
+    page: z.number().int().min(1).max(500).nullable().optional(),
+  })).max(100).optional().default([]),
   lines: z.array(z.object({
     page: z.number().int().min(1).max(500),
     insuredName: z.string().max(200),
@@ -141,6 +168,7 @@ export const aiStatementSchema = z.object({
     effectiveDate: z.string().max(40).nullable().optional(),
     transactionCode: z.string().max(60).nullable().optional(),
     transactionType: z.enum(TRANSACTION_TYPES),
+    section: z.string().max(160).nullable().optional(),
   })).max(5000),
 });
 export type AiStatement = z.output<typeof aiStatementSchema>;
@@ -204,6 +232,7 @@ export function aiToStatement(ai: AiStatement, pageCount: number | null): Extrac
       kind: paid === null ? 'payment_only' : 'commission',
       rawText: JSON.stringify(r),
       issues: li,
+      ...(r.section?.trim() ? { section: r.section.trim().replace(/\s+/g, ' ') } : {}),
     };
   });
   const t = ai.totals;
@@ -218,9 +247,18 @@ export function aiToStatement(ai: AiStatement, pageCount: number | null): Extrac
     feeCents: null,
     ytdCommissionPayableCents: money(t.ytdCommissionPayable, tIssues, 'Year-to-date total'),
   };
+  const sections = (ai.sections ?? []).map((x) => ({
+    label: x.label.trim().replace(/\s+/g, ' '),
+    code: x.code?.trim() || null,
+    commissionCents: money(x.commissionTotal, tIssues, `Section subtotal "${x.label}"`),
+    premiumCents: money(x.premiumTotal, tIssues, `Section premium subtotal "${x.label}"`),
+    page: x.page ?? null,
+  })).filter((x) => x.label);
   issues.push(...tIssues);
   issues.push({ level: 'warning', code: 'ai_extracted', text: 'Read by AI: check the lines against the original document before approving.' });
-  if (stated.commissionPayableCents === null) issues.push({ level: 'error', code: 'no_total', text: 'The statement\'s commission total was not found' });
+  // A statement total is required: the commission column total or, on statements that print only a final
+  // figure (e.g. Main Street America's "Net Commission" after its company subtotals), that final figure.
+  if (stated.commissionPayableCents === null && stated.monthCommissionPayableCents === null) issues.push({ level: 'error', code: 'no_total', text: 'The statement\'s commission total was not found' });
   if (!lines.length) issues.push({ level: 'error', code: 'no_lines', text: 'No transaction rows were found' });
   const d = date(ai.statementDate ?? null);
   return {
@@ -232,6 +270,8 @@ export function aiToStatement(ai: AiStatement, pageCount: number | null): Extrac
     title: 'Commission statement',
     pageCount,
     stated,
+    ...(sections.length ? { sections } : {}),
+    ...(stated.commissionPayableCents === null && stated.monthCommissionPayableCents !== null ? { finalTotalOnly: true } : {}),
     adjustments,
     lines,
     issues,
