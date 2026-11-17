@@ -609,10 +609,24 @@ async function reviewerStage(cfg) {
     await checkStatement(sid, label, secrets);
   }
 
-  // 4. Every export, both organizations.
+  // 4. Every export, both organizations. The commission summary CSV is refused by design while a
+  //    reconciliation check fails (or no period is set): compare the reviewer overview with the app's own
+  //    summary for the same moment, and name any failing check.
+  const ov = (await call('getReviewerData', { view: 'overview' }, 1, RT.pioneer)).overview;
+  const failing = ov.checks.filter((c) => !c.pass).map((c) => c.name);
+  const summaryRefusedByDesign = ov.status === 'CHECKS_FAILED' || ov.status === 'NO_PERIOD';
+  record('Reviewer commission summary: status and checks (summary CSV is withheld while a check fails)', true,
+    `status ${ov.status} (${ov.statusLabel}); period ${ov.from}–${ov.to}; checks ${ov.checks.length - failing.length} of ${ov.checks.length} pass${failing.length ? `; FAILING: ${failing.join(' | ')}` : ''}`);
   for (const k of ['pioneer', 'dd']) {
     const bad = []; const sizes = [];
-    for (const kind of ['summary', 'statements', 'statementLines', 'book', 'transactions']) {
+    try {
+      const r = await call('getReviewerExport', { kind: 'summary' }, 1, RT[k]);
+      if (summaryRefusedByDesign) bad.push('summary: delivered although the checks fail');
+      sizes.push(`summary ${r.csv.split('\r\n').length} rows`); bad.push(...leaks(r.csv, secrets).map((x) => `summary: ${x}`));
+    } catch (e) {
+      if (summaryRefusedByDesign && /FAILED_PRECONDITION/.test(e.message)) sizes.push(`summary withheld (${ov.statusLabel})`); else bad.push(`summary: ${e.message}`);
+    }
+    for (const kind of ['statements', 'statementLines', 'book', 'transactions']) {
       try { const r = await call('getReviewerExport', { kind }, 1, RT[k]); sizes.push(`${kind} ${r.csv.split('\r\n').length} rows`); bad.push(...leaks(r.csv, secrets).map((x) => `${kind}: ${x}`)); } catch (e) { bad.push(`${kind}: ${e.message}`); }
     }
     for (const view of ['overview', 'statements', 'book', 'carriers', 'transactions']) {
