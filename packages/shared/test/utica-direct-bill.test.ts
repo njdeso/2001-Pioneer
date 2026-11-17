@@ -27,8 +27,10 @@ const STATEMENTS: Record<string, { month: string; rows: Row[]; totals: { gross: 
       ['END', '138.00-', '15.0', '20.70', false], ['REN', '373.00', '15.0', '55.95-', true], ['END', '90.00', '15.0', '13.50-', false],
       ['SUCH', '30.00', '0.0', '.00', true], ['SUCH', '10.00', '0.0', '.00', false], ['REN', '2896.00', '15.0', '434.40-', false],
       ['END', '1263.00', '15.0', '189.45-', false], ['REN', '1131.00', '20.0', '226.20-', true], ['REN', '1728.00', '15.0', '259.20-', true],
-      ['END', '864.00', '15.0', '129.60-', true], ['END', '276.00', '15.0', '41.40-', false], ['END', '276.00-', '15.0', '41.40', true],
-      ['END', '99.00', '15.0', '14.85-', true], ['REN', '1046.00', '20.0', '209.20-', false],
+      // Line 22 as PRINTED: "864.00-  129.60  734.40-", a group row of line 21's policy (return-premium
+      // endorsement, commission charged back). Lines 23-26: Cady (printed), his group row, Tabone, Tatarevic.
+      ['END', '864.00-', '15.0', '129.60', false], ['END', '276.00', '15.0', '41.40-', true], ['END', '276.00-', '15.0', '41.40', false],
+      ['END', '99.00', '15.0', '14.85-', true], ['REN', '1046.00', '20.0', '209.20-', true],
     ],
   },
   Mar: {
@@ -81,11 +83,16 @@ const STATEMENTS: Record<string, { month: string; rows: Row[]; totals: { gross: 
   },
 };
 
+/** Feb 2026 as the AI actually read it: line 22's trailing minus copied from the gross onto the commission. */
+const FEB_AS_READ: Row[] = STATEMENTS.Feb.rows.map((r, i) => (i === 21 ? ['END', '864.00', '15.0', '129.60-', false] : r));
+/** Utica's printed NET PREMIUMS column for Feb 2026 (each row: gross + commission as printed). */
+const FEB_NET_TOTAL = '13132.74';
+
 const TYPE: Record<string, TransactionType> = { NEW: 'new_business', REN: 'continuation', END: 'endorsement', CANC: 'cancellation', SUCH: 'other', COMM: 'other', EXP: 'other' };
 
 /** The statement as the AI reader returns it today: every amount exactly as printed. */
-function asExtracted(key: string, carrierName = 'UTICA MUTUAL INS CO. - ERO'): ExtractedStatement {
-  const st = STATEMENTS[key];
+function asExtracted(key: string, carrierName = 'UTICA MUTUAL INS CO. - ERO', rowsAsRead?: Row[]): ExtractedStatement {
+  const st = { ...STATEMENTS[key], rows: rowsAsRead ?? STATEMENTS[key].rows };
   let n = 0;
   const lines: ExtractedLine[] = st.rows.map(([entry, gross, rate, comm, named], i) => {
     if (named) n++;
@@ -111,10 +118,20 @@ const sum = (s: ExtractedStatement) => s.lines.reduce((t, l) => t + (l.paidCommi
 const errors = (s: ExtractedStatement) => [...s.issues, ...s.lines.flatMap((l) => l.issues)].filter((i) => i.level === 'error').map((i) => i.code);
 
 test('BEFORE the fix (as reported): the rows read exactly as printed give negative totals', () => {
-  assert.deepEqual(Object.keys(STATEMENTS).map((k) => sum(asExtracted(k))), [-283546, -227445, -91042, -128467, -317556]);
+  assert.deepEqual(Object.keys(STATEMENTS).map((k) => sum(asExtracted(k))), [-257626, -227445, -91042, -128467, -317556]);
+  assert.equal(sum(asExtracted('Feb', undefined, FEB_AS_READ)), -283546, 'Feb as the AI read line 22');
 });
 
-for (const key of ['Mar', 'May', 'Jul', 'Aug']) {
+/** Feb as read, with the NET PREMIUMS column read too (in the second premium field) and its printed total. */
+function febWithNet(rows: Row[] = FEB_AS_READ, netTotal: string | null = FEB_NET_TOTAL): ExtractedStatement {
+  const s = asExtracted('Feb', undefined, rows);
+  // Net as printed on the statement = gross + commission as printed, from the PRINTED rows (line 22: 734.40-).
+  s.lines.forEach((l, i) => { const [, g, , c] = STATEMENTS.Feb.rows[i]; l.premiumForCommissionCents = parseMoneyToCents(g)! + parseMoneyToCents(c)!; });
+  s.stated.premiumForCommissionCents = netTotal === null ? null : parseMoneyToCents(netTotal);
+  return s;
+}
+
+for (const key of ['Feb', 'Mar', 'May', 'Jul', 'Aug']) {
   test(`${key} 2026: positive agency commission, genuine negatives kept, group rows filled, reconciles exactly`, () => {
     const st = STATEMENTS[key];
     const { statement: s, report } = applyUticaDirectBillRules(asExtracted(key));
@@ -162,24 +179,87 @@ for (const key of ['Mar', 'May', 'Jul', 'Aug']) {
   });
 }
 
-test('February 2026: the rows add up to $2,835.46 but Utica\'s own totals leave out exactly line 21 ($259.20 on $1,728.00) — named, blocked, not removed', () => {
+test('February 2026 as printed: $2,576.26 exactly; line 21\'s policy (lines 21-22) nets $129.60, matching Utica\'s printed company subtotal', () => {
   const { statement: s, report } = applyUticaDirectBillRules(asExtracted('Feb'));
-  assert.equal(report.applied, true);
-  assert.equal(sum(s), 283546);
-  assert.equal(s.stated.commissionPayableCents, 257626);
-  assert.deepEqual(report.rowsOutsideTotals, [21]);
-  assert.equal(s.lines.length, 26, 'the row is kept');
-  const msg = s.issues.find((i) => i.code === 'utica_row_outside_totals')!;
-  assert.match(msg.text, /^Line 21 \(policy TFEB0011, commission \$259\.20\) is printed on the statement but is not included in Utica's totals: the commission total and the gross premium total both leave out exactly this row/);
-  const rec = reconcileStatement(s);
-  assert.equal(rec.reconciled, false, 'cannot be approved until decided');
-  // Everything else on the statement is right: without line 21 it reconciles to the printed $2,576.26.
-  const without = { ...s, issues: [], lines: s.lines.filter((l) => l.lineNo !== 21).map((l) => ({ ...l, issues: l.issues.filter((i) => i.code !== 'utica_row_outside_totals') })) };
-  assert.equal(sum(without), 257626);
-  assert.equal(reconcileStatement(without).reconciled, true);
+  assert.equal(sum(s), 257626);
+  assert.deepEqual(report.rowsOutsideTotals, []);
+  assert.deepEqual(report.reversedSignSuspectRows, []);
+  const l21 = s.lines[20], l22 = s.lines[21];
+  assert.equal(l22.policyNumberRaw, l21.policyNumberRaw, 'line 22 is a group row of line 21\'s policy');
+  assert.deepEqual([l21.paidCommissionCents, l22.paidCommissionCents, l21.transactionPremiumCents! + l22.transactionPremiumCents!], [25920, -12960, 86400]);
+  assert.equal(reconcileStatement(s).reconciled, true);
 });
 
-test('five statements together: +$10,221.36 printed by Utica (the Feb rows themselves total $10,480.56)', () => {
+test('February 2026 as the AI read it (line 22 signs reversed, no net column): $2,835.46 is NOT blamed on line 21 — both readings named, nothing changed, blocked', () => {
+  const { statement: s, report } = applyUticaDirectBillRules(asExtracted('Feb', undefined, FEB_AS_READ));
+  assert.equal(report.applied, true);
+  assert.equal(sum(s), 283546, 'nothing changed or removed');
+  assert.equal(s.stated.commissionPayableCents, 257626, 'carrier total never overridden');
+  assert.equal(s.lines.length, 26);
+  assert.deepEqual(report.rowsOutsideTotals, [], 'no false "left out of Utica\'s totals" conclusion');
+  assert.deepEqual(report.reversedSignSuspectRows, [22]);
+  assert.deepEqual(report.corrections, []);
+  const msg = s.issues.find((i) => i.code === 'utica_reversed_sign_suspect')!.text;
+  assert.match(msg, /^The lines exceed Utica's printed commission total by \$259\.20 and the gross premium total by \$1,728\.00\. This is exactly what line 22 \(policy TFEB0011, gross \$864\.00, commission \$129\.60\) read with the opposite signs would cause/);
+  assert.match(msg, /it would also match line 21 \(policy TFEB0011, commission \$259\.20\) being left out of Utica's totals/);
+  assert.match(msg, /Nothing has been changed or removed\.$/);
+  assert.equal(reconcileStatement(s).reconciled, false, 'cannot be approved until the row is re-read');
+});
+
+test('February 2026 with the net column read: line 22 gross and commission corrected only because all three printed totals confirm it; audit keeps both figures', () => {
+  const { statement: s, report } = applyUticaDirectBillRules(febWithNet());
+  assert.deepEqual(report.reversedSignCorrectedRows, [22]);
+  assert.deepEqual(report.netSignCorrectedRows, [], 'the net figure was read correctly and is not touched');
+  assert.deepEqual(report.rowsOutsideTotals, []);
+  const l22 = s.lines[21];
+  assert.deepEqual([l22.transactionPremiumCents, l22.paidCommissionCents, l22.premiumForCommissionCents], [-86400, -12960, -73440]);
+  assert.equal(s.lines[20].paidCommissionCents, 25920, 'line 21 untouched');
+  assert.equal(sum(s), 257626);
+  assert.equal(s.stated.commissionPayableCents, 257626, 'carrier total unchanged');
+  const rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+  assert.ok(rec.checks.every((c) => c.ok));
+  assert.deepEqual(report.corrections.map((c) => [c.lineNo, c.field, c.originalCents, c.correctedCents, c.rule]), [
+    [22, 'transactionPremiumCents', 86400, -86400, 'utica-direct-bill-v1/reversed-sign'],
+    [22, 'paidCommissionCents', 12960, -12960, 'utica-direct-bill-v1/reversed-sign'],
+  ]);
+  assert.match(report.corrections[0].arithmetic, /gross column adds up to the printed \$15,709\.00 \(as read \$17,437\.00\), the commission column to the printed \$2,576\.26 \(as read \$2,835\.46\), and the net column as read equals the printed \$13,132\.74/);
+  const audit = aiCorrectionAuditEntries('stmt1', 'run1', report.corrections);
+  assert.equal(audit.length, 2);
+  assert.deepEqual(audit.map((e) => e.changes), [{ 'line 22 gross premium': { before: 86400, after: -86400 } }, { 'line 22 commission (agency view)': { before: 12960, after: -12960 } }]);
+  assert.ok(s.lines[21].issues.some((i) => i.code === 'utica_reversed_sign_read' && i.level === 'warning'));
+});
+
+test('the reversed-sign correction is refused when any printed total is missing or does not confirm it', () => {
+  // No printed net total: cannot confirm → nothing corrected, row named with both readings.
+  const a = applyUticaDirectBillRules(febWithNet(FEB_AS_READ, null));
+  assert.deepEqual(a.report.reversedSignCorrectedRows, []);
+  assert.deepEqual(a.report.corrections, []);
+  assert.equal(a.statement.lines[21].paidCommissionCents, 12960);
+  assert.ok(errors(a.statement).includes('utica_row_premium_inconsistent'));
+  assert.equal(reconcileStatement(a.statement).reconciled, false);
+  // Printed gross total that the correction would not reach: refused.
+  const s0 = febWithNet();
+  s0.stated.transactionPremiumCents = 1570800;
+  const b = applyUticaDirectBillRules(s0);
+  assert.deepEqual(b.report.reversedSignCorrectedRows, []);
+  assert.equal(b.statement.lines[21].transactionPremiumCents, 86400);
+  assert.match(b.statement.lines[21].issues.find((i) => i.code === 'utica_row_premium_inconsistent')!.text, /may have been read with reversed signs, but Utica's printed totals do not confirm that either/);
+  assert.equal(reconcileStatement(b.statement).reconciled, false);
+});
+
+test('a row genuinely left out of Utica\'s totals is still named when no reversed-sign reading explains it', () => {
+  const s0 = asExtracted('Mar');
+  s0.stated.commissionPayableCents! += 30150; s0.stated.monthCommissionPayableCents! += 30150; // printed totals leave out line 9 (2010.00 / 301.50-)
+  s0.stated.transactionPremiumCents! -= 201000;
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(report.rowsOutsideTotals, [9]);
+  assert.deepEqual(report.reversedSignSuspectRows, []);
+  assert.equal(s.lines.length, 17, 'kept, never removed');
+  assert.equal(reconcileStatement(s).reconciled, false);
+});
+
+test('five statements together: +$10,221.36 printed by Utica', () => {
   const total = Object.keys(STATEMENTS).reduce((t, k) => t + (applyUticaDirectBillRules(asExtracted(k)).statement.stated.monthCommissionPayableCents ?? 0), 0);
   assert.equal(total, 1022136);
 });
@@ -541,4 +621,41 @@ test('no correction → no audit entry; a blocked correction is not recorded as 
   const s0 = mayRereadNov12(); s0.stated.transactionPremiumCents = 482558 + 100;
   assert.deepEqual(applyUticaDirectBillRules(s0).report.corrections, [], 'total does not confirm it');
   assert.deepEqual(aiCorrectionAuditEntries('S', 'R', []), []);
+});
+
+// Seen in dev (smoke test, real Feb 2026 layout): the AI also records Utica's printed subtotals as sections,
+// in the carrier's view ("2576.26-"). They are reversed with every other commission figure.
+test('Utica section subtotals (carrier view) are reversed with the commissions; Feb 2026 reconciles to $2,576.26', () => {
+  const s0 = asExtracted('Feb');
+  s0.sections = [
+    { label: 'SUB TOTALS FOR SUBPRODUCERS', code: null, commissionCents: -257626, premiumCents: 1570900, page: 1 },
+    { label: '***COMMERCIAL TOTAL', code: null, commissionCents: 0, premiumCents: 0, page: 2 },
+  ];
+  for (const l of s0.lines) l.section = 'SUB TOTALS FOR SUBPRODUCERS';
+  const { statement: s } = applyUticaDirectBillRules(s0);
+  assert.deepEqual(s.sections!.map((x) => x.commissionCents), [257626, 0]);
+  assert.equal(s0.sections[0].commissionCents, -257626, 'input not mutated');
+  const rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+  assert.deepEqual(rec.checks.filter((c) => c.key === 'section').map((c) => [c.statedCents, c.extractedCents, c.ok]), [[257626, 257626, true], [0, 0, true]]);
+});
+
+test('Utica section subtotal less a moved MVR/CLUE row, exactly like the Producers Total (May 2026)', () => {
+  const s0 = asExtracted('May');
+  s0.sections = [{ label: 'SUB TOTALS FOR SUBPRODUCERS', code: null, commissionCents: s0.stated.commissionPayableCents, premiumCents: null, page: 1 }];
+  for (const l of s0.lines) l.section = 'SUB TOTALS FOR SUBPRODUCERS';
+  const { statement: s } = applyUticaDirectBillRules(s0);
+  assert.equal(s.sections![0].commissionCents, s.stated.commissionPayableCents, 'subtotal less MVR/CLUE = policy commission check');
+  const rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+});
+
+test('Utica sections are NOT reversed when the sign convention is not verified (statement held as before)', () => {
+  const s0 = asExtracted('Mar');
+  s0.lines[1].paidCommissionCents = 42975;
+  s0.sections = [{ label: 'SUB TOTALS FOR SUBPRODUCERS', code: null, commissionCents: -227445, premiumCents: null, page: 1 }];
+  const { statement: s, report } = applyUticaDirectBillRules(s0);
+  assert.equal(report.applied, false);
+  assert.equal(s.sections![0].commissionCents, -227445);
+  assert.equal(reconcileStatement(s).reconciled, false);
 });

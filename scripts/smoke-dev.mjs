@@ -205,6 +205,185 @@ async function fetchOriginal(url) {
 const readOk = (p) => p && (p.status === 'needs_review' || p.status === 'discrepancy') && p.lines === 3 && p.reconciled === true;
 const describe = (p) => p.status === 'extraction_failed' ? `extraction_failed: ${p.failure?.code} — ${p.failure?.message}` : `${p.status}, ${p.lines} lines, reconciled=${p.reconciled}`;
 
+// ---------------------------------------------------------------- Carrier layouts (synthetic statements)
+// Synthetic statements, generated here, that reproduce the STRUCTURE of real layouts the AI mis-read (no real
+// names, policy numbers, agent codes or amounts). They go through the real pipeline (upload → AI read →
+// carrier rules → reconcile):
+//   multi-ok      writing companies with a "Month Total" each (two NEGATIVE) and one final "Net Commission":
+//                 must reconcile exactly to the printed final total
+//   multi-gap     the same layout with a final total higher than all company subtotals: stays a discrepancy,
+//                 with the difference reported as not in any printed section; the printed total unchanged
+//   products-gap  product sections ("Total …"; one heading without its own subtotal) and a higher "Total
+//                 Compensation": stays a discrepancy, reported the same way
+//   utica         Utica direct-bill layout: commissions printed in the carrier's view (trailing minus = owed
+//                 to the agency) and a group-printed endorsement row "400.00- 60.00 340.00-": must reconcile
+// The two discrepancies must refuse approval and posting, and nothing may reach the ledger.
+const SYN_FOOT = 'SYNTHETIC TEST DATA - NOT A REAL STATEMENT';
+async function synPdf(draw) {
+  const pdf = await PDFDocument.create();
+  const fonts = { r: await pdf.embedFont(StandardFonts.Helvetica), b: await pdf.embedFont(StandardFonts.HelveticaBold), m: await pdf.embedFont(StandardFonts.Courier), mb: await pdf.embedFont(StandardFonts.CourierBold) };
+  await draw(pdf, fonts);
+  return Buffer.from(await pdf.save());
+}
+const money2 = (v, dollar = false) => `${v < 0 ? '-' : ''}${dollar ? '$' : ''}${Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+/** Multi-company direct-bill report: one page per company, final "Net Commission" on the last page. */
+function multiCompany(month, companies, netCommission) {
+  return synPdf(async (pdf, f) => {
+    companies.forEach((co, ci) => {
+      const page = pdf.addPage([612, 792]);
+      let y = 750;
+      const t = (x, s, font = f.r, size = 9) => page.drawText(s, { x, y, size, font });
+      t(40, 'Direct Bill Commission Report', f.b, 14); y -= 18; t(40, 'Synthetic Mutual Group', f.b, 11); t(430, `Report Month: ${month}`, f.b, 10); y -= 24;
+      t(40, co.code, f.b); t(430, `Agent Number ${co.code}`, f.b); y -= 14; t(40, co.name, f.b); t(430, 'TEST AGENCY LLC', f.b); y -= 14; t(430, 'ANYTOWN, NY 00000', f.b); y -= 22;
+      t(40, '11=New Bus  12=Renewal  13=Endorsement  14=Cancel(Pro-Rate)  16=Cancel(Flat)  37=Fees'); y -= 22;
+      const cols = [40, 110, 270, 330, 360, 440, 480, 540];
+      const row = (cells, font = f.r) => { cells.forEach((c, i) => { const right = i >= 4 && i !== 5; const w = font.widthOfTextAtSize(c, 9); page.drawText(c, { x: right ? cols[i] + 50 - w : cols[i], y, size: 9, font }); }); y -= 16; };
+      row(['Policy', 'Assured', 'Eff Date', 'TR', 'Written Prem.', 'Rate', 'Comm. Amount', 'Net Amount'], f.b);
+      co.rows.forEach(([tr, prem, rate, comm], i) => row([`SYN${ci}${String(i + 1).padStart(4, '0')}`, `TEST INSURED ${ci}${i + 1}`, '10/15/26', tr, money2(prem), rate.toFixed(1), money2(comm), money2(prem - comm)]));
+      const tp = co.rows.reduce((a, r) => a + r[1], 0), tc = co.rows.reduce((a, r) => a + r[3], 0);
+      y -= 4; row(['', 'Month Total', '', '', money2(tp), '', money2(tc), money2(tp - tc)], f.b);
+      if (ci === companies.length - 1) { y -= 18; t(380, 'Net Commission', f.b, 10); t(480, money2(netCommission), f.b, 10); }
+      y = 40; t(40, SYN_FOOT);
+    });
+  });
+}
+/** Product-section statement: summary page with Total Compensation, then one detail page per product. */
+function productSections(total, products) {
+  return synPdf(async (pdf, f) => {
+    const first = pdf.addPage([612, 792]);
+    let y = 740;
+    const t1 = (x, s, font = f.r, size = 10) => { first.drawText(s, { x, y, size, font }); };
+    t1(40, 'Agent Compensation Statement', f.b, 14); y -= 20; t1(40, 'Synthetic Casualty Insurance - Statement Period 06/01/2026 - 06/30/2026'); y -= 16; t1(40, 'Agency Name: TEST AGENCY LLC   Agent Stat Number: 00-00-0000'); y -= 30;
+    for (const [l, v] of [['Base Commission:', total], ['Commission Adjustments:', 0], ['Subtotal Compensation:', total], ['Net:', total]]) { t1(40, l, f.b); t1(300, money2(v, true), f.b); y -= 16; }
+    y = 40; t1(40, SYN_FOOT);
+    let k = 0; // policy numbers unique within the statement
+    for (const p of products) {
+      const page = pdf.addPage([612, 792]);
+      y = 740;
+      const t = (x, s, font = f.r, size = 9) => page.drawText(s, { x, y, size, font });
+      t(40, 'Commission by Product', f.b, 12); y -= 22; t(40, p.name, f.b, 10); y -= 18;
+      for (const g of p.groups) {
+        t(40, g.heading, f.b); y -= 16;
+        const cols = [40, 150, 230, 300, 400, 470, 530];
+        const row = (cells, font = f.r) => { cells.forEach((c, i) => page.drawText(c, { x: cols[i], y, size: 9, font })); y -= 15; };
+        row(['Insured Name', 'Policy Number', 'Trans Eff Date', 'Activity', 'Premium', 'Comm Rate', 'Comm Amount'], f.b);
+        g.rows.forEach(([act, prem, rate, comm]) => { k++; row([`Testcase, Insured ${k}`, `S${9000000 + k}`, '06/10/2026', act, money2(prem, true), `${rate.toFixed(2)}%`, money2(comm, true)]); });
+        y -= 8;
+      }
+      const all = p.groups.flatMap((g) => g.rows);
+      t(40, `Total ${p.name}`, f.b); t(400, money2(all.reduce((a, r) => a + r[1], 0), true), f.b); t(530, money2(all.reduce((a, r) => a + r[3], 0), true), f.b); y -= 26;
+      t(250, 'Total Compensation', f.b); t(530, money2(total, true), f.b);
+      y = 40; t(40, SYN_FOOT);
+    }
+  });
+}
+/** Utica-style direct-bill statement (carrier view: trailing minus = owed to the agency). */
+function uticaStyle() {
+  const rows = [ // item, insured (blank = group row), policy, entry, rate, gross, commission as printed, net as printed
+    [1, 'TEST INSURED 01', 'SYN0001', 'REN', '15.0', '1000.00', '150.00-', '850.00'],
+    [2, '', '', 'END', '15.0', '400.00-', '60.00', '340.00-'],
+    [3, 'TEST INSURED 02', 'SYN0002', 'NEW', '20.0', '2000.00', '400.00-', '1600.00'],
+    [4, 'TEST INSURED 03', 'SYN0003', 'SUCH', '0.0', '10.00', '.00', '10.00'],
+    [5, 'TEST INSURED 04', 'SYN0004', 'END', '10.0', '500.00-', '50.00', '450.00-'],
+  ];
+  return synPdf(async (pdf, f) => {
+    const page = pdf.addPage([792, 612]);
+    let y = 570;
+    const t = (x, s, font = f.m, size = 9) => page.drawText(s, { x, y, size, font });
+    t(40, 'UTICA MUTUAL INS CO. - ERO', f.mb, 10); t(500, 'MONTH OF FEB 2026', f.mb, 10); y -= 14; t(500, 'DIRECT BILL STATEMENT', f.mb, 10); y -= 14;
+    t(40, 'PRODUCER: TEST PRODUCER AGENCY INC   T0000   ANYTOWN NY 00000'); y -= 24;
+    const cols = [40, 70, 230, 310, 370, 430, 520, 610];
+    const head = ['ITEM', 'POLICYHOLDER', 'POLICY NUMBER', 'ENTRY', 'COMM %', 'GROSS PREMIUMS', 'COMMISSIONS', 'NET PREMIUMS'];
+    head.forEach((c, i) => page.drawText(c, { x: cols[i], y, size: 8, font: f.mb })); y -= 16;
+    for (const r of rows) { r.forEach((c, i) => page.drawText(String(c), { x: cols[i], y, size: 9, font: f.m })); y -= 15; }
+    y -= 8;
+    ['', 'SUB TOTALS FOR SUBPRODUCERS', '', '', '', '2110.00', '440.00-', '1670.00'].forEach((c, i) => c && page.drawText(c, { x: cols[i], y, size: 9, font: f.mb })); y -= 22;
+    t(230, 'AMOUNT DUE PRODUCER FOR FEBRUARY', f.mb); t(520, '440.00-', f.mb);
+    y = 30; t(40, SYN_FOOT);
+  });
+}
+const CARRIER_FIXTURES = [
+  { key: 'multi-ok', label: 'Several companies, final Net Commission only', reconciled: true, finalCents: 2500, linesCents: 2500, sections: [-42500, -66000, 111000],
+    make: () => multiCompany('February 2026', [
+      { code: 'TST900', name: 'Alpha Mutual Insurance Company', rows: [['16', -200, 15, -30], ['14', -3125, 16, -500], ['12', 300, 15, 45], ['14', -400, 15, -60], ['12', 800, 15, 120]] },
+      { code: 'TST900003', name: 'Beta Casualty Company', rows: [['14', -200, 10, -20], ['14', -400, 10, -40], ['16', -5000, 12, -600], ['37', -20, 0, 0]] },
+      { code: 'TST900005', name: 'Gamma Protection Insurance Company', rows: [['12', 1000, 15, 150], ['37', 10, 0, 0], ['12', 1500, 14, 210], ['37', 10, 0, 0], ['12', 5000, 10, 500], ['37', 40, 0, 0], ['14', -500, 10, -50], ['12', 2500, 12, 300]] },
+    ], 25) },
+  { key: 'utica', label: 'Utica-style direct bill (trailing minus, group row)', reconciled: true, finalCents: 44000, linesCents: 44000, make: uticaStyle },
+  { key: 'multi-gap', label: 'Final Net Commission above all company subtotals', reconciled: false, finalCents: 390000, linesCents: 270000, sections: [80000, 40000, 150000], finding: /\$1,200\.00 more than all printed sections together/,
+    make: () => multiCompany('November 2025', [
+      { code: 'TST900', name: 'Alpha Mutual Insurance Company', rows: [['12', 1250, 16, 200], ['12', 2187.5, 16, 350], ['16', -625, 16, -100], ['13', 2500, 14, 350]] },
+      { code: 'TST900002', name: 'Delta Assurance Company', rows: [['12', 2857.14, 14, 400], ['37', 30, 0, 0]] },
+      { code: 'TST900005', name: 'Gamma Protection Insurance Company', rows: [['12', 6000, 15, 900], ['37', 10, 0, 0], ['13', -500, 12, -60], ['12', 5500, 12, 660]] },
+    ], 3900) },
+  { key: 'products-gap', label: 'Product sections, Total Compensation above the sections', reconciled: false, finalCents: 95000, linesCents: 37500, sections: [30000, 7500], finding: /\$575\.00 more than all printed sections together/,
+    make: () => productSections(950, [
+      { name: 'Product Line A', groups: [{ heading: 'Automobile', rows: [['New Bus-A', 1500, 12, 180], ['Renew', 1500, 10, 150], ['Cancel-INS', -1200, 10, -120], ['Renew', 900, 10, 90]] }] },
+      { name: 'Product Line B', groups: [{ heading: 'Watercraft', rows: [['Endors', -150, 10, -15], ['Renew', 1200, 10, 120]] }, { heading: 'Motorcycle', rows: [['Cancel-INS', -300, 10, -30]] }] },
+    ]) },
+];
+async function carrierLayoutStage(cfg) {
+  summary('\n#### Carrier layouts — synthetic statements through the real pipeline (AI read, carrier rules, reconciliation)\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  // Housekeeping: earlier runs' copies (never approved or posted) are discarded first.
+  const old = (await db.collection('statements').where('fileName', '>=', 'SMOKE-carrier-').where('fileName', '<', 'SMOKE-carrier.').get()).docs
+    .filter((d) => ['needs_review', 'discrepancy', 'extraction_failed'].includes(d.get('status')) && Number(d.get('postedCents') ?? 0) === 0 && !(d.get('postingSeq') > 0));
+  for (const d of old) await expectRejected(call('discardStatement', { statementId: d.id, reason: 'Superseded smoke-test copy (dev only)' }));
+  const run = async (fx) => {
+    const n = randomUUID().slice(0, 8);
+    const doc = await PDFDocument.load(await fx.make());
+    doc.setSubject(`SMOKE ${n}`); // unique bytes per run (a stored file is otherwise refused as a duplicate)
+    const bytes = Buffer.from(await doc.save());
+    const r = await call('registerStatementUpload', { fileName: `SMOKE-carrier-${fx.key}-${n}.pdf`, sha256: sha256hex(bytes), size: bytes.length });
+    await putFile(cfg.storageBucket, r.uploadPath, bytes);
+    const p = await call('processStatement', { statementId: r.statementId, method: 'auto' });
+    const d = (await db.collection('statements').doc(r.statementId).get()).data() ?? {};
+    return { fx, sid: r.statementId, p, d, sha: sha256hex(bytes) };
+  };
+  const results = await Promise.all(CARRIER_FIXTURES.map((fx) => run(fx).catch((e) => ({ fx, error: e instanceof Error ? e.message : String(e) }))));
+  for (const res of results) {
+    const { fx } = res;
+    if (res.error) { record(`${fx.label}: processed`, false, res.error); continue; }
+    const rec = res.d.reconciliation ?? {};
+    const checks = rec.checks ?? [];
+    const final = checks.find((c) => c.key === 'monthPayable') ?? checks.find((c) => c.key === 'commission');
+    const secs = checks.filter((c) => c.key === 'section');
+    const commission = rec.totals?.commissionCents ?? null;
+    const detail = `${describe(res.p)}; printed ${$(final?.statedCents)}, extracted ${$(commission)}; sections ${secs.map((c) => `${$(c.statedCents)}${c.ok ? '✓' : '✕'}`).join(' ') || 'none'}; statement ${res.sid}`;
+    if (fx.reconciled) {
+      record(`${fx.label}: reconciles exactly to the printed ${$(fx.finalCents)}`, res.p.status === 'needs_review' && rec.reconciled === true && final?.statedCents === fx.finalCents && commission === fx.linesCents, detail);
+    } else {
+      const findings = [...(rec.findings ?? []), ...(rec.blockingReasons ?? [])].join(' ');
+      record(`${fx.label}: keeps the unexplained ${$(fx.finalCents - fx.linesCents)} as a discrepancy (printed ${$(fx.finalCents)} unchanged)`,
+        res.p.status === 'discrepancy' && rec.reconciled === false && final?.statedCents === fx.finalCents && commission === fx.linesCents && fx.finding.test(findings), `${detail}; ${findings.slice(0, 260)}`);
+    }
+    if (fx.sections) {
+      record(`${fx.label}: every printed company subtotal matches its lines (negatives included)`,
+        secs.length === fx.sections.length && secs.every((c, i) => c.ok && c.statedCents === fx.sections[i]), secs.map((c) => `${c.section}: ${$(c.statedCents)} vs ${$(c.extractedCents)}`).join('; ') || 'no section subtotals recorded');
+    }
+    // The original is kept byte-identical (the carrier document is never altered).
+    const fo = await fetchOriginal((await call('getStatementFileUrl', { statementId: res.sid, download: true })).url);
+    record(`${fx.label}: original stored byte-identical`, fo.ok && fo.sha256 === res.sha, `SHA-256 ${fo.sha256 === res.sha ? 'matches' : 'DIFFERS'}, ${fo.size} bytes`);
+    // Automatic corrections are in the append-only audit log, one entry per corrected figure.
+    const audits = (await db.collection('auditLog').where('entityId', '==', res.sid).get()).docs.map((x) => x.data());
+    const corrected = audits.filter((a) => a.action === 'ai_value_corrected');
+    const runDoc = res.d.lastRunId ? (await db.collection('extractionRuns').doc(res.d.lastRunId).get()).data() : null;
+    record(`${fx.label}: extraction and every automatic correction recorded in the audit log`,
+      audits.some((a) => a.action === 'extract') && corrected.length === Number(runDoc?.aiValuesCorrected ?? 0),
+      `extract entries ${audits.filter((a) => a.action === 'extract').length}; corrections ${corrected.length} (run says ${runDoc?.aiValuesCorrected ?? '?'})${corrected.length ? `: ${corrected.map((a) => a.summary).join(' | ').slice(0, 300)}` : ''}`);
+    if (!fx.reconciled) {
+      const ap = await expectRejected(call('approveStatement', { statementId: res.sid, note: 'smoke: must be refused' }));
+      const po = await expectRejected(call('postStatement', { statementId: res.sid }));
+      const ledger = (await db.collection('ledger').where('statementId', '==', res.sid).count().get()).data().count;
+      const after = (await db.collection('statements').doc(res.sid).get()).data() ?? {};
+      record(`${fx.label}: approval and posting refused while the discrepancy is unresolved; nothing in the ledger`,
+        ap.rejected && po.rejected && ledger === 0 && after.status === 'discrepancy' && Number(after.postedCents ?? 0) === 0,
+        `approve: ${ap.message.slice(0, 90)}; post: ${po.message.slice(0, 70)}; ledger entries ${ledger}`);
+    }
+  }
+}
+
 // ---------------------------------------------------------------- Stage 3B matching
 const $ = (c) => (c === null || c === undefined ? '—' : `${c < 0 ? '-' : ''}$${(Math.abs(c) / 100).toFixed(2)}`);
 const stable = (o) => JSON.stringify(o, (k, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v));
@@ -1166,6 +1345,7 @@ try {
   try { await duplicateStage(cfg); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
   try { await discardReviewerFixtures(); } catch (err) { record('Reviewer fixture cleanup', false, err instanceof Error ? err.message : String(err)); }
   try { await detailedMvrStage(cfg); } catch (err) { record('DetailedStatement MVR run', false, err instanceof Error ? err.message : String(err)); }
+  try { await carrierLayoutStage(cfg); } catch (err) { record('Carrier layouts run', false, err instanceof Error ? err.message : String(err)); }
   try { await reviewerStage(cfg); } catch (err) { record('External reviewer run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));

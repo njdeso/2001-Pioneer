@@ -240,7 +240,7 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
   if (statement && isUticaDirectBill(statement)) {
     const u = applyUticaDirectBillRules(statement);
     statement = u.statement;
-    logger.info('Utica direct-bill rules', { fileName, applied: u.report.applied, evidenceRows: u.report.evidenceRows, contradicting: u.report.contradictingRows, filled: u.report.filledRows.length, outsideTotals: u.report.rowsOutsideTotals, netSignCorrected: u.report.netSignCorrectedRows });
+    logger.info('Utica direct-bill rules', { fileName, applied: u.report.applied, evidenceRows: u.report.evidenceRows, contradicting: u.report.contradictingRows, filled: u.report.filledRows.length, outsideTotals: u.report.rowsOutsideTotals, netSignCorrected: u.report.netSignCorrectedRows, reversedSignCorrected: u.report.reversedSignCorrectedRows, reversedSignSuspect: u.report.reversedSignSuspectRows });
     corrections = u.report.corrections;
   }
   return { statement, method: type === 'pdf' ? 'ai' : 'table-ai', model, usage: res.usage, attempts: res.attempts, failure: null, corrections };
@@ -379,6 +379,7 @@ export const processStatement = onCall(
         statementDate: s.statementDate,
         pageCount: s.pageCount,
         stated: s.stated,
+        sections: s.sections ?? [],
         adjustments: s.adjustments,
         statementIssues: s.issues,
         sourceAccounting: s.sourceAccounting ?? null,

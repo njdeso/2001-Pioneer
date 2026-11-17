@@ -418,8 +418,8 @@ export function StatementReviewPage() {
             <table className="min-w-full text-sm">
               <thead><tr className="text-left text-xs uppercase text-slate-500"><th className="py-1">Check</th><th className="text-right">Carrier printed</th><th className="text-right">Extracted</th><th className="text-right">Difference</th><th /></tr></thead>
               <tbody>
-                {rec.checks.map((c) => (
-                  <tr key={c.key} className="border-t border-slate-100">
+                {rec.checks.map((c, i) => (
+                  <tr key={`${c.key}-${i}`} className={`border-t border-slate-100${c.key === 'section' ? ' text-slate-600' : ''}`}>
                     <td className="py-1.5">{c.label}{!c.required && <span className="ml-1 text-xs text-slate-400">(optional)</span>}</td>
                     <td className="text-right"><Money cents={c.statedCents} /></td>
                     <td className="text-right"><Money cents={c.extractedCents} /></td>
