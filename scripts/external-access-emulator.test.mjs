@@ -93,6 +93,12 @@ before(async () => {
   w.push(['clients/C2', { name: 'Bravo Synthetic', externalId: '1002', classification: 'personal', brokerId: CANARY.brokerId, status: 'active' }]);
   w.push(['policies/P1', { clientId: 'C1', carrierId: 'CA', wholesalerId: null, policyNumber: 'SYN-001', alternateNumbers: [], line: 'commercial', policyType: 'BOP', namedInsured: '', status: 'active', premiumCents: 250000, commissionRateBps: 1500, brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps }]);
   w.push(['policies/P2', { clientId: 'C2', carrierId: 'CA', wholesalerId: 'W1', policyNumber: 'SYN-002', line: 'personal', status: 'active', premiumCents: 120000, commissionRateBps: 1000, brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps }]);
+  // A posting that was reversed (real stored splits and links): the reviewer summary must still balance.
+  w.push(['statements/S5', { status: 'needs_review', statementMonth: monthsAgo(4), payerId: 'CA', statementTotalCents: 40000, postedCents: 0, reconciliation: { reconciled: true, checks: [], totals: { commissionCents: 40000, adjustmentsCents: 0 } } }]);
+  for (const [id, x] of [['LREV-O', { amountCents: 40000, brokerCents: CANARY.brokerCents % 40000, agencyCents: 40000 - (CANARY.brokerCents % 40000), postingStatus: 'reversed', reversalId: 'LREV-R', reversalOf: null }],
+    ['LREV-R', { amountCents: -40000, brokerCents: -(CANARY.brokerCents % 40000), agencyCents: -(40000 - (CANARY.brokerCents % 40000)), postingStatus: 'posted', reversalOf: 'LREV-O' }]]) {
+    w.push([`ledger/${id}`, { level: 'policy', payerId: 'CA', carrierId: 'CA', clientId: 'C2', policyId: 'P2', classification: 'renewal', statementPeriod: monthsAgo(4), sourceType: 'statement', statementId: 'S5', postingId: 'PST-REV', transactionDate: null, brokerId: CANARY.brokerId, ...x }]);
+  }
   w.push(['ledger/L1', { level: 'policy', payerId: 'CA', carrierId: 'CA', clientId: 'C1', policyId: 'P1', classification: 'renewal', amountCents: 150000, statementPeriod: monthsAgo(2), sourceType: 'statement', statementId: 'S1', postingStatus: 'posted', reversalOf: null, postingId: 'PST1', note: CANARY.note, brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps, brokerCents: CANARY.brokerCents, agencyCents: 150000 - CANARY.brokerCents, approvedBy: 'owner1' }]);
   w.push(['policies/P3', { clientId: 'C2', carrierId: 'CA', policyNumber: 'SYN-003', line: 'personal', status: 'cancelled', premiumCents: 90000, commissionRateBps: 1000, brokerId: CANARY.brokerId, brokerShareBps: CANARY.shareBps }]);
   w.push(['statements/S1', { status: 'posted', statementMonth: monthsAgo(2), payerId: 'CA', statementTotalCents: 150000, postedCents: 150000, fileName: CANARY.file,
@@ -264,7 +270,7 @@ test('statement detail: every commission line at the FULL carrier commission (a 
     for (const key of ['issues', 'rawText', 'match', 'brokerCents', 'originalPath', 'fileName']) assert.ok(!JSON.stringify(d).includes(`"${key}"`), `${k}: no ${key}`);
   }
   const { statements } = await call('getReviewerData', { view: 'statements' }, T.pioneer);
-  assert.deepEqual(statements.map((x) => [x.id, x.hasOriginal]).sort(), [['S1', true], ['S2', false], ['S4', true]], 'discarded S3 is not listed');
+  assert.deepEqual(statements.map((x) => [x.id, x.hasOriginal]).sort(), [['S1', true], ['S2', false], ['S4', true], ['S5', false]], 'discarded S3 is not listed');
 });
 
 test('original statement file: the carrier\'s document byte for byte, for both organizations, audited, nothing changed', async () => {
@@ -330,6 +336,9 @@ test('statement CSVs: one statement and all statements, lines and adjustments, n
   const all = await call('getReviewerExport', { kind: 'statementLines' }, T.diligence);
   assertNoLeak(all.csv, 'all lines CSV');
   assert.equal(all.csv.split('\r\n').filter((r) => r.includes(',Commission line,')).length, 3, 'S1 (2 lines) + S2 (1) + S4 (none); discarded S3 excluded');
+  const { overview } = await call('getReviewerData', { view: 'overview' }, T.pioneer);
+  assert.deepEqual(overview.checks.filter((c) => !c.pass).map((c) => c.name), [], 'every summary check passes with a reversed posting in the ledger (dev regression: reversal link)');
+  assert.notEqual(overview.status, 'CHECKS_FAILED');
   const { book } = await call('getReviewerData', { view: 'book' }, T.pioneer);
   assert.deepEqual(book.policies.map((p) => [p.policyNumber, p.statusLabel]), [['SYN-001', 'Active'], ['SYN-002', 'Active'], ['SYN-003', 'Cancelled']]);
   assert.deepEqual(book.policiesByStatus, { active: 2, cancelled: 1 });
