@@ -15,8 +15,10 @@ import { displayName } from '../displayName.js';
  * Every function below BUILDS a new object field by field from an explicit allowlist. Nothing is spread or
  * copied from a stored document, so a field added to a record later (or present on it today: broker IDs,
  * broker shares and amounts, notes, contact details, audit fields, file names) can never reach a reviewer
- * unless it is added here on purpose. Broker records, advances, buyout data, statement lines and their
- * matches, the audit log and original statement files are never read for reviewers at all.
+ * unless it is added here on purpose. Broker records, advances, buyout data, line matches (beyond the matched
+ * policy number and client), internal notes and the audit log are never read for reviewers. Statement lines
+ * are read field by field (reviewerStatementDetail); original statement files are served unchanged by the
+ * reviewer file callable.
  *
  * guardReviewerPayload() is a second, independent check run on every response before it leaves the server.
  */
@@ -99,7 +101,11 @@ export interface ReviewerStatement {
   postedCents: Cents;
   reconciled: boolean;
   checks: ReviewerCheck[];
+  /** The carrier's original document is stored and can be opened (never the stored path or file name). */
+  hasOriginal: boolean;
+  fileType: 'pdf' | 'xlsx' | 'csv' | null;
 }
+const fileTypeOf = (v: unknown): 'pdf' | 'xlsx' | 'csv' | null => (v === 'pdf' || v === 'xlsx' || v === 'csv' ? v : null);
 export function reviewerStatements(statements: Doc[], carriers: Doc[]): ReviewerStatement[] {
   const payerName = new Map(carriers.map((c) => [c.id, s(c.name)]));
   const out: ReviewerStatement[] = [];
@@ -128,24 +134,39 @@ export function reviewerStatements(statements: Doc[], carriers: Doc[]): Reviewer
         differenceCents: n(c.differenceCents),
         ok: c.ok === true,
       })),
+      hasOriginal: typeof st.originalPath === 'string' && st.originalPath.trim() !== '',
+      fileType: fileTypeOf(st.fileType),
     });
   }
   return out.sort((a, b) => (b.statementMonth ?? '').localeCompare(a.statementMonth ?? '') || a.payer.localeCompare(b.payer));
 }
 
-// ---------------------------------------------------------------- active clients and policies
+// ---------------------------------------------------------------- clients and policies (every status)
+export const REVIEWER_POLICY_STATUS_LABELS: Record<string, string> = { active: 'Active', pending: 'Pending', cancelled: 'Cancelled', expired: 'Expired' };
+const policyStatusLabel = (v: string) => REVIEWER_POLICY_STATUS_LABELS[v] ?? (v ? v[0].toUpperCase() + v.slice(1) : 'Unknown');
+const POLICY_STATUS_ORDER = ['active', 'pending', 'cancelled', 'expired'];
 export interface ReviewerPolicy {
   id: string; clientId: string; client: string; policyNumber: string; alternateNumbers: string[];
   carrier: string; wholesaler: string; line: string; policyType: string; namedInsured: string;
-  effectiveDate: IsoDate | null; expirationDate: IsoDate | null; status: string;
+  effectiveDate: IsoDate | null; expirationDate: IsoDate | null;
+  /** Policy status as recorded (active, pending, cancelled, expired) and its label. */
+  status: string; statusLabel: string;
   annualPremiumCents: Cents | null; agencyCommissionRateBps: number | null;
-  /** Posted commission on this policy in the reporting window (carrier-paid commission, all categories). */
+  /** Posted commission on this policy in the reporting window (full carrier-paid commission, all categories). */
   windowCommissionCents: Cents;
 }
-export interface ReviewerClient { id: string; name: string; classification: string; status: string; activePolicies: number }
-export interface ReviewerBook { clients: ReviewerClient[]; policies: ReviewerPolicy[]; windowCommissionCents: Cents }
+export interface ReviewerClient { id: string; name: string; classification: string; status: string; activePolicies: number; policyCount: number }
+export interface ReviewerBook {
+  clients: ReviewerClient[]; policies: ReviewerPolicy[];
+  /** Policy count by status, e.g. { active: 120, cancelled: 14 }. */
+  policiesByStatus: Record<string, number>;
+  /** Posted commission in the window on all listed policies (every status). */
+  windowCommissionCents: Cents;
+  /** Posted commission in the window on active policies only. */
+  activeWindowCommissionCents: Cents;
+}
 
-/** Active policies (status 'active') and the clients that hold them: the book being sold. */
+/** Every policy, each labelled with its status (active first), and the clients that hold them. */
 export function reviewerBook(input: { clients: Doc[]; policies: Doc[]; carriers: Doc[]; entries: ReportEntry[]; start: Month | null; months: number }): ReviewerBook {
   const carrierName = new Map(input.carriers.map((c) => [c.id, s(c.name)]));
   const clientById = new Map(input.clients.map((c) => [c.id, c]));
@@ -155,35 +176,49 @@ export function reviewerBook(input: { clients: Doc[]; policies: Doc[]; carriers:
     if (!range || !e.policyId || !(e.postingStatus === 'posted' || e.postingStatus === 'reversed') || !inRange(e, range)) continue;
     perPolicy.set(e.policyId, (perPolicy.get(e.policyId) ?? 0) + e.amountCents);
   }
+  const rank = (st: string) => { const i = POLICY_STATUS_ORDER.indexOf(st); return i < 0 ? POLICY_STATUS_ORDER.length : i; };
   const policies: ReviewerPolicy[] = input.policies
-    .filter((p) => s(p.status) === 'active')
-    .map((p) => ({
-      id: p.id,
-      clientId: s(p.clientId),
-      client: displayName(s(clientById.get(s(p.clientId))?.name)),
-      policyNumber: s(p.policyNumber),
-      alternateNumbers: Array.isArray(p.alternateNumbers) ? (p.alternateNumbers as unknown[]).map(s).filter(Boolean) : [],
-      carrier: carrierName.get(s(p.carrierId)) ?? '',
-      wholesaler: p.wholesalerId ? carrierName.get(s(p.wholesalerId)) ?? '' : '',
-      line: s(p.line),
-      policyType: s(p.policyType),
-      namedInsured: displayName(s(p.namedInsured)),
-      effectiveDate: strOrNull(p.effectiveDate),
-      expirationDate: strOrNull(p.expirationDate),
-      status: 'active',
-      annualPremiumCents: n(p.premiumCents),
-      agencyCommissionRateBps: n(p.commissionRateBps),
-      windowCommissionCents: perPolicy.get(p.id) ?? 0,
-    }))
-    .sort((a, b) => a.client.localeCompare(b.client) || a.policyNumber.localeCompare(b.policyNumber));
-  const activeCount = new Map<string, number>();
-  for (const p of policies) activeCount.set(p.clientId, (activeCount.get(p.clientId) ?? 0) + 1);
-  const clients: ReviewerClient[] = [...activeCount.keys()]
+    .map((p) => {
+      const status = s(p.status) || 'unknown';
+      return {
+        id: p.id,
+        clientId: s(p.clientId),
+        client: displayName(s(clientById.get(s(p.clientId))?.name)),
+        policyNumber: s(p.policyNumber),
+        alternateNumbers: Array.isArray(p.alternateNumbers) ? (p.alternateNumbers as unknown[]).map(s).filter(Boolean) : [],
+        carrier: carrierName.get(s(p.carrierId)) ?? '',
+        wholesaler: p.wholesalerId ? carrierName.get(s(p.wholesalerId)) ?? '' : '',
+        line: s(p.line),
+        policyType: s(p.policyType),
+        namedInsured: displayName(s(p.namedInsured)),
+        effectiveDate: strOrNull(p.effectiveDate),
+        expirationDate: strOrNull(p.expirationDate),
+        status,
+        statusLabel: policyStatusLabel(status),
+        annualPremiumCents: n(p.premiumCents),
+        agencyCommissionRateBps: n(p.commissionRateBps),
+        windowCommissionCents: perPolicy.get(p.id) ?? 0,
+      };
+    })
+    .sort((a, b) => rank(a.status) - rank(b.status) || a.client.localeCompare(b.client) || a.policyNumber.localeCompare(b.policyNumber));
+  const count = new Map<string, { active: number; all: number }>();
+  const byStatus: Record<string, number> = {};
+  for (const p of policies) {
+    const c = count.get(p.clientId) ?? { active: 0, all: 0 };
+    c.all += 1; if (p.status === 'active') c.active += 1;
+    count.set(p.clientId, c);
+    byStatus[p.status] = (byStatus[p.status] ?? 0) + 1;
+  }
+  const clients: ReviewerClient[] = [...count.keys()]
     .map((id) => clientById.get(id))
     .filter((c): c is Doc => !!c)
-    .map((c) => ({ id: c.id, name: displayName(s(c.name)), classification: s(c.classification), status: s(c.status) || 'active', activePolicies: activeCount.get(c.id) ?? 0 }))
+    .map((c) => ({ id: c.id, name: displayName(s(c.name)), classification: s(c.classification), status: s(c.status) || 'active', activePolicies: count.get(c.id)?.active ?? 0, policyCount: count.get(c.id)?.all ?? 0 }))
     .sort((a, b) => a.name.localeCompare(b.name));
-  return { clients, policies, windowCommissionCents: policies.reduce((t, p) => t + p.windowCommissionCents, 0) };
+  return {
+    clients, policies, policiesByStatus: byStatus,
+    windowCommissionCents: policies.reduce((t, p) => t + p.windowCommissionCents, 0),
+    activeWindowCommissionCents: policies.filter((p) => p.status === 'active').reduce((t, p) => t + p.windowCommissionCents, 0),
+  };
 }
 
 // ---------------------------------------------------------------- posted transactions (reporting window)
@@ -216,6 +251,104 @@ export function reviewerTransactions(input: { entries: ReportEntry[]; carriers: 
       statementId: strOrNull(e.statementId),
     }))
     .sort((a, b) => a.statementPeriod.localeCompare(b.statementPeriod) || a.payer.localeCompare(b.payer) || a.id.localeCompare(b.id));
+}
+
+// ---------------------------------------------------------------- one statement in detail
+export interface ReviewerStatementLine {
+  lineNo: number;
+  page: number | null;
+  /** As printed by the carrier (as read). */
+  insured: string;
+  policyNumber: string;
+  transactionCode: string;
+  transactionType: string;
+  effectiveDate: IsoDate | null;
+  premiumForCommissionCents: Cents | null;
+  transactionPremiumCents: Cents | null;
+  rateBps: number | null;
+  /** Commission paid by the carrier on this line — the full amount, whoever services the policy. */
+  commissionCents: Cents | null;
+  termCommissionCents: Cents | null;
+  feeCents: Cents | null;
+  paymentReceivedCents: Cents | null;
+  /** The agency policy the line was matched to (number and client only), if any. */
+  matchedPolicyNumber: string | null;
+  matchedClient: string | null;
+  matched: boolean;
+}
+export interface ReviewerAdjustment { label: string; kind: string; amountCents: Cents }
+export interface ReviewerStatementDetail {
+  statement: ReviewerStatement;
+  /** Totals printed by the carrier (as read), where the statement prints them. */
+  carrierPrinted: { commissionCents: Cents | null; statementTotalCents: Cents | null; premiumForCommissionCents: Cents | null; transactionPremiumCents: Cents | null; feeCents: Cents | null; paymentReceivedCents: Cents | null };
+  lines: ReviewerStatementLine[];
+  adjustments: ReviewerAdjustment[];
+  totals: { lines: number; commissionCents: Cents; adjustmentsCents: Cents; premiumForCommissionCents: Cents; transactionPremiumCents: Cents; feeCents: Cents };
+}
+const ADJUSTMENT_KIND: Record<string, string> = { mvr: 'MVR / CLUE charge' };
+export function reviewerStatementDetail(input: { statement: Doc; lines: Doc[]; carriers: Doc[]; policies: Doc[]; clients: Doc[] }): ReviewerStatementDetail | null {
+  const [statement] = reviewerStatements([input.statement], input.carriers);
+  if (!statement) return null; // discarded uploads are not part of the record
+  const policyById = new Map(input.policies.map((p) => [p.id, p]));
+  const clientName = new Map(input.clients.map((c) => [c.id, displayName(s(c.name))]));
+  const stated = (input.statement.stated ?? {}) as Record<string, unknown>;
+  const lines: ReviewerStatementLine[] = input.lines.map((l) => {
+    const m = (l.match ?? {}) as Record<string, unknown>;
+    const pol = m.policyId ? policyById.get(s(m.policyId)) : undefined;
+    const matched = !!pol;
+    return {
+      lineNo: n(l.lineNo) ?? 0,
+      page: n(l.page),
+      insured: s(l.insuredName),
+      policyNumber: s(l.policyNumberRaw),
+      transactionCode: s(l.transactionCodeRaw),
+      transactionType: s(l.transactionType),
+      effectiveDate: strOrNull(l.effectiveDate),
+      premiumForCommissionCents: n(l.premiumForCommissionCents),
+      transactionPremiumCents: n(l.transactionPremiumCents),
+      rateBps: n(l.rateBps),
+      commissionCents: n(l.paidCommissionCents),
+      termCommissionCents: n(l.termCommissionCents),
+      feeCents: n(l.feeCents),
+      paymentReceivedCents: n(l.paymentReceivedCents),
+      matchedPolicyNumber: matched ? s(pol!.policyNumber) || null : null,
+      matchedClient: matched ? clientName.get(s(pol!.clientId)) ?? null : null,
+      matched,
+    };
+  }).sort((a, b) => a.lineNo - b.lineNo);
+  const adjustments: ReviewerAdjustment[] = (Array.isArray(input.statement.adjustments) ? (input.statement.adjustments as Record<string, unknown>[]) : [])
+    .map((a) => {
+      const kind = s((a.source as Record<string, unknown> | undefined)?.kind);
+      return { label: s(a.label) || 'Statement adjustment', kind: ADJUSTMENT_KIND[kind] ?? 'Carrier adjustment', amountCents: n(a.amountCents) ?? 0 };
+    });
+  const sum = (f: (l: ReviewerStatementLine) => Cents | null) => lines.reduce((t, l) => t + (f(l) ?? 0), 0);
+  return {
+    statement,
+    carrierPrinted: {
+      commissionCents: n(stated.commissionPayableCents),
+      statementTotalCents: n(stated.monthCommissionPayableCents) ?? statement.carrierTotalCents,
+      premiumForCommissionCents: n(stated.premiumForCommissionCents),
+      transactionPremiumCents: n(stated.transactionPremiumCents),
+      feeCents: n(stated.feeCents),
+      paymentReceivedCents: n(stated.paymentReceivedCents),
+    },
+    lines,
+    adjustments,
+    totals: {
+      lines: lines.length,
+      commissionCents: sum((l) => l.commissionCents),
+      adjustmentsCents: adjustments.reduce((t, a) => t + a.amountCents, 0),
+      premiumForCommissionCents: sum((l) => l.premiumForCommissionCents),
+      transactionPremiumCents: sum((l) => l.transactionPremiumCents),
+      feeCents: sum((l) => l.feeCents),
+    },
+  };
+}
+
+/** Neutral download name for a carrier's original document: carrier, month, type (never the uploaded file name). */
+export function reviewerOriginalName(statement: Pick<ReviewerStatement, 'payer' | 'statementMonth' | 'id' | 'fileType'>): string {
+  const base = `${statement.payer} ${statement.statementMonth ?? 'undated'} commission statement`.replace(/[^A-Za-z0-9 .&()-]+/g, ' ').replace(/\s+/g, ' ').trim() || `Commission statement ${statement.id}`;
+  return `${base}.${statement.fileType ?? 'pdf'}`;
 }
 
 // ---------------------------------------------------------------- overview (monthly, rolling 12, carrier level)
@@ -264,8 +397,12 @@ export function reviewerOverview(input: { settings: Record<string, unknown> | nu
 }
 
 // ---------------------------------------------------------------- CSV exports (built from the allowlisted views only)
-const row = (cells: (string | number | null)[]) => cells.map((c) => csvCell(c === null ? '' : c, typeof c === 'number' ? 'number' : 'text')).join(',');
-const money = (c: Cents | null) => (c === null ? null : centsToDecimal(c));
+/** A formatted amount: written as a number (no formula-guard apostrophe, so -19.14 stays -19.14). */
+type Amount = { amount: string };
+type Cell = string | number | null | Amount;
+const isAmount = (c: Cell): c is Amount => typeof c === 'object' && c !== null;
+const row = (cells: Cell[]) => cells.map((c) => (isAmount(c) ? csvCell(c.amount, 'number') : csvCell(c === null ? '' : c, typeof c === 'number' ? 'number' : 'text'))).join(',');
+const money = (c: Cents | null): Amount | null => (c === null ? null : { amount: centsToDecimal(c) });
 const banner = (title: string, agency: string, preparedAtIso: string, extra: string[] = []) =>
   [row([title]), row([`Agency: ${agency}`]), row([`Prepared: ${preparedAtIso}`]), ...extra.map((x) => row([x])), row(['Read-only due-diligence extract. Contains no broker information. Confidential — use only under the applicable confidentiality agreement.']), ''];
 
@@ -286,10 +423,11 @@ export function reviewerSummaryCsv(o: ReviewerOverview, preparedAtIso: string): 
   return out.join('\r\n') + '\r\n';
 }
 export function reviewerBookCsv(b: ReviewerBook, agency: string, preparedAtIso: string): string {
-  const out = banner('Active clients and policies', agency, preparedAtIso);
+  const counts = Object.entries(b.policiesByStatus).map(([k, v]) => `${policyStatusLabel(k)} ${v}`).join(', ');
+  const out = banner('Clients and policies (every status)', agency, preparedAtIso, [`Policies by status: ${counts || 'none'}`]);
   out.push(row(['Client', 'Classification', 'Policy number', 'Alternate numbers', 'Carrier', 'Wholesaler', 'Line', 'Policy type', 'Named insured', 'Effective', 'Expiration', 'Status', 'Annual premium', 'Agency commission rate %', 'Posted commission in period']));
   const ext = new Map(b.clients.map((c) => [c.id, c]));
-  for (const p of b.policies) out.push(row([p.client, ext.get(p.clientId)?.classification ?? '', p.policyNumber, p.alternateNumbers.join('; '), p.carrier, p.wholesaler, p.line, p.policyType, p.namedInsured, p.effectiveDate, p.expirationDate, p.status, money(p.annualPremiumCents), p.agencyCommissionRateBps === null ? null : (p.agencyCommissionRateBps / 100).toFixed(2), money(p.windowCommissionCents)]));
+  for (const p of b.policies) out.push(row([p.client, ext.get(p.clientId)?.classification ?? '', p.policyNumber, p.alternateNumbers.join('; '), p.carrier, p.wholesaler, p.line, p.policyType, p.namedInsured, p.effectiveDate, p.expirationDate, p.statusLabel, money(p.annualPremiumCents), p.agencyCommissionRateBps === null ? null : (p.agencyCommissionRateBps / 100).toFixed(2), money(p.windowCommissionCents)]));
   return out.join('\r\n') + '\r\n';
 }
 export function reviewerTransactionsCsv(t: ReviewerTransaction[], agency: string, preparedAtIso: string): string {
@@ -302,6 +440,37 @@ export function reviewerStatementsCsv(st: ReviewerStatement[], agency: string, p
   const out = banner('Commission statements and reconciliation status', agency, preparedAtIso, ['Only statements with status "Posted" are included in the commission totals.']);
   out.push(row(['Statement month', 'Paying carrier / wholesaler', 'Status', 'Carrier printed total', 'Extracted', 'Posted', 'Reconciles to carrier total']));
   for (const x of st) out.push(row([x.statementMonth, x.payer, x.statusLabel, money(x.carrierTotalCents), money(x.extractedCents), money(x.postedCents), x.reconciled ? 'yes' : 'no']));
+  return out.join('\r\n') + '\r\n';
+}
+
+const LINE_HEAD = ['Line', 'Page', 'Insured (as printed)', 'Policy number (as printed)', 'Transaction code', 'Transaction type', 'Effective', 'Premium for commission', 'Transaction premium', 'Rate %', 'Commission', 'Term commission', 'Fee', 'Payment received', 'Matched agency policy', 'Matched client'];
+const lineCells = (l: ReviewerStatementLine): Cell[] => [l.lineNo, l.page, l.insured, l.policyNumber, l.transactionCode, l.transactionType, l.effectiveDate, money(l.premiumForCommissionCents), money(l.transactionPremiumCents), l.rateBps === null ? null : (l.rateBps / 100).toFixed(2), money(l.commissionCents), money(l.termCommissionCents), money(l.feeCents), money(l.paymentReceivedCents), l.matchedPolicyNumber, l.matchedClient];
+
+/** One statement: carrier-printed totals, every commission line, adjustments and totals. */
+export function reviewerStatementDetailCsv(d: ReviewerStatementDetail, agency: string, preparedAtIso: string): string {
+  const st = d.statement;
+  const out = banner(`Commission statement detail — ${st.payer} ${st.statementMonth ?? ''}`.trim(), agency, preparedAtIso, [`Status: ${st.statusLabel}`, 'Commission amounts are the full amounts paid by the carrier.']);
+  out.push(row(['Carrier printed totals', 'Amount']));
+  const cp = d.carrierPrinted;
+  for (const [label, v] of [['Commission', cp.commissionCents], ['Statement total', cp.statementTotalCents], ['Premium for commission', cp.premiumForCommissionCents], ['Transaction premium', cp.transactionPremiumCents], ['Fees', cp.feeCents], ['Payments received', cp.paymentReceivedCents]] as const) if (v !== null) out.push(row([label, money(v)]));
+  out.push('', row(LINE_HEAD));
+  for (const l of d.lines) out.push(row(lineCells(l)));
+  out.push('', row(['Adjustment', 'Kind', 'Amount']));
+  for (const a of d.adjustments) out.push(row([a.label, a.kind, money(a.amountCents)]));
+  out.push('', row(['Totals (as extracted)', 'Amount']));
+  out.push(row(['Lines', d.totals.lines]), row(['Commission on lines', money(d.totals.commissionCents)]), row(['Adjustments', money(d.totals.adjustmentsCents)]), row(['Commission plus adjustments', money(d.totals.commissionCents + d.totals.adjustmentsCents)]), row(['Premium for commission', money(d.totals.premiumForCommissionCents)]), row(['Transaction premium', money(d.totals.transactionPremiumCents)]), row(['Fees', money(d.totals.feeCents)]));
+  return out.join('\r\n') + '\r\n';
+}
+
+/** Every statement's commission lines and adjustments in one file (one row each, statement columns first). */
+export function reviewerStatementLinesCsv(details: ReviewerStatementDetail[], agency: string, preparedAtIso: string): string {
+  const out = banner('Commission statement lines (all statements)', agency, preparedAtIso, ['Only statements with status "Posted" are included in the commission totals. Commission amounts are the full amounts paid by the carrier.']);
+  out.push(row(['Statement month', 'Paying carrier / wholesaler', 'Statement status', 'Row type', ...LINE_HEAD, 'Adjustment description', 'Adjustment kind', 'Adjustment amount']));
+  for (const d of details) {
+    const st: Cell[] = [d.statement.statementMonth, d.statement.payer, d.statement.statusLabel];
+    for (const l of d.lines) out.push(row([...st, 'Commission line', ...lineCells(l), null, null, null]));
+    for (const a of d.adjustments) out.push(row([...st, 'Adjustment', ...Array(LINE_HEAD.length).fill(null), a.label, a.kind, money(a.amountCents)]));
+  }
   return out.join('\r\n') + '\r\n';
 }
 

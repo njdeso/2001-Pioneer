@@ -425,6 +425,264 @@ async function detailedMvrStage(cfg) {
 }
 
 // ---------------------------------------------------------------- Customer & Policy Export (.xlsx)
+// ---------------------------------------------------------------- External reviewers (PR #22), dev only
+// Two dev-only reviewer test accounts (Pioneer Bank = buyer, due-diligence company = diligence) are granted
+// access through the REAL owner callable, then every reviewer view, export and original file is checked
+// against the stored records, for broker data, and for read-only enforcement. Synthetic, real-format
+// statements only: the Progressive DetailedStatement export (deterministic reader, MVR adjustment), a
+// Utica direct-bill PDF laid out like the carrier's (AI read; fictional names and policy numbers), and the
+// posted Stage 3C statement. Both accounts are revoked at the end.
+const REVIEWERS = { pioneer: { email: 'pioneer.reviewer@dev-test.invalid', role: 'buyer' }, dd: { email: 'dd.reviewer@dev-test.invalid', role: 'diligence' } };
+const RT = {}; // reviewer ID tokens
+const REVIEWER_CALLABLES = new Set(['getReviewerData', 'getReviewerExport', 'getReviewerStatementFile']);
+async function ensureReviewers() {
+  if (RT.pioneer) return;
+  const tomorrow = new Date(Date.now() + 86400_000).toISOString().slice(0, 10);
+  for (const [k, r] of Object.entries(REVIEWERS)) {
+    const inv = await call('inviteExternalUser', { email: r.email, role: r.role, expiresOn: tomorrow });
+    REVIEWERS[k].uid = inv.uid;
+    RT[k] = await adminIdToken(WEB_API_KEY, inv.uid, r.role);
+  }
+}
+/** Every confidential broker-side value in dev: broker names, codes and IDs; advance and settlement IDs. */
+async function brokerSecrets() {
+  const brokers = (await db.collection('brokers').get()).docs;
+  const advances = (await db.collection('brokerAdvances').select().get()).docs.map((d) => d.id);
+  const settlements = (await db.collection('buyoutSettlements').select().get()).docs.map((d) => d.id);
+  return {
+    names: brokers.map((d) => String(d.get('name') ?? '')).filter((x) => x.length >= 4 && x !== 'Unassigned'),
+    tokens: [...brokers.flatMap((d) => [d.id, String(d.get('code') ?? '')]), ...advances, ...settlements].filter((x) => x.length >= 3),
+  };
+}
+const FORBIDDEN_KEYS = /broker|share|split|advance|buyout|settlement|unearned|note|email|phone|contact|approv|createdBy|updatedBy|fileName|originalPath|rawText|issues|agencyCents/i;
+/** Problems found in a reviewer payload or CSV (empty = clean). */
+function leaks(payload, secrets) {
+  const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  const out = [];
+  for (const n of secrets.names) if (text.includes(n)) out.push(`broker name "${n}"`);
+  for (const t of secrets.tokens) if (new RegExp(`(^|[^A-Za-z0-9_-])${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9_-]|$)`).test(text)) out.push(`identifier ${t}`);
+  if (typeof payload !== 'string') for (const [, k] of text.matchAll(/"([^"]+)":/g)) if (FORBIDDEN_KEYS.test(k)) out.push(`key ${k}`);
+  if (typeof payload === 'string' && payload.includes("'-")) out.push('negative amount written as text');
+  return [...new Set(out)];
+}
+/** The reviewer statement detail must equal the stored statement, line by line and adjustment by adjustment. */
+async function compareDetail(sid, d) {
+  const st = (await db.collection('statements').doc(sid).get()).data();
+  const lines = (await db.collection('statements').doc(sid).collection('lines').get()).docs.map((x) => x.data()).sort((a, b) => a.lineNo - b.lineNo);
+  const diffs = [];
+  if (d.lines.length !== lines.length) diffs.push(`${d.lines.length} lines vs ${lines.length} stored`);
+  lines.forEach((l, i) => {
+    const r = d.lines[i] ?? {};
+    for (const [a, b] of [['commissionCents', 'paidCommissionCents'], ['premiumForCommissionCents', 'premiumForCommissionCents'], ['transactionPremiumCents', 'transactionPremiumCents'], ['rateBps', 'rateBps'], ['feeCents', 'feeCents'], ['policyNumber', 'policyNumberRaw'], ['lineNo', 'lineNo']]) {
+      if ((r[a] ?? null) !== (l[b] ?? (a === 'policyNumber' ? '' : null))) diffs.push(`line ${l.lineNo} ${a}: ${r[a]} vs ${l[b]}`);
+    }
+  });
+  const adj = (st.adjustments ?? []).map((a) => a.amountCents);
+  if (JSON.stringify(d.adjustments.map((a) => a.amountCents)) !== JSON.stringify(adj)) diffs.push(`adjustments ${JSON.stringify(d.adjustments.map((a) => a.amountCents))} vs ${JSON.stringify(adj)}`);
+  const sum = lines.reduce((t, l) => t + (l.paidCommissionCents ?? 0), 0);
+  if (d.totals.commissionCents !== sum) diffs.push(`commission total ${d.totals.commissionCents} vs ${sum}`);
+  return { diffs, st, lines, sum };
+}
+/** Original file through the reviewer callable, for both organizations: exact bytes vs Storage and the upload SHA-256. */
+async function checkOriginal(sid, bucket, label) {
+  const st = (await db.collection('statements').doc(sid).get()).data();
+  const [stored] = await getStorage().bucket(bucket).file(st.originalPath).download();
+  const out = [];
+  for (const k of ['pioneer', 'dd']) {
+    const r = await call('getReviewerStatementFile', { statementId: sid }, 1, RT[k]);
+    const bytes = Buffer.from(r.base64, 'base64');
+    out.push({ k, same: bytes.equals(stored), shaOk: sha256hex(bytes) === st.sha256 && r.sha256 === st.sha256, type: r.contentType, name: r.downloadName, size: bytes.length });
+  }
+  const ok = out.every((x) => x.same && x.shaOk && !/SMOKE|\.(tmp)$/i.test(x.name));
+  record(`${label}: original opens and downloads for Pioneer and due diligence, byte-identical (SHA-256 of the upload)`, ok,
+    out.map((x) => `${x.k}: ${x.same ? 'identical' : 'DIFFERENT'} bytes, SHA ${x.shaOk ? 'matches' : 'DIFFERS'}, ${x.size} B, ${x.type}, "${x.name}"`).join('; '));
+}
+/** Detail and CSV for one statement, both organizations. */
+async function checkStatement(sid, label, secrets) {
+  for (const k of ['pioneer', 'dd']) {
+    const { statement: d } = await call('getReviewerData', { view: 'statement', statementId: sid }, 1, RT[k]);
+    const { diffs, lines } = await compareDetail(sid, d);
+    const csv = (await call('getReviewerExport', { kind: 'statement', statementId: sid }, 1, RT[k])).csv;
+    const csvLines = csv.split('\r\n').filter((r) => /^\d+,/.test(r)).length;
+    const bad = [...leaks(d, secrets), ...leaks(csv, secrets)];
+    record(`${label} (${k === 'pioneer' ? 'Pioneer Bank' : 'due diligence'}): statement detail equals the stored lines and adjustments; CSV complete; no broker data`,
+      !diffs.length && csvLines === lines.length && !bad.length,
+      `${d.lines.length} lines, commission ${$(d.totals.commissionCents)}, adjustments ${d.adjustments.map((a) => `${a.kind} ${$(a.amountCents)}`).join(', ') || 'none'}, premium for commission ${$(d.totals.premiumForCommissionCents)}; CSV ${csvLines} line rows; ${diffs.concat(bad).join('; ') || 'no differences, no broker data'}`);
+  }
+}
+
+/** Called by Stage 3C while its statement is POSTED (broker-matched lines, stored synthetic PDF). */
+async function reviewerPostedChecks(sid, bucket) {
+  await ensureReviewers();
+  const secrets = await brokerSecrets();
+  const ledgerBefore = JSON.stringify((await db.collection('ledger').where('statementId', '==', sid).get()).docs.map((d) => [d.id, d.data().amountCents, d.data().brokerCents, d.data().postingStatus]).sort());
+  await checkOriginal(sid, bucket, 'Posted statement');
+  await checkStatement(sid, 'Posted statement', secrets);
+  const { statement: d } = await call('getReviewerData', { view: 'statement', statementId: sid }, 1, RT.pioneer);
+  const brokered = (await db.collection('statements').doc(sid).collection('lines').get()).docs.map((x) => x.data()).filter((l) => (l.match?.brokerCents ?? 0) !== 0);
+  const full = brokered.every((l) => d.lines.find((r) => r.lineNo === l.lineNo)?.commissionCents === l.paidCommissionCents);
+  record('Posted statement: lines on broker-serviced policies show the FULL carrier commission (broker share not shown)', brokered.length > 0 && full && d.statement.status === 'posted',
+    `${brokered.length} broker-serviced lines, e.g. line ${brokered[0]?.lineNo}: reviewer ${$(d.lines.find((r) => r.lineNo === brokered[0]?.lineNo)?.commissionCents)} = carrier ${$(brokered[0]?.paidCommissionCents)} (broker share ${$(brokered[0]?.match?.brokerCents)} internal only); status ${d.statement.status}`);
+  const ledgerAfter = JSON.stringify((await db.collection('ledger').where('statementId', '==', sid).get()).docs.map((d) => [d.id, d.data().amountCents, d.data().brokerCents, d.data().postingStatus]).sort());
+  record('Posted statement: reviewer reads changed no ledger entry', ledgerBefore === ledgerAfter, ledgerBefore === ledgerAfter ? 'unchanged' : 'CHANGED');
+}
+
+/** A Utica direct-bill statement laid out like the carrier's (synthetic: fictional insureds and policy numbers). */
+async function syntheticUticaPdf(nonce) {
+  const rows = [ // [entry, gross, rate, commission as printed (carrier view: trailing minus = owed to the agency), prints policy]
+    ['REN', '3186.00', '15.0', '477.90-', true], ['END', '1681.00', '8.0', '134.48-', true], ['CANC', '1681.00-', '8.0', '134.48', false],
+    ['NEW', '1465.00', '15.0', '219.75-', true], ['SUCH', '20.00', '0.0', '.00', true], ['REN', '2915.00', '12.0', '349.80-', false],
+    ['NEW', '1218.00', '20.0', '243.60-', true],
+  ];
+  const cents = (s) => (s.endsWith('-') ? -1 : 1) * Math.round(Number(s.replace(/[-,]/g, '')) * 100);
+  const fmt = (c) => `${(Math.abs(c) / 100).toLocaleString('en-US', { minimumFractionDigits: 2 })}${c < 0 ? '-' : ''}`.replace(/^0\./, '.');
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([792, 612]);
+  const font = await pdf.embedFont(StandardFonts.Courier);
+  const bold = await pdf.embedFont(StandardFonts.CourierBold);
+  let y = 570;
+  const text = (t, x, f = font, size = 8) => page.drawText(t, { x, y, size, font: f });
+  const nl = (h = 13) => { y -= h; };
+  text('UTICA MUTUAL INS CO. - ERO          DIRECT BILL COMMISSION STATEMENT          SYNTHETIC TEST DATA - NOT A REAL STATEMENT', 30, bold); nl();
+  text(`AGENCY: DEV TEST AGENCY   AGENCY CODE: DEV001   STATEMENT FOR JULY 2026   REF ${nonce}`, 30); nl(20);
+  const X = [30, 200, 280, 320, 380, 470, 520, 610];
+  ['POLICYHOLDER', 'POLICY NO.', 'ENTRY', 'EFF DATE', 'GROSS PREMIUMS', 'RATE', 'COMMISSIONS', 'NET PREMIUMS'].forEach((h, i) => text(h, X[i], bold)); nl();
+  let n = 0; let g = 0; let c = 0; let pol = '';
+  rows.forEach(([code, gross, rate, comm, prints], i) => {
+    if (prints) { n += 1; pol = `90${String(70000 + n).padStart(5, '0')}`; }
+    const gc = cents(gross); const cc = cents(comm); const net = gc + cc;
+    if (prints) { text(`SYNTHETIC INSURED ${String.fromCharCode(64 + n)} LLC`, X[0]); text(pol, X[1]); }
+    text(code, X[2]); text('07/01/26', X[3]); text(fmt(gc), X[4]); text(rate, X[5]); text(fmt(cc), X[6]); text(fmt(net), X[7]); nl();
+    g += gc; c += cc;
+  });
+  nl(6);
+  text('MVR/CLUE CHARGES', X[0], bold); nl();
+  text('MVRCLU', X[1]); text('EXP', X[2]); text('07/31/26', X[3]); text('.00', X[4]); text('0.0', X[5]); text('6.38', X[6]); text('6.38', X[7]); nl(18);
+  c += 638;
+  text('PRODUCERS TOTAL', X[0], bold); text(fmt(g), X[4], bold); text(fmt(c), X[6], bold); text(fmt(g + c), X[7], bold); nl();
+  text('AMOUNT DUE PRODUCER', X[0], bold); text(fmt(c), X[6], bold);
+  const bytes = Buffer.from(await pdf.save());
+  return { bytes, fileName: `SMOKE-rev-utica-${nonce}.pdf` };
+}
+
+/** Reviewer fixtures are never posted; they are discarded through the app before the DetailedStatement stage
+ *  (an identical earlier copy would be a duplicate there) and again when the reviewer stage ends. */
+async function discardReviewerFixtures() {
+  for (const d of (await db.collection('statements').where('status', 'in', ['needs_review', 'discrepancy', 'extraction_failed']).get()).docs.filter((x) => String(x.get('fileName') ?? '').startsWith('SMOKE-rev-'))) {
+    await call('discardStatement', { statementId: d.id, reason: 'Synthetic reviewer fixture cleanup (dev only)' });
+  }
+}
+
+async function reviewerStage(cfg) {
+  summary('\n#### External reviewers (Pioneer Bank, due diligence) — statement detail, original files, exports, policy statuses, read-only (dev test accounts, synthetic real-format statements)\n');
+  summary('| | Check | Result |');
+  summary('|---|---|---|');
+  await ensureReviewers();
+  record('Two dev-only reviewer test accounts granted through the owner callable', !!(REVIEWERS.pioneer.uid && REVIEWERS.dd.uid), `Pioneer Bank (buyer) ${REVIEWERS.pioneer.uid}; due diligence (diligence) ${REVIEWERS.dd.uid}; access ends tomorrow`);
+  const secrets = await brokerSecrets();
+
+  // 0. Housekeeping: earlier runs' reviewer fixtures (never posted) are discarded through the app.
+  await discardReviewerFixtures();
+  // 1. Synthetic payer for the Utica-format statement, and one policy in each status.
+  const stamp = { synthetic: true, updatedAt: FieldValue.serverTimestamp() };
+  await db.collection('carriers').doc('SYNREV-UTICA').set({ name: 'Utica National (TEST)', code: 'SYNREVUTICA', kind: 'carrier', commissionMethod: 'statement', agencyCodes: ['DEV001'], aliases: ['Utica Mutual Ins Co. - ERO'], status: 'active', defaultRateBps: null, contact: { name: '', phone: '', email: '', address: '', notes: 'Synthetic test carrier' }, ...stamp }, { merge: true });
+  await db.collection('clients').doc('SYNREV-C1').set({ name: 'Synthetic Status Review LLC', classification: 'commercial', brokerId: 'SYN3B-B50', status: 'active', ...stamp }, { merge: true });
+  const STATUSES = { active: 'Active', pending: 'Pending', expired: 'Expired', cancelled: 'Cancelled' };
+  for (const [s, i] of Object.entries(STATUSES).map(([s], i) => [s, i])) {
+    await db.collection('policies').doc(`SYNREV-P-${s}`).set({ clientId: 'SYNREV-C1', carrierId: 'SYNREV-UTICA', wholesalerId: null, policyNumber: `SYNREV-${s.toUpperCase()}`, alternateNumbers: [], line: 'commercial', policyType: 'Commercial Auto', namedInsured: '', effectiveDate: '2026-01-01', expirationDate: '2027-01-01', status: s, premiumCents: 100000 * (i + 1), commissionRateBps: 1500, brokerId: 'SYN3B-B50', brokerShareBps: 5000, ...stamp }, { merge: true });
+  }
+
+  // 2. Real-format statements through the real upload pipeline.
+  const upload = async (fileName, bytes, type) => {
+    const r = await call('registerStatementUpload', { fileName, sha256: sha256hex(bytes), size: bytes.length });
+    await putFile(cfg.storageBucket, r.uploadPath, bytes, type);
+    const p = await call('processStatement', { statementId: r.statementId, method: 'auto' });
+    return { sid: r.statementId, p };
+  };
+  const nonce = randomUUID().slice(0, 8);
+  const prog = await upload(`SMOKE-rev-progressive-${nonce}.xlsx`, mvrWorkbook(nonce), XLSX_TYPE);
+  record('Progressive DetailedStatement (real export format) read and reconciled', prog.p.status === 'needs_review' && prog.p.reconciled === true, `${describe(prog.p)}`);
+  const utica = await syntheticUticaPdf(nonce);
+  const ut = await upload(utica.fileName, utica.bytes, 'application/pdf');
+  const utDoc = (await db.collection('statements').doc(ut.sid).get()).data();
+  record('Utica direct-bill PDF (carrier layout, synthetic) read by AI and reconciled: commission $1,291.05, MVR/CLUE −$6.38 adjustment',
+    ut.p.reconciled === true && (utDoc.adjustments ?? []).some((a) => a.amountCents === -638),
+    `${describe(ut.p)}; payer ${utDoc.payerId ?? 'none'}; adjustments ${(utDoc.adjustments ?? []).map((a) => $(a.amountCents)).join(', ') || 'none'}`);
+
+  // 3. Detail, original and CSV for each statement, both organizations.
+  for (const [sid, label] of [[prog.sid, 'Progressive DetailedStatement (.xlsx)'], [ut.sid, 'Utica direct-bill PDF']]) {
+    await checkOriginal(sid, cfg.storageBucket, label);
+    await checkStatement(sid, label, secrets);
+  }
+
+  // 4. Every export, both organizations. The commission summary CSV is refused by design while a
+  //    reconciliation check fails (or no period is set): compare the reviewer overview with the app's own
+  //    summary for the same moment, and name any failing check.
+  const ov = (await call('getReviewerData', { view: 'overview' }, 1, RT.pioneer)).overview;
+  const failing = ov.checks.filter((c) => !c.pass).map((c) => c.name);
+  const summaryRefusedByDesign = ov.status === 'CHECKS_FAILED' || ov.status === 'NO_PERIOD';
+  record('Reviewer commission summary: status and checks (summary CSV is withheld while a check fails)', true,
+    `status ${ov.status} (${ov.statusLabel}); period ${ov.from}–${ov.to}; checks ${ov.checks.length - failing.length} of ${ov.checks.length} pass${failing.length ? `; FAILING: ${failing.join(' | ')}` : ''}`);
+  for (const k of ['pioneer', 'dd']) {
+    const bad = []; const sizes = [];
+    try {
+      const r = await call('getReviewerExport', { kind: 'summary' }, 1, RT[k]);
+      if (summaryRefusedByDesign) bad.push('summary: delivered although the checks fail');
+      sizes.push(`summary ${r.csv.split('\r\n').length} rows`); bad.push(...leaks(r.csv, secrets).map((x) => `summary: ${x}`));
+    } catch (e) {
+      if (summaryRefusedByDesign && /FAILED_PRECONDITION/.test(e.message)) sizes.push(`summary withheld (${ov.statusLabel})`); else bad.push(`summary: ${e.message}`);
+    }
+    for (const kind of ['statements', 'statementLines', 'book', 'transactions']) {
+      try { const r = await call('getReviewerExport', { kind }, 1, RT[k]); sizes.push(`${kind} ${r.csv.split('\r\n').length} rows`); bad.push(...leaks(r.csv, secrets).map((x) => `${kind}: ${x}`)); } catch (e) { bad.push(`${kind}: ${e.message}`); }
+    }
+    for (const view of ['overview', 'statements', 'book', 'carriers', 'transactions']) {
+      try { bad.push(...leaks(await call('getReviewerData', { view }, 1, RT[k]), secrets).map((x) => `${view}: ${x}`)); } catch (e) { bad.push(`${view}: ${e.message}`); }
+    }
+    record(`All views and CSV exports (${k === 'pioneer' ? 'Pioneer Bank' : 'due diligence'}): available, no broker names, codes, IDs, advances, settlements or internal fields`, !bad.length, bad.join('; ') || sizes.join(', '));
+  }
+  const all = (await call('getReviewerExport', { kind: 'statementLines' }, 1, RT.pioneer)).csv;
+  record('All-statement-lines CSV includes both new statements', all.includes('Progressive') || all.includes('Synthetic Mutual Insurance Co (TEST)'), `${all.split('\r\n').filter((r) => r.includes(',Commission line,')).length} line rows, ${all.split('\r\n').filter((r) => r.includes(',Adjustment,')).length} adjustment rows`);
+
+  // 5. Policy statuses.
+  const { book } = await call('getReviewerData', { view: 'book' }, 1, RT.dd);
+  const mine = book.policies.filter((p) => p.policyNumber.startsWith('SYNREV-'));
+  const statusOk = Object.entries(STATUSES).every(([s, label]) => mine.some((p) => p.policyNumber === `SYNREV-${s.toUpperCase()}` && p.status === s && p.statusLabel === label));
+  const bookCsv = (await call('getReviewerExport', { kind: 'book' }, 1, RT.dd)).csv;
+  record('Active, pending, expired and cancelled policies listed with the correct status (view and CSV)', statusOk && Object.values(STATUSES).every((l) => new RegExp(`SYNREV-[A-Z]+,.*,${l},`).test(bookCsv)),
+    `${mine.map((p) => `${p.policyNumber} → ${p.statusLabel}`).join(', ')}; totals by status ${JSON.stringify(book.policiesByStatus)}`);
+
+  // 6. Read-only at the backend: every internal callable refused; no direct database or file access; nothing changed.
+  const snap = async () => JSON.stringify(await Promise.all([prog.sid, ut.sid].map(async (id) => [(await db.collection('statements').doc(id).get()).data().status, (await db.collection('statements').doc(id).collection('lines').get()).docs.map((d) => d.data().paidCommissionCents)])));
+  const before = await snap();
+  const internal = exportedCallables().filter((n) => !REVIEWER_CALLABLES.has(n));
+  const answered = [];
+  for (const name of internal) {
+    const r = await expectRejected(call(name, { statementId: ut.sid, id: 'SYNREV-P-active', uid: REVIEWERS.pioneer.uid, email: REVIEWERS.pioneer.email, role: 'admin', expiresOn: '2099-12-31', reason: 'escalate', data: {} }, 1, RT.pioneer));
+    if (!r.rejected || !/PERMISSION_DENIED/.test(r.message)) answered.push(`${name}: ${r.message.slice(0, 60)}`);
+  }
+  record('Every internal function refuses a reviewer (create, edit, delete, import, reconcile, approve, post, broker, buyout, settings, users)', !answered.length && internal.length >= 40, answered.join('; ') || `${internal.length} of ${internal.length} refused with PERMISSION_DENIED`);
+  const fsCodes = await Promise.all(['statements', 'ledger', 'brokers', 'brokerAdvances', 'buyoutSettlements', 'policies', 'externalAccess', 'auditLog'].map(async (c) => (await fetch(`https://firestore.googleapis.com/v1/projects/${DEV}/databases/(default)/documents/${c}`, { headers: { authorization: `Bearer ${RT.dd}` } })).status));
+  const obj = `https://firebasestorage.googleapis.com/v0/b/${cfg.storageBucket}/o/${encodeURIComponent(utDoc.originalPath)}`;
+  const stGet = (await fetch(`${obj}?alt=media`, { headers: { authorization: `Firebase ${RT.pioneer}` } })).status;
+  const stPut = (await fetch(`https://firebasestorage.googleapis.com/v0/b/${cfg.storageBucket}/o?name=${encodeURIComponent(utDoc.originalPath)}`, { method: 'POST', headers: { authorization: `Firebase ${RT.pioneer}`, 'content-type': 'application/pdf' }, body: Buffer.from('%PDF-1.4 replaced') })).status;
+  const [still] = await getStorage().bucket(cfg.storageBucket).file(utDoc.originalPath).download();
+  record('Direct database and file access with a reviewer token refused; the original is unchanged', fsCodes.every((s) => s === 403) && stGet === 403 && stPut === 403 && sha256hex(still) === utDoc.sha256,
+    `Firestore ${fsCodes.join('/')}; Storage download ${stGet}, upload ${stPut}; original SHA ${sha256hex(still) === utDoc.sha256 ? 'unchanged' : 'CHANGED'}`);
+  const manip = await Promise.all([{ statementId: utDoc.originalPath }, { statementId: '../brokers' }, { statementId: ut.sid, path: 'x' }].map(async (d) => (await expectRejected(call('getReviewerStatementFile', d, 1, RT.pioneer))).message));
+  record('Manipulated file requests (paths, extra fields) rejected', manip.every((m) => /INVALID_ARGUMENT/.test(m)), manip.map((m) => m.split(' ')[1]).join(', '));
+  record('Reviewer activity changed no statement or line', (await snap()) === before, 'unchanged');
+
+  // 7. Revocation: both test accounts revoked; detail, original and exports refused immediately.
+  for (const k of ['pioneer', 'dd']) await call('revokeExternalUser', { uid: REVIEWERS[k].uid, reason: 'Dev smoke test finished' });
+  const after = await Promise.all([
+    call('getReviewerData', { view: 'statement', statementId: ut.sid }, 1, RT.pioneer), call('getReviewerStatementFile', { statementId: ut.sid }, 1, RT.dd),
+    call('getReviewerExport', { kind: 'statementLines' }, 1, RT.pioneer), call('getReviewerExport', { kind: 'statement', statementId: prog.sid }, 1, RT.dd),
+  ].map((p) => expectRejected(p)));
+  record('Revoked accounts: statement detail, original and CSVs refused at once (old tokens)', after.every((r) => r.rejected && /PERMISSION_DENIED|UNAUTHENTICATED/.test(r.message)), after.map((r) => (r.rejected ? r.message.split(' ')[1] : 'ANSWERED')).join(', '));
+  await discardReviewerFixtures();
+  summary(`\n_Reviewer fixtures discarded (Progressive ${prog.sid}, Utica ${ut.sid}); policies SYNREV-* kept for the status check; reviewer test accounts revoked._\n`);
+}
+
 async function exportStage(cfg) {
   summary('\n#### Customer & Policy Export (.xlsx) — every dev record, internal users only\n');
   summary('| | Check | Result |');
@@ -596,6 +854,9 @@ async function stage3c({ sid, ref, policiesBefore, linesBefore, bucket }) {
   record('Posted statement: original viewable and downloadable by admin and staff, byte-identical to the stored upload; statement and ledger unchanged',
     got.every((g) => g.ok && g.pdf) && sameBytes && /^inline/i.test(got[0].disp) && /^attachment/i.test(got[1].disp) && /^inline/i.test(got[2].disp) && /^attachment/i.test(got[3].disp) && unchanged,
     `${got.map((g) => `${g.ok ? 'ok' : 'FAIL'} ${g.pdf ? 'PDF' : 'not PDF'} ${g.disp.split(';')[0]}`).join(' / ')}; SHA-256 ${sameBytes ? 'matches upload' : 'DIFFERS'} (${original.sha256.slice(0, 12)}…, ${got[0].size} bytes); statement ${stmtAfterView.status} ${$(stmtAfterView.postedCents)}; ledger ${unchanged ? 'unchanged' : 'CHANGED'}`);
+
+  // 6c. External reviewers on the POSTED statement (PR #22): original, detail, full commission, no broker data.
+  try { await reviewerPostedChecks(sid, bucket); } catch (err) { record('Reviewer checks on the posted statement', false, err instanceof Error ? err.message : String(err)); }
 
   // 7. Reports: the rolling-12-month window moves by exactly the posted amounts
   const afterPost = await windowTotals();
@@ -903,7 +1164,9 @@ try {
   try { await buyoutStage(); } catch (err) { record('Broker buyout run', false, err instanceof Error ? err.message : String(err)); }
   try { await exportStage(cfg); } catch (err) { record('Customer & Policy Export run', false, err instanceof Error ? err.message : String(err)); }
   try { await duplicateStage(cfg); } catch (err) { record('Same-month statements run', false, err instanceof Error ? err.message : String(err)); }
+  try { await discardReviewerFixtures(); } catch (err) { record('Reviewer fixture cleanup', false, err instanceof Error ? err.message : String(err)); }
   try { await detailedMvrStage(cfg); } catch (err) { record('DetailedStatement MVR run', false, err instanceof Error ? err.message : String(err)); }
+  try { await reviewerStage(cfg); } catch (err) { record('External reviewer run', false, err instanceof Error ? err.message : String(err)); }
 } catch (err) {
   record('Smoke test run', false, err instanceof Error ? err.message : String(err));
 }
