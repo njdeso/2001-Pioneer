@@ -172,7 +172,7 @@ export function ClientForm({ open, onClose, client, onSaved }: {
   const [f, setF] = useState(() => ({
     name: client?.name ?? '',
     externalId: client?.externalId ?? '',
-    classification: client?.classification ?? 'commercial',
+    classification: client?.classification ?? 'personal', // new clients default to Personal
     brokerId: client?.brokerId ?? UNASSIGNED_BROKER_ID,
     status: client?.status ?? 'active',
     contactName: client?.contact?.name ?? '',
