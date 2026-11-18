@@ -9,7 +9,8 @@ import { z } from 'zod';
 import {
   type AiValueCorrection,
   DEFAULT_AI_MODEL, AI_PROMPT_VERSION, DETAILED_STATEMENT_READER, TRAVELERS_PL_PARSER, applyUticaDirectBillRules, extractWithClaude, isUticaDirectBill, readDetailedStatement, isTravelersPlStatement, normalizeName, sniffError, sniffSpreadsheet,
-  parseCsv, parseTravelersPl, reconcileStatement, tableToText,
+  parseCsv, parseTravelersPl, reconcileStatement, suggestPayerFromFileName, tableToText,
+  type PayerSuggestion,
   type ExtractedStatement, type ExtractionMethod,
   type DupLine,
 } from '@asm/shared';
@@ -174,7 +175,13 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
     if (force === 'auto' && text.hasText && isTravelersPlStatement(text.pages)) {
       return { ...none, statement: parseTravelersPl(text.pages), method: TRAVELERS_PL_PARSER };
     }
-    aiInput = { kind: 'pdf', base64: buf.toString('base64'), pageCount: text.pageCount };
+    // Scanned / rotated statements: the PDF is sent exactly as stored (never rotated or rewritten); the reader
+    // is told from the page geometry that pages are images and which ones are rotated or landscape.
+    const scan = { imageOnly: !text.hasText, layout: text.layout ?? [] };
+    if (scan.imageOnly || scan.layout.some((l) => l.rotate !== 0 || l.landscape)) {
+      logger.info('PDF layout', { fileName, imageOnly: scan.imageOnly, rotated: scan.layout.filter((l) => l.rotate !== 0).map((l) => l.page), landscape: scan.layout.filter((l) => l.landscape).map((l) => l.page) });
+    }
+    aiInput = { kind: 'pdf', base64: buf.toString('base64'), pageCount: text.pageCount, scan };
   } else {
     let rows: string[][];
     let sheets: { name: string; rows: string[][] }[] = [];
@@ -246,25 +253,34 @@ async function extract(buf: Buffer, type: FileType, fileName: string, force: 'au
   return { statement, method: type === 'pdf' ? 'ai' : 'table-ai', model, usage: res.usage, attempts: res.attempts, failure: null, corrections };
 }
 
-/** Match the statement's carrier name / agency code to a set-up carrier or wholesaler. */
-async function resolvePayer(s: ExtractedStatement): Promise<{ payerId: string | null; note: string }> {
+/**
+ * Match the statement's carrier name / agency code to a set-up carrier or wholesaler.
+ * When the statement prints no carrier name, the file name may SUGGEST a carrier (never applied: payerId stays
+ * null until someone confirms it on the review screen).
+ */
+async function resolvePayer(s: ExtractedStatement, fileName: string): Promise<{ payerId: string | null; note: string; suggestion: PayerSuggestion | null }> {
   const carriers = (await db.collection('carriers').get()).docs.map((d) => ({ id: d.id, ...(d.data() as { name: string; code: string; aliases?: string[]; agencyCodes?: string[]; status?: string }) }));
   const code = (s.agencyCode ?? '').toUpperCase();
   const byCode = code ? carriers.filter((c) => (c.agencyCodes ?? []).includes(code)) : [];
-  if (byCode.length === 1) return { payerId: byCode[0].id, note: `Matched by agency code ${code}` };
+  if (byCode.length === 1) return { payerId: byCode[0].id, note: `Matched by agency code ${code}`, suggestion: null };
   const n = normalizeName(s.carrierName);
-  const byName = carriers.filter((c) => normalizeName(c.name) === n || normalizeName(c.code) === n || (c.aliases ?? []).some((a) => normalizeName(a) === n));
-  if (byName.length === 1) return { payerId: byName[0].id, note: `Matched by name "${s.carrierName}"` };
+  const byName = n ? carriers.filter((c) => normalizeName(c.name) === n || normalizeName(c.code) === n || (c.aliases ?? []).some((a) => normalizeName(a) === n)) : [];
+  if (byName.length === 1) return { payerId: byName[0].id, note: `Matched by name "${s.carrierName}"`, suggestion: null };
   // Utica National prints its statements as "Utica Mutual Ins Co. - ERO" / "Utica Mutual Insurance Co. - ERO".
   // When no name or alias matches exactly, a Utica statement goes to the ONE set-up carrier whose name or
   // alias contains "Utica" (e.g. Utica National Insurance Group). Never creates a carrier; if there are
   // several, the carrier is chosen on the review screen as before.
   if (!byName.length && !byCode.length && isUticaDirectBill(s)) {
     const utica = carriers.filter((c) => c.status !== 'inactive' && [c.name, ...(c.aliases ?? [])].some((n) => /\butica\b/i.test(n ?? '')));
-    if (utica.length === 1) return { payerId: utica[0].id, note: `Matched Utica statement "${s.carrierName}" to ${utica[0].name}` };
+    if (utica.length === 1) return { payerId: utica[0].id, note: `Matched Utica statement "${s.carrierName}" to ${utica[0].name}`, suggestion: null };
   }
-  if (byCode.length > 1 || byName.length > 1) return { payerId: null, note: 'More than one carrier matches; choose the carrier on the review screen' };
-  return { payerId: null, note: `No carrier set up for "${s.carrierName}"${code ? ` / agency code ${code}` : ''}; add it or choose one on the review screen` };
+  if (byCode.length > 1 || byName.length > 1) return { payerId: null, note: 'More than one carrier matches; choose the carrier on the review screen', suggestion: null };
+  // No carrier name printed (e.g. a scanned statement): suggest from the file name and existing aliases only.
+  if (!n) {
+    const hint = suggestPayerFromFileName(fileName, carriers);
+    return { payerId: null, note: `${hint.note}${code ? ` (agency code ${code} is not set up on any carrier)` : ''}`, suggestion: hint.kind === 'suggested' ? hint.suggestion : null };
+  }
+  return { payerId: null, note: `No carrier set up for "${s.carrierName}"${code ? ` / agency code ${code}` : ''}; add it or choose one on the review screen`, suggestion: null };
 }
 
 async function claimForProcessing(id: string, actor: Actor): Promise<DocumentData> {
@@ -350,7 +366,7 @@ export const processStatement = onCall(
 
       // ---- Validate and reconcile (exact to the cent) ----
       const rec = reconcileStatement(s);
-      const payer = await resolvePayer(s);
+      const payer = await resolvePayer(s, String(doc.fileName));
 
       // ---- Other statements from this payer for this month (compared by content) ----
       // Several statements a month are normal (e.g. Personal and Commercial Lines). This is informational;
@@ -387,6 +403,7 @@ export const processStatement = onCall(
         reconciled: rec.reconciled,
         payerId: payer.payerId,
         payerNote: payer.note,
+        payerSuggestion: payer.suggestion,
         possibleDuplicateOf,
         title: s.title,
         contentDigest: dupCheck.current.digest,
@@ -432,7 +449,11 @@ export const setStatementPayer = onCall(async (req) => {
     if (!['needs_review', 'discrepancy'].includes(snap.get('status'))) throw new HttpsError('failed-precondition', 'The statement must be extracted first.');
     const lines = await tx.get(ref.collection('lines'));
     // Matches were scoped to the previous payer: keep them, but flag the summary for a re-run.
-    tx.update(ref, { payerId, payerNote: `Chosen by ${actor.email}`, ...(snap.get('matching') ? { 'matching.stale': true } : {}), ...meta(actor, false) });
+    const suggested = snap.get('payerSuggestion') as PayerSuggestion | null | undefined;
+    const note = suggested?.payerId === payerId
+      ? `Confirmed by ${actor.email} (suggested from the file name "${suggested.fileName}")`
+      : `Chosen by ${actor.email}`;
+    tx.update(ref, { payerId, payerNote: note, ...(snap.get('matching') ? { 'matching.stale': true } : {}), ...meta(actor, false) });
     lines.docs.forEach((d) => tx.update(d.ref, { payerId }));
     audit(tx, actor, { action: 'set_payer', entityType: 'statement', entityId: statementId, summary: `Statement carrier set to ${carrier.get('name')}`, changes: { payerId: { before: snap.get('payerId') ?? null, after: payerId } } });
     return { ok: true };

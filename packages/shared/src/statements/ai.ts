@@ -17,7 +17,7 @@ import { TRANSACTION_TYPES, type ExtractedLine, type ExtractedStatement, type Li
  *   Claude cannot approve, match or post anything.
  */
 
-export const AI_PROMPT_VERSION = 'statement-extract-v3'; // v3: section subtotals + final statement total (multi-company statements); v2: native structured output, "" for blank cells
+export const AI_PROMPT_VERSION = 'statement-extract-v4'; // v4: scanned/rotated pages, carrier name may be blank, summary (month/YTD) totals are never lines; v3: section subtotals + final statement total (multi-company statements); v2: native structured output, "" for blank cells
 export const DEFAULT_AI_MODEL = 'claude-sonnet-5-5';
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ const AMOUNT = 'Exactly as printed, including any sign, trailing minus, parenthe
 const str = (description: string) => ({ type: 'string', description }) as const;
 
 const TOTALS_PROPS = {
-  commissionPayable: str('Printed grand total of the commission column for the WHOLE statement (commission paid/payable). '
+  commissionPayable: str('Printed grand total of the commission column for the WHOLE statement (commission paid/payable) for this statement period. Never a year-to-date figure. '
     + 'If the statement is split into sections (writing companies, agent codes or product lines) and prints only a subtotal per section plus one final figure, '
     + 'leave this "" and put the final figure in monthCommissionPayable. Never copy a single section\'s subtotal here. ' + AMOUNT),
   monthCommissionPayable: str('Printed final amount for the whole statement after any adjustments, e.g. "Net Commission", "Final Net Commission", "Total Compensation", "Net", "Amount Due Producer". '
@@ -50,7 +50,7 @@ const TOTALS_PROPS = {
   paymentReceived: str('Printed total of payments received. ' + AMOUNT),
   premiumForCommission: str('Printed total premium for commission. ' + AMOUNT),
   transactionPremium: str('Printed total transaction premium. ' + AMOUNT),
-  ytdCommissionPayable: str('Printed year-to-date commission payable. ' + AMOUNT),
+  ytdCommissionPayable: str('Printed year-to-date commission (e.g. "YTD", "Year to Date" on a summary page or block). Informational only; never copy it into commissionPayable or monthCommissionPayable. ' + AMOUNT),
 } as const;
 
 const LINE_PROPS = {
@@ -78,7 +78,7 @@ const SECTION_PROPS = {
 } as const;
 
 const TOP_PROPS = {
-  carrierName: str('Insurance carrier or wholesaler issuing the statement.'),
+  carrierName: str('Insurance carrier or wholesaler issuing the statement, exactly as printed. Empty string "" if no carrier name is printed or legible. Never guess it from a logo you cannot read, the file name, policy numbers or an agency code.'),
   agencyCode: str('The agency/agent/producer code printed on the statement. Empty string if none.'),
   statementMonth: str('Month the statement covers, as YYYY-MM.'),
   statementDate: str('Statement or run date as printed. Empty string if none.'),
@@ -96,7 +96,8 @@ const TOP_PROPS = {
   },
   lines: {
     type: 'array',
-    description: 'Every transaction row in order, including rows with a payment but no commission, and negative rows. Do not merge or skip duplicates.',
+    description: 'Every transaction row in order, including rows with a payment but no commission, and negative rows. Do not merge or skip duplicates. '
+      + 'Totals, subtotals and summary figures (month, month-to-date, year-to-date, balance) are NOT transaction rows: put them in totals or sections, never here.',
     items: { type: 'object', additionalProperties: false, required: Object.keys(LINE_PROPS), properties: LINE_PROPS },
   },
 } as const;
@@ -124,6 +125,9 @@ const SYSTEM_PROMPT = [
   'Read every page. Statements split into several companies or product lines print a subtotal for each and one final total, often on the last page: record each subtotal in sections, tag each row with its section, and record the final total.',
   'A trailing minus belongs to the amount it is printed after: copy each column\'s sign from that column only.',
   'Do not output bank account numbers, routing numbers, or any account identifiers other than the agency code.',
+  'Pages may be scanned images, and a landscape statement may be scanned sideways (rotated 90 degrees) or upside down. Read each page in its upright orientation. If a figure is not legible, use "" rather than guessing.',
+  'Some statements print the transactions first and then a summary page or block of monthly and year-to-date totals. Those summary figures are totals, not transactions: record them only in totals (year-to-date in ytdCommissionPayable) and never add them to lines.',
+  'If the statement does not print the carrier\'s name, leave carrierName "" — never infer it.',
 ].join('\n');
 const FORMAT_INSTRUCTION = {
   json_schema: 'Answer with only the JSON object for this statement, matching the required schema.',
@@ -135,7 +139,9 @@ const FORMAT_INSTRUCTION = {
 
 const amt = z.string().max(40).nullable().optional();
 export const aiStatementSchema = z.object({
-  carrierName: z.string().trim().min(1).max(120),
+  // May be blank: some statements (e.g. scanned Security Mutual statements) do not print a legible carrier
+  // name. The carrier is then chosen on the review screen; nothing here invents one.
+  carrierName: z.string().trim().max(120),
   agencyCode: z.string().trim().max(40).nullable().optional(),
   statementMonth: z.string().trim().refine(isMonth, 'statementMonth must be YYYY-MM'),
   statementDate: z.string().trim().max(40).nullable().optional(),
@@ -200,10 +206,36 @@ function date(v: string | null | undefined): IsoDate | null {
   return typeof d === 'string' ? d : null;
 }
 
+const SUMMARY_LABEL = /\b(?:totals?|sub[\s-]?totals?|grand\s+total|ytd|y\s*t\s*d|year[\s-]*to[\s-]*date|mtd|month[\s-]*to[\s-]*date|monthly\s+summary|summary|balance\s+(?:forward|due)|net\s+(?:commission|due)|amount\s+due)\b/i;
+
+/**
+ * A row the AI listed as a transaction that is really a printed total (e.g. the "Month Total" or
+ * "Year to Date" figures on a statement's summary page). It has no policy number (no digit at all) and is
+ * labelled as a total. Real transactions always carry a policy number, so they are never caught here.
+ */
+export function isSummaryRow(r: { insuredName: string; policyNumber: string; transactionCode?: string | null }): boolean {
+  if (/\d/.test(normalizePolicyNumber(r.policyNumber))) return false;
+  return SUMMARY_LABEL.test([r.insuredName, r.policyNumber, r.transactionCode ?? ''].join(' '));
+}
+
 /** Convert a validated AI answer into the common statement structure. */
 export function aiToStatement(ai: AiStatement, pageCount: number | null): ExtractedStatement {
   const issues: LineIssue[] = [];
-  const lines: ExtractedLine[] = ai.lines.map((r, i) => {
+  // Printed month / year-to-date totals are never posted as transactions. They are kept out of the
+  // lines and listed as statement warnings with the figures as printed (audit trail); the statement must
+  // still reconcile to the totals the reader recorded, so nothing is balanced by this.
+  const txRows = ai.lines.filter((r) => {
+    if (!isSummaryRow(r)) return true;
+    const label = [r.insuredName, r.policyNumber, r.transactionCode ?? ''].map((x) => x.trim()).filter(Boolean).join(' / ');
+    const figures = [['paid commission', r.paidCommission], ['payment', r.paymentReceived], ['premium', r.premiumForCommission]]
+      .filter(([, v]) => v && String(v).trim()).map(([k, v]) => `${k} ${v}`).join(', ');
+    issues.push({ level: 'warning', code: 'summary_row_excluded', text: `Page ${r.page}: "${label}"${figures ? ` (${figures})` : ''} is a printed total, not a transaction, and was not added as a line.` });
+    return false;
+  });
+  if (!ai.carrierName.trim()) {
+    issues.push({ level: 'warning', code: 'no_carrier_name', text: 'The statement does not print a legible carrier name. Confirm the carrier on the review screen before matching.' });
+  }
+  const lines: ExtractedLine[] = txRows.map((r, i) => {
     const li: LineIssue[] = [];
     const paid = money(r.paidCommission, li, 'Paid commission');
     const rate = parseRate(r.commissionRate);
@@ -262,7 +294,7 @@ export function aiToStatement(ai: AiStatement, pageCount: number | null): Extrac
   if (!lines.length) issues.push({ level: 'error', code: 'no_lines', text: 'No transaction rows were found' });
   const d = date(ai.statementDate ?? null);
   return {
-    carrierName: ai.carrierName,
+    carrierName: ai.carrierName.trim(),
     agencyCode: ai.agencyCode ? ai.agencyCode.toUpperCase() : null,
     officeCode: null,
     statementMonth: ai.statementMonth,
@@ -282,8 +314,34 @@ export function aiToStatement(ai: AiStatement, pageCount: number | null): Extrac
 // API call
 
 export type AiInput =
-  | { kind: 'pdf'; base64: string; pageCount: number | null }
+  | { kind: 'pdf'; base64: string; pageCount: number | null; scan?: PdfScanInfo }
   | { kind: 'table'; text: string; fileName: string };
+
+/** What the PDF's own structure says about how it was produced (never its content). */
+export interface PdfScanInfo {
+  /** The PDF has no usable text layer: its pages are images (a scan). */
+  imageOnly: boolean;
+  layout?: { page: number; rotate: number; landscape: boolean }[];
+}
+
+/**
+ * A short note sent with a scanned or rotated PDF so the reader turns each page upright first.
+ * Built only from page geometry and the absence of a text layer. Null for an ordinary text PDF.
+ * The PDF itself is sent unchanged: the stored original is never rotated or rewritten.
+ */
+export function scanNote(scan: PdfScanInfo | undefined): string | null {
+  if (!scan) return null;
+  const pages = (pred: (l: { rotate: number; landscape: boolean }) => boolean) => (scan.layout ?? []).filter(pred).map((l) => l.page);
+  const rotated = pages((l) => l.rotate !== 0);
+  const landscape = pages((l) => l.landscape);
+  const parts: string[] = [];
+  if (scan.imageOnly) parts.push('This PDF has no text layer: every page is a scanned image. Read the figures from the images.');
+  if (rotated.length) parts.push(`Page${rotated.length > 1 ? 's' : ''} ${rotated.join(', ')} ${rotated.length > 1 ? 'are' : 'is'} stored with a rotation.`);
+  if (landscape.length) parts.push(`Page${landscape.length > 1 ? 's' : ''} ${landscape.join(', ')} ${landscape.length > 1 ? 'are' : 'is'} landscape.`);
+  if (!parts.length) return null;
+  parts.push('A page may be scanned sideways or upside down: read each page in its upright orientation. Use "" for any figure that is not legible; never guess.');
+  return parts.join(' ');
+}
 
 export interface AiCallOptions {
   apiKey: string;
@@ -333,11 +391,12 @@ export function buildAiRequest(model: string, input: AiInput, maxTokens: number,
   const ask = format === 'json_schema'
     ? 'Extract this commission statement as JSON matching the required schema.'
     : 'Extract this commission statement by calling the record_statement tool.';
+  const note = input.kind === 'pdf' ? scanNote(input.scan) : null;
   const req: Record<string, unknown> = {
     model,
     max_tokens: maxTokens,
     system: `${SYSTEM_PROMPT}\n${FORMAT_INSTRUCTION[format]}`,
-    messages: [{ role: 'user', content: [doc, { type: 'text', text: ask }] }],
+    messages: [{ role: 'user', content: [doc, { type: 'text', text: note ? `${note}\n${ask}` : ask }] }],
   };
   if (format === 'json_schema') {
     req.output_config = { format: { type: 'json_schema', schema: STATEMENT_SCHEMA } };

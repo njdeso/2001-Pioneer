@@ -4,7 +4,7 @@ import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/fir
 import { ref as storageRef, uploadBytesResumable } from 'firebase/storage';
 import {
   formatBps, formatMonth, STATEMENT_CLASSIFICATION_LABELS, TRANSACTION_TYPE_LABELS,
-  type Cents, type StatementClassification, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment, type SourceAccounting,
+  type Cents, type StatementClassification, type LineIssue, type ReconciliationResult, type StatedTotals, type StatementAdjustment, type SourceAccounting, type PayerSuggestion,
   originalFileAccess,
 } from '@asm/shared';
 import { db, storage } from '../firebase';
@@ -42,6 +42,8 @@ interface StatementDoc {
   pageCount?: number | null;
   payerId?: string | null;
   payerNote?: string;
+  /** Carrier suggested from the file name when the statement prints none. Never applied until confirmed. */
+  payerSuggestion?: PayerSuggestion | null;
   possibleDuplicateOf?: string | null;
   classification?: StatementClassification | null;
   title?: string;
@@ -198,7 +200,9 @@ export function StatementQueuePage() {
   const columns: Column<StatementDoc>[] = [
     { key: 'when', header: 'Uploaded', render: (r) => r.createdAt?.toDate?.().toLocaleDateString() ?? '', sort: (r) => r.createdAt?.toDate?.().getTime() ?? 0 },
     { key: 'file', header: 'File', render: (r) => <span className="font-medium text-ink">{r.fileName}</span>, sort: (r) => r.fileName },
-    { key: 'carrier', header: 'Carrier', render: (r) => (r.payerId ? carrierById.get(r.payerId)?.name : r.carrierName ? <span className="text-amber-800">{r.carrierName} (not set up)</span> : '—') ?? '—' },
+    { key: 'carrier', header: 'Carrier', render: (r) => (r.payerId ? carrierById.get(r.payerId)?.name
+      : r.carrierName ? <span className="text-amber-800">{r.carrierName} (not set up)</span>
+      : r.payerSuggestion ? <span className="text-amber-800">{r.payerSuggestion.payerName}? (confirm)</span> : '—') ?? '—' },
     { key: 'month', header: 'Month', render: (r) => (r.statementMonth ? formatMonth(r.statementMonth) : '—'), sort: (r) => r.statementMonth ?? '' },
     { key: 'type', header: 'Type', render: (r) => (r.classification ? STATEMENT_CLASSIFICATION_LABELS[r.classification] : '—'), sort: (r) => r.classification ?? '' },
     { key: 'method', header: 'Method', render: (r) => (r.method ? METHOD[r.method] ?? r.method : '—') },
@@ -394,8 +398,17 @@ export function StatementReviewPage() {
       {['needs_review', 'discrepancy'].includes(stmt.status) && !stmt.payerId && (
         <Card title="Which carrier is this statement from?">
           <p className="mb-3 text-sm text-slate-600">{stmt.payerNote}</p>
+          {stmt.payerSuggestion && carrierById.has(stmt.payerSuggestion.payerId) && (
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              <span>
+                Suggested: <b>{carrierById.get(stmt.payerSuggestion.payerId)?.name}</b> — the file name “{stmt.payerSuggestion.fileName}” matches its {stmt.payerSuggestion.matchedOn} “{stmt.payerSuggestion.matchedTerm}”.
+                The statement itself does not print a carrier name; open the original to check before confirming.
+              </span>
+              <Button size="sm" disabled={busy} onClick={() => void act(() => api.setStatementPayer(stmt.id, stmt.payerSuggestion!.payerId))}>Confirm {carrierById.get(stmt.payerSuggestion.payerId)?.name}</Button>
+            </div>
+          )}
           <div className="flex flex-wrap items-end gap-2">
-            <Field label="Carrier / wholesaler">
+            <Field label={stmt.payerSuggestion ? 'Or choose another carrier / wholesaler' : 'Carrier / wholesaler'}>
               <Select value={payer} onChange={(e) => setPayer(e.target.value)} placeholder="Choose…" options={carriers.map((c) => ({ value: c.id, label: c.name }))} className="w-64" />
             </Field>
             <Button disabled={busy || !payer} onClick={() => void act(() => api.setStatementPayer(stmt.id, payer))}>Save</Button>
