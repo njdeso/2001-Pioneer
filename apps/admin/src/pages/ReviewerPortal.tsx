@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   formatMonth, DILIGENCE_CATEGORY_LABELS,
   type ReviewerBook, type ReviewerCarrier, type ReviewerOverview, type ReviewerStatement, type ReviewerStatementDetail, type ReviewerTransaction, type ReviewerView, type ReviewerExport,
@@ -165,19 +165,22 @@ function OverviewView({ o }: { o: ReviewerOverview }) {
 
 function StatementsView({ rows }: { rows: ReviewerStatement[] }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
   return (
     <div className="space-y-4">
       <Section title="Commission statements">
         <p className="mb-2 text-xs text-slate-600">Only <b>Posted</b> statements are included in the commission totals. Disputed statements do not reconcile to the carrier's printed total and are shown with both figures. Open a statement for its commission lines and the carrier's original document.</p>
+        {/* A row click opens the statement (as on the internal Statements page); so does the Open button. */}
         <DataTable rows={rows} searchText={(r) => `${r.payer} ${r.statementMonth ?? ''} ${STATUS_SHORT[r.status]}`} pageSize={50}
+          onRowClick={(r) => toggle(r.id)}
           columns={[
+            { key: 'open', header: '', render: (r) => <Button size="sm" variant={openId === r.id ? 'primary' : 'secondary'} onClick={(e) => { e.stopPropagation(); toggle(r.id); }}>{openId === r.id ? 'Close' : 'Open'}</Button> },
             { key: 'month', header: 'Month', render: (r) => (r.statementMonth ? formatMonth(r.statementMonth) : '—'), sort: (r) => r.statementMonth ?? '' },
             { key: 'payer', header: 'Carrier / wholesaler', render: (r) => r.payer, sort: (r) => r.payer },
             { key: 'status', header: 'Status', render: (r) => <Badge tone={STATUS_TONE[r.status]}>{STATUS_SHORT[r.status]}</Badge>, sort: (r) => r.status },
             { key: 'carrier', header: 'Carrier printed total', align: 'right', render: (r) => <Money cents={r.carrierTotalCents} /> },
             { key: 'extracted', header: 'Extracted', align: 'right', render: (r) => <Money cents={r.extractedCents} /> },
             { key: 'posted', header: 'Posted', align: 'right', render: (r) => <Money cents={r.postedCents} /> },
-            { key: 'open', header: '', render: (r) => <Button size="sm" variant={openId === r.id ? 'primary' : 'secondary'} onClick={() => setOpenId(openId === r.id ? null : r.id)}>{openId === r.id ? 'Close' : 'Open'}</Button> },
           ]} />
       </Section>
       {openId && <StatementDetailView key={openId} statementId={openId} onClose={() => setOpenId(null)} />}
@@ -190,6 +193,9 @@ function StatementDetailView({ statementId, onClose }: { statementId: string; on
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>('load');
   const [viewer, setViewer] = useState<string | null>(null);
+  // The detail opens below the statement list: bring it into view, so opening never looks like nothing happened.
+  const panel = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { panel.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, [statementId]);
   useEffect(() => {
     api.getReviewerData<{ statement: ReviewerStatementDetail }>('statement', statementId)
       .then((r) => setD(r.statement)).catch((e) => setError(e instanceof Error ? e.message : 'Could not load')).finally(() => setBusy(null));
@@ -210,6 +216,7 @@ function StatementDetailView({ statementId, onClose }: { statementId: string; on
   };
   const st = d?.statement;
   return (
+    <div ref={panel} className="scroll-mt-4">
     <Card title={st ? `${st.payer} — ${st.statementMonth ? formatMonth(st.statementMonth) : 'undated'}` : 'Statement'}
       actions={<div className="flex flex-wrap gap-2">
         <Button size="sm" variant="secondary" disabled={!!busy || !st?.hasOriginal} title={st && !st.hasOriginal ? 'The original document was not stored for this statement.' : undefined} onClick={() => void original('view')}>{busy === 'view' ? 'Opening…' : 'View original'}</Button>
@@ -258,6 +265,7 @@ function StatementDetailView({ statementId, onClose }: { statementId: string; on
         </div>
       )}
     </Card>
+    </div>
   );
 }
 
