@@ -1,8 +1,8 @@
 # PRODUCTION deploy (pioneer-285cf) of exactly two Cloud Functions: processStatement and setStatementPayer,
 # built from ONE pinned release commit on main (EXPECTED_COMMIT below).
-#   - Now: the PR #26 merge (Security Mutual reading fix).
-#   - To release Manual Reconciliation (PR #28): after PR #28 is merged, change EXPECTED_COMMIT to its merge commit,
-#     in a reviewed pull request. The run refuses any release commit that does not contain the PR #26 fix.
+#   - Now: the PR #28 merge (Manual Reconciliation), which contains the PR #26 merge (Security Mutual reading fix).
+#   - A later release changes EXPECTED_COMMIT in a reviewed pull request. The run refuses any release commit that
+#     does not contain the PR #26 fix.
 #
 # What this workflow can and cannot do:
 #   - Starts ONLY by hand: Actions → this workflow → Run workflow, on branch main. No push, schedule,
@@ -63,7 +63,7 @@ jobs:
       PROD_PROJECT_ID: pioneer-285cf
       REGION: us-central1
       TARGET_FUNCTIONS: processStatement,setStatementPayer
-      EXPECTED_COMMIT: 359b85784570a9a04f2a744b60b2da2ce12accb0
+      EXPECTED_COMMIT: 6e98ed6d78154e49992c57b940f0186fef7dbd5b
       SMIC_FIX_COMMIT: 359b85784570a9a04f2a744b60b2da2ce12accb0
       # Identifiers, not secrets. They live in this reviewed file (changed only through a pull request), not in
       # editable variables, so a run can never be pointed at another provider, account or project.

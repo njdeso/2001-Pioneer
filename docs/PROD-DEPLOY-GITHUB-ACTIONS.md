@@ -210,8 +210,8 @@ The workflow deploys exactly one commit, pinned in the file as `EXPECTED_COMMIT`
 
 | Release | `EXPECTED_COMMIT` | What goes live |
 |---|---|---|
-| Security Mutual fix only | `359b85784570a9a04f2a744b60b2da2ce12accb0` (PR #26 merge) — current value | AI reading of scanned/rotated statements without a printed carrier name |
-| + Manual Reconciliation | the merge commit of PR #28, once merged | Both. Manual reconciliation runs inside `processStatement` (`method: "manual"`), so the same two functions are deployed, with no new function and no IAM change. |
+| Security Mutual fix only | `359b85784570a9a04f2a744b60b2da2ce12accb0` (PR #26 merge) | AI reading of scanned/rotated statements without a printed carrier name |
+| **+ Manual Reconciliation — current value** | `6e98ed6d78154e49992c57b940f0186fef7dbd5b` (PR #28 merge) | Both. Manual reconciliation runs inside `processStatement` (`method: "manual"`), so the same two functions are deployed, with no new function and no IAM change. |
 
 Whatever the release, the deployed functions stay `processStatement` and `setStatementPayer`. The website must be published from the **same** commit.
 
