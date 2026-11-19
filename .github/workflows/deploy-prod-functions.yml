@@ -1,0 +1,205 @@
+# PRODUCTION deploy (pioneer-285cf) of exactly two Cloud Functions: processStatement and setStatementPayer,
+# built from the PR #26 merge commit on main (359b85784570a9a04f2a744b60b2da2ce12accb0).
+#
+# What this workflow can and cannot do:
+#   - Starts ONLY by hand: Actions → this workflow → Run workflow, on branch main. No push, schedule,
+#     pull-request or other trigger exists, so nothing deploys automatically.
+#   - Every run waits for approval in the protected GitHub environment "production".
+#   - Deploys ONLY processStatement and setStatementPayer. Never Firestore rules, Storage rules, indexes or any
+#     other function. Never --force. The deploy account has no permission for rules, indexes or data either.
+#   - Keeps the production environment variables (OWNER_EMAILS) by copying the values production already uses,
+#     and keeps the ANTHROPIC_API_KEY secret binding. The workflow never reads the secret's value.
+#   - Reads no Firestore or Storage data and writes none.
+#   - "Dry run" (the default) runs every check and the read-only snapshot, and deploys nothing.
+#
+# Authentication: Workload Identity Federation, no service-account key. Google accepts this run's GitHub OIDC
+# token only for repository 1447842031 (njdeso/2001-Pioneer), owner 347520685, ref refs/heads/main, this
+# workflow file, environment "production" and event workflow_dispatch (provider "deploy-prod" in pool
+# "pioneer-prod-github" of pioneer-285cf). Setup: docs/PROD-DEPLOY-GITHUB-ACTIONS.md.
+#
+# This repository is public, so this run's logs and artifacts are public. Environment-variable values are
+# masked and kept only on the runner; the uploaded report lists names and "same / changed" only.
+name: Deploy to PRODUCTION — processStatement + setStatementPayer (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Type the full commit to deploy: 359b85784570a9a04f2a744b60b2da2ce12accb0 (PR #26 merge on main)'
+        required: true
+        type: string
+      confirm:
+        description: 'Type the production project ID to confirm: pioneer-285cf'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run: all checks and the read-only snapshot, NO deploy. Untick only for the real deploy.'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # lets this job request a GitHub OIDC token for Workload Identity Federation
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy-prod:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 40
+    env:
+      PROD_PROJECT_ID: pioneer-285cf
+      REGION: us-central1
+      TARGET_FUNCTIONS: processStatement,setStatementPayer
+      EXPECTED_COMMIT: 359b85784570a9a04f2a744b60b2da2ce12accb0
+      WIF_PROVIDER: ${{ vars.GCP_PROD_WIF_PROVIDER }}
+      PROD_SA: ${{ vars.GCP_PROD_SERVICE_ACCOUNT }}
+      PROD_PROJECT_NUMBER: ${{ vars.GCP_PROD_PROJECT_NUMBER }}
+      INPUT_COMMIT: ${{ inputs.commit }}
+      INPUT_CONFIRM: ${{ inputs.confirm }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: Guard — inputs, branch and configuration
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::Run this workflow from main only."; exit 1; }
+          [ "$INPUT_CONFIRM" = "$PROD_PROJECT_ID" ] || { echo "::error::Confirmation must be exactly $PROD_PROJECT_ID."; exit 1; }
+          [ "$INPUT_COMMIT" = "$EXPECTED_COMMIT" ] || { echo "::error::This workflow deploys only $EXPECTED_COMMIT (PR #26). Typed: $INPUT_COMMIT"; exit 1; }
+          [ -n "$WIF_PROVIDER" ] && [ -n "$PROD_SA" ] && [ -n "$PROD_PROJECT_NUMBER" ] || { echo "::error::Set GCP_PROD_WIF_PROVIDER, GCP_PROD_SERVICE_ACCOUNT and GCP_PROD_PROJECT_NUMBER on the production environment (docs/PROD-DEPLOY-GITHUB-ACTIONS.md)."; exit 1; }
+          case "$PROD_SA" in *@"$PROD_PROJECT_ID".iam.gserviceaccount.com) ;; *) echo "::error::GCP_PROD_SERVICE_ACCOUNT must belong to $PROD_PROJECT_ID."; exit 1 ;; esac
+          case "$WIF_PROVIDER" in "projects/$PROD_PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod") ;; *) echo "::error::GCP_PROD_WIF_PROVIDER must be projects/$PROD_PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod"; exit 1 ;; esac
+          echo "Mode: $([ "$DRY_RUN" = true ] && echo 'DRY RUN (nothing will be deployed)' || echo 'DEPLOY processStatement + setStatementPayer')"
+
+      # The workflow's own scripts come from main as it is now (ops/). The code that is deployed comes from the
+      # PR #26 merge commit (release/), checked out separately and confirmed to be on main.
+      - name: Check out the workflow scripts (main)
+        uses: actions/checkout@v4
+        with:
+          path: ops
+          persist-credentials: false
+
+      - name: Check out the release commit (PR #26 merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_COMMIT }}
+          path: release
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Guard — release commit is on main, clean, and targets pioneer-285cf
+        working-directory: release
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT" ] || { echo "::error::Checked-out commit is not $EXPECTED_COMMIT"; exit 1; }
+          git merge-base --is-ancestor "$EXPECTED_COMMIT" origin/main || { echo "::error::$EXPECTED_COMMIT is not on main"; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "::error::Release checkout is not clean"; exit 1; }
+          node -e '
+            const rc = JSON.parse(require("fs").readFileSync(".firebaserc", "utf8"));
+            if (rc.projects?.prod !== process.env.PROD_PROJECT_ID || rc.projects?.default) { console.error("::error::.firebaserc must map prod to pioneer-285cf and have no default"); process.exit(1); }'
+          git log -1 --format='Release commit: %H%n%s%n%ad' --date=iso
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: npm install (release commit)
+        working-directory: release
+        run: npm install --no-audit --no-fund
+
+      - name: Unit tests and Functions build (release commit)
+        working-directory: release
+        run: |
+          set -euo pipefail
+          npm run test
+          npm --workspace @asm/functions run build
+          node --input-type=module -e '
+            const m = await import(process.cwd() + "/functions/lib/index.js");
+            for (const n of process.env.TARGET_FUNCTIONS.split(",")) {
+              const e = m[n]?.__endpoint;
+              if (!e?.callableTrigger) { console.error(`::error::${n} is not an exported callable in the build`); process.exit(1); }
+              console.log(`${n}: callable, region ${[].concat(e.region).join(",")}, maxInstances ${e.maxInstances}`);
+            }'
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation, no key)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_PROD_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PROD_SERVICE_ACCOUNT }}
+          project_id: pioneer-285cf
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Guard — Google confirms project ID and number
+        run: |
+          set -euo pipefail
+          num=$(gcloud projects describe "$PROD_PROJECT_ID" --format='value(projectNumber)')
+          [ "$num" = "$PROD_PROJECT_NUMBER" ] || { echo "::error::Google reports project number $num for $PROD_PROJECT_ID, expected $PROD_PROJECT_NUMBER"; exit 1; }
+          echo "Google confirms $PROD_PROJECT_ID, project number $num."
+
+      - name: Snapshot BEFORE (read-only metadata of every production function)
+        run: node ops/scripts/prod-fn-snapshot.mjs snapshot "$RUNNER_TEMP/before.json"
+
+      - name: Keep the existing production environment variables (values masked)
+        run: node ops/scripts/prod-fn-snapshot.mjs dotenv "$RUNNER_TEMP/before.json" "release/functions/.env.$PROD_PROJECT_ID"
+
+      - name: Anthropic key exists in production Secret Manager (metadata only, value not read)
+        run: |
+          set -euo pipefail
+          v=$(gcloud secrets versions list ANTHROPIC_API_KEY --project "$PROD_PROJECT_ID" --filter='state=ENABLED' --format='value(name)' --limit=1)
+          [ -n "$v" ] || { echo "::error::ANTHROPIC_API_KEY has no enabled version in $PROD_PROJECT_ID (or the deployer cannot see it)."; exit 1; }
+          echo "ANTHROPIC_API_KEY has an enabled version ($(basename "$v"))."
+
+      - name: Deploy processStatement and setStatementPayer ONLY
+        id: deploy
+        if: env.DRY_RUN != 'true'
+        working-directory: release
+        run: npx firebase deploy --project prod --only "functions:processStatement,functions:setStatementPayer" --non-interactive
+
+      - name: Snapshot AFTER and compare (fails if anything else changed)
+        if: always() && (steps.deploy.outcome == 'success' || steps.deploy.outcome == 'failure' || (env.DRY_RUN == 'true' && success()))
+        run: |
+          set -euo pipefail
+          node ops/scripts/prod-fn-snapshot.mjs snapshot "$RUNNER_TEMP/after.json"
+          node ops/scripts/prod-fn-snapshot.mjs compare "$RUNNER_TEMP/before.json" "$RUNNER_TEMP/after.json" report.md $([ "$DRY_RUN" = true ] || echo --deployed) \
+            || { cat report.md >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Read-only: an unauthenticated call is refused by the function before it touches any data.
+      - name: Browser check of the two functions (CORS preflight + unauthenticated call)
+        if: always() && (steps.deploy.outcome == 'success' || steps.deploy.outcome == 'failure' || (env.DRY_RUN == 'true' && success()))
+        run: |
+          set -u
+          ORIGIN=https://2001-pioneer.netlify.app
+          fail=0
+          for f in processStatement setStatementPayer; do
+            url="https://$REGION-$PROD_PROJECT_ID.cloudfunctions.net/$f"
+            pre=$(curl -s -o /dev/null -D /tmp/h -w '%{http_code}' -X OPTIONS -H "Origin: $ORIGIN" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: authorization,content-type' "$url")
+            acao=$(grep -i '^access-control-allow-origin:' /tmp/h | tr -d '\r' | cut -d' ' -f2)
+            post=$(curl -s -o /tmp/b -w '%{http_code}' -X POST -H "Origin: $ORIGIN" -H 'Content-Type: application/json' -d '{"data":{}}' "$url")
+            msg=$(head -c 120 /tmp/b | tr '\n' ' ')
+            echo "$f: preflight $pre (allow-origin ${acao:--}), unauthenticated POST $post $msg" | tee -a "$GITHUB_STEP_SUMMARY"
+            { [ "$pre" = 204 ] || [ "$pre" = 200 ]; } && [ "$post" = 401 ] || fail=1
+          done
+          [ $fail = 0 ] || { echo "::error::A function did not answer like a working callable (expected preflight 204 and unauthenticated 401)."; exit 1; }
+
+      - name: Upload the comparison report (names and same/changed only; no values)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-deploy-report-${{ github.run_id }}
+          path: report.md
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Result
+        if: always()
+        run: |
+          if [ "$DRY_RUN" = true ]; then
+            echo "::notice::Dry run finished. Nothing was deployed to $PROD_PROJECT_ID."
+          else
+            echo "::notice::Deploy step: ${{ steps.deploy.outcome }}. See the summary for the before/after comparison. Rollback: docs/PROD-DEPLOY-GITHUB-ACTIONS.md."
+          fi

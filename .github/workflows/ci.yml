@@ -41,6 +41,9 @@ jobs:
       - name: Dev deploy configuration agrees (workflow, setup script, .firebaserc)
         run: node scripts/check-dev-wif-config.mjs
 
+      - name: Production deploy workflow stays manual, main-only, two functions, no --force, no key
+        run: node scripts/check-prod-deploy-workflow.mjs
+
       - name: Netlify preview build refuses missing or non-dev configuration
         run: node --test scripts/netlify-dev-build.test.mjs
 
