@@ -1,5 +1,8 @@
 # PRODUCTION deploy (pioneer-285cf) of exactly two Cloud Functions: processStatement and setStatementPayer,
-# built from the PR #26 merge commit on main (359b85784570a9a04f2a744b60b2da2ce12accb0).
+# built from ONE pinned release commit on main (EXPECTED_COMMIT below).
+#   - Now: the PR #26 merge (Security Mutual reading fix).
+#   - To release Manual Reconciliation (PR #28): after PR #28 is merged, change EXPECTED_COMMIT to its merge commit,
+#     in a reviewed pull request. The run refuses any release commit that does not contain the PR #26 fix.
 #
 # What this workflow can and cannot do:
 #   - Starts ONLY by hand: Actions → this workflow → Run workflow, on branch main. No push, schedule,
@@ -30,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: 'Type the full commit to deploy: 359b85784570a9a04f2a744b60b2da2ce12accb0 (PR #26 merge on main)'
+        description: 'Type the full release commit to deploy (it must equal EXPECTED_COMMIT in this file; shown in the run log if it does not)'
         required: true
         type: string
       confirm:
@@ -61,6 +64,7 @@ jobs:
       REGION: us-central1
       TARGET_FUNCTIONS: processStatement,setStatementPayer
       EXPECTED_COMMIT: 359b85784570a9a04f2a744b60b2da2ce12accb0
+      SMIC_FIX_COMMIT: 359b85784570a9a04f2a744b60b2da2ce12accb0
       # Identifiers, not secrets. They live in this reviewed file (changed only through a pull request), not in
       # editable variables, so a run can never be pointed at another provider, account or project.
       PROD_PROJECT_NUMBER: '933119340508'
@@ -75,20 +79,20 @@ jobs:
           set -euo pipefail
           [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::Run this workflow from main only."; exit 1; }
           [ "$INPUT_CONFIRM" = "$PROD_PROJECT_ID" ] || { echo "::error::Confirmation must be exactly $PROD_PROJECT_ID."; exit 1; }
-          [ "$INPUT_COMMIT" = "$EXPECTED_COMMIT" ] || { echo "::error::This workflow deploys only $EXPECTED_COMMIT (PR #26). Typed: $INPUT_COMMIT"; exit 1; }
+          [ "$INPUT_COMMIT" = "$EXPECTED_COMMIT" ] || { echo "::error::This workflow deploys only the pinned release commit $EXPECTED_COMMIT. Typed: $INPUT_COMMIT"; exit 1; }
           case "$PROD_SA" in *@"$PROD_PROJECT_ID".iam.gserviceaccount.com) ;; *) echo "::error::PROD_SA must belong to $PROD_PROJECT_ID."; exit 1 ;; esac
           case "$WIF_PROVIDER" in "projects/$PROD_PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod") ;; *) echo "::error::WIF_PROVIDER must be projects/$PROD_PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod"; exit 1 ;; esac
           echo "Mode: $([ "$DRY_RUN" = true ] && echo 'DRY RUN (nothing will be deployed)' || echo 'DEPLOY processStatement + setStatementPayer')"
 
       # The workflow's own scripts come from main as it is now (ops/). The code that is deployed comes from the
-      # PR #26 merge commit (release/), checked out separately and confirmed to be on main.
+      # pinned release commit (release/), checked out separately and confirmed to be on main.
       - name: Check out the workflow scripts (main)
         uses: actions/checkout@v4
         with:
           path: ops
           persist-credentials: false
 
-      - name: Check out the release commit (PR #26 merge)
+      - name: Check out the pinned release commit
         uses: actions/checkout@v4
         with:
           ref: ${{ env.EXPECTED_COMMIT }}
@@ -102,6 +106,8 @@ jobs:
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT" ] || { echo "::error::Checked-out commit is not $EXPECTED_COMMIT"; exit 1; }
           git merge-base --is-ancestor "$EXPECTED_COMMIT" origin/main || { echo "::error::$EXPECTED_COMMIT is not on main"; exit 1; }
+          # Every release must keep the Security Mutual reading fix (PR #26 merge).
+          git merge-base --is-ancestor "$SMIC_FIX_COMMIT" "$EXPECTED_COMMIT" || { echo "::error::The release commit does not contain the PR #26 Security Mutual fix ($SMIC_FIX_COMMIT)"; exit 1; }
           [ -z "$(git status --porcelain)" ] || { echo "::error::Release checkout is not clean"; exit 1; }
           node -e '
             const rc = JSON.parse(require("fs").readFileSync(".firebaserc", "utf8"));

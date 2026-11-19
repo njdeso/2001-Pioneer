@@ -1,4 +1,4 @@
-# Production deploy from GitHub Actions: processStatement + setStatementPayer (PR #26)
+# Production deploy from GitHub Actions: processStatement + setStatementPayer
 
 Workflow: `.github/workflows/deploy-prod-functions.yml`. Everything below is done in a web browser: the Google
 Cloud console, GitHub and Netlify. You don't need Cloud Shell or a local install.
@@ -10,7 +10,7 @@ Cloud console, GitHub and Netlify. You don't need Cloud Shell or a local install
 | Trigger | **Manual only**: Actions → Run workflow, on `main`. It has no push, schedule, pull-request, workflow-call or other trigger. CI (`scripts/check-prod-deploy-workflow.mjs`) fails if one is added, or if any other workflow uses the `production` environment, the production deploy account or `pioneer-285cf`. |
 | Approval | Every run waits for your approval in the protected GitHub environment `production`. |
 | Dry run | Default **on**: every check and the read-only snapshot, no deploy |
-| Code | Only commit `359b85784570a9a04f2a744b60b2da2ce12accb0` (the PR #26 merge). You type it to confirm, and the run checks that it is on `main`. |
+| Code | Only the pinned release commit (`EXPECTED_COMMIT` in the workflow). You type it to confirm. The run checks that it is on `main` and contains the PR #26 Security Mutual fix. See *Release commit* below. |
 | Deploys | `firebase deploy --project prod --only "functions:processStatement,functions:setStatementPayer" --non-interactive`, never `--force` |
 | Never deploys | Firestore rules, Storage rules, indexes, or any other function |
 | Env variables | Before deploying, it reads the variables production already uses (`OWNER_EMAILS`) and writes them into the deploy's `.env` file, so they stay exactly as they are. The values are masked in the logs. |
@@ -173,7 +173,7 @@ Nothing needs copying: the workflow file already contains the fixed identifiers.
 
 **D2. Dry run.** It also runs read-only Firebase CLI checks (`functions:list`, and secret metadata), so a missing permission shows up here, before any real deploy. Actions → **Deploy to PRODUCTION — processStatement + setStatementPayer (manual)** → **Run workflow**
 - Branch: `main`
-- commit: `359b85784570a9a04f2a744b60b2da2ce12accb0`
+- commit: the `EXPECTED_COMMIT` value in the workflow file (see *Release commit*)
 - confirm: `pioneer-285cf`
 - Dry run: **ticked**
 - **Run** → open the run → **Review deployments** → **Approve and deploy**
@@ -190,7 +190,7 @@ When it finishes, the Summary should show:
 
 **D4. Website.** Netlify → 2001-pioneer → Deploys:
 - note the deploy that is **Published** now (your rollback point)
-- open the `359b857` deploy → **Publish deploy**
+- open the deploy built from the release commit → **Publish deploy**
 
 **D5. Verify in the app.**
 - Open `SMIC Nov 26.pdf` → **Retry with AI**. Expect *Suggested: Security Mutual Ins Co* and no lines for the page-2 totals.
@@ -203,6 +203,17 @@ Also disable it if a run fails, so it is never left enabled while you investigat
 If the run stops with a message about an Artifact Registry **cleanup policy**, the functions are already deployed; the comparison step shows this. Set the policy from the console later. Never add `--force`.
 
 ---
+
+## Release commit
+
+The workflow deploys exactly one commit, pinned in the file as `EXPECTED_COMMIT`. Changing it is a one-line, reviewed pull request (CI-checked).
+
+| Release | `EXPECTED_COMMIT` | What goes live |
+|---|---|---|
+| Security Mutual fix only | `359b85784570a9a04f2a744b60b2da2ce12accb0` (PR #26 merge) — current value | AI reading of scanned/rotated statements without a printed carrier name |
+| + Manual Reconciliation | the merge commit of PR #28, once merged | Both. Manual reconciliation runs inside `processStatement` (`method: "manual"`), so the same two functions are deployed, with no new function and no IAM change. |
+
+Whatever the release, the deployed functions stay `processStatement` and `setStatementPayer`. The website must be published from the **same** commit.
 
 ## Rollback (browser)
 

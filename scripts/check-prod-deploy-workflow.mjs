@@ -19,6 +19,7 @@ need(/dry_run:[\s\S]*?default: true/.test(code), 'dry_run must default to true')
 need(/^\s+PROD_PROJECT_ID: pioneer-285cf$/m.test(code) && /project_id: pioneer-285cf/.test(code), 'must target pioneer-285cf');
 need(/^\s+TARGET_FUNCTIONS: processStatement,setStatementPayer$/m.test(code), 'TARGET_FUNCTIONS must be processStatement,setStatementPayer');
 need(/^\s+EXPECTED_COMMIT: [0-9a-f]{40}$/m.test(code), 'EXPECTED_COMMIT must be a full commit hash');
+need(/^\s+SMIC_FIX_COMMIT: 359b85784570a9a04f2a744b60b2da2ce12accb0$/m.test(code) && /merge-base --is-ancestor "\$SMIC_FIX_COMMIT" "\$EXPECTED_COMMIT"/.test(code), 'every release must be checked to contain the PR #26 Security Mutual fix');
 
 const deploys = [...code.matchAll(/firebase deploy[^\n]*/g)].map((m) => m[0]);
 need(deploys.length === 1, `exactly one firebase deploy command (found ${deploys.length})`);
