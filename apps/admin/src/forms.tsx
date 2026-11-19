@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import {
   brokerInput, carrierInput, clientInput, fieldErrors, formatBps, formatCents, parseMoneyToCents, parsePercentToBps, policyInput,
-  UNASSIGNED_BROKER_ID, type Broker, type Carrier, type Client, type Policy, displayName } from '@asm/shared';
+  UNASSIGNED_BROKER_ID, classifyLineOfBusiness, type Broker, type Carrier, type Client, type Policy, displayName } from '@asm/shared';
 import type { ZodType, z } from 'zod';
 import { api, ApiError } from './api';
 import { useData } from './data';
@@ -172,7 +172,8 @@ export function ClientForm({ open, onClose, client, onSaved }: {
   const [f, setF] = useState(() => ({
     name: client?.name ?? '',
     externalId: client?.externalId ?? '',
-    classification: client?.classification ?? 'commercial',
+    // No preselected value for a new client: Personal or Commercial must be chosen (never defaults to Commercial).
+    classification: (client?.classification ?? '') as string,
     brokerId: client?.brokerId ?? UNASSIGNED_BROKER_ID,
     status: client?.status ?? 'active',
     contactName: client?.contact?.name ?? '',
@@ -206,7 +207,8 @@ export function ClientForm({ open, onClose, client, onSaved }: {
             <TextInput value={f.externalId} onChange={set('externalId')} />
           </Field>
           <Field label="Classification" error={s.errors.classification}>
-            <Select value={f.classification} onChange={set('classification')} options={[{ value: 'commercial', label: 'Commercial' }, { value: 'personal', label: 'Personal' }]} />
+            <Select value={f.classification} onChange={set('classification')} placeholder={client ? undefined : 'Choose…'}
+              options={[{ value: 'personal', label: 'Personal' }, { value: 'commercial', label: 'Commercial' }]} />
           </Field>
           <Field label="Assigned broker" error={s.errors.brokerId}>
             <Select value={f.brokerId} onChange={set('brokerId')} options={brokers.map((b) => ({ value: b.id, label: b.name }))} />
@@ -248,6 +250,7 @@ export function PolicyForm({ open, onClose, client, policy }: {
     policyNumber: policy?.policyNumber ?? '',
     alternateNumbers: (policy?.alternateNumbers ?? []).join(', '),
     policyType: policy?.policyType ?? '',
+    // A new policy takes its line from the policy type when it says (e.g. Homeowners → Personal), else the client's.
     line: policy?.line ?? client.classification,
     namedInsured: policy?.namedInsured ?? client.name,
     brokerId: policy?.brokerId ?? client.brokerId ?? UNASSIGNED_BROKER_ID,
@@ -260,6 +263,15 @@ export function PolicyForm({ open, onClose, client, policy }: {
   }));
   const s = useSubmit();
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value });
+  const [lineTouched, setLineTouched] = useState(!!policy);
+  const lobLine = classifyLineOfBusiness(f.policyType).line;
+  const setPolicyType = (e: { target: { value: string } }) => {
+    const next = classifyLineOfBusiness(e.target.value).line;
+    setF({ ...f, policyType: e.target.value, ...(!lineTouched && next ? { line: next } : {}) });
+  };
+  const lineHint = lobLine && lobLine !== f.line
+    ? `Policy type "${f.policyType.trim()}" is usually ${lobLine === 'personal' ? 'Personal' : 'Commercial'} — check this`
+    : undefined;
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -292,9 +304,9 @@ export function PolicyForm({ open, onClose, client, policy }: {
           <Field label="Placed through wholesaler" error={s.errors.wholesalerId} hint="Leave blank if placed direct">
             <Select value={f.wholesalerId} onChange={set('wholesalerId')} placeholder="Direct with carrier" options={wholesalers.map((c) => ({ value: c.id, label: c.name }))} />
           </Field>
-          <Field label="Policy type" error={s.errors.policyType} hint="e.g. Commercial Auto, BOP, Homeowners"><TextInput value={f.policyType} onChange={set('policyType')} /></Field>
-          <Field label="Line" error={s.errors.line}>
-            <Select value={f.line} onChange={set('line')} options={[{ value: 'commercial', label: 'Commercial' }, { value: 'personal', label: 'Personal' }]} />
+          <Field label="Policy type" error={s.errors.policyType} hint="e.g. Commercial Auto, BOP, Homeowners"><TextInput value={f.policyType} onChange={setPolicyType} /></Field>
+          <Field label="Line" error={s.errors.line} hint={lineHint}>
+            <Select value={f.line} onChange={(e) => { setLineTouched(true); set('line')(e); }} options={[{ value: 'personal', label: 'Personal' }, { value: 'commercial', label: 'Commercial' }]} />
           </Field>
           <Field label="Assigned broker" error={s.errors.brokerId}>
             <Select value={f.brokerId} onChange={set('brokerId')} options={brokers.map((b) => ({ value: b.id, label: b.name }))} />

@@ -192,7 +192,9 @@ test('row errors: unknown client name, unmapped carrier, missing policy number',
     rec({ clientName: 'Synthetic Row', carrierId: 'K-A' }),
     rec({ clientName: 'Client Only Synthetic' }),
   ], existing, opts);
-  assert.deepEqual(plan.rows.map((r) => r.status), ['error', 'error', 'error', 'ok']);
+  // The client-only row says nothing about Personal/Commercial, so the chosen default is used — with a warning.
+  assert.deepEqual(plan.rows.map((r) => r.status), ['error', 'error', 'error', 'warning']);
+  assert.match(plan.rows[3].messages.map((m) => m.text).join(' '), /used your default, Commercial/);
   assert.equal(plan.rows[3].clientAction, 'create');
   assert.equal(plan.rows[3].policyAction, 'none');
 });
