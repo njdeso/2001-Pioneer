@@ -187,3 +187,29 @@ test('posted or approved statements, posting history and missing originals block
   assert.match(String(manualEditBlocker({ ...ok, reversals: [{}] })), /posting history/);
   assert.match(String(manualEditBlocker({ ...ok, originalPath: null })), /original file was never stored/);
 });
+
+test('only the printed month payable typed (no column total): lines + adjustments are checked against it exactly', () => {
+  const d = smicDraft();
+  d.stated = { commissionPayableCents: null, monthCommissionPayableCents: 22250, ytdCommissionPayableCents: null };
+  const v = validateManualDraft(d, 'apply');
+  assert.ok(v.ok);
+  const s = manualDraftToStatement(v.draft, 'X');
+  assert.equal(s.finalTotalOnly, true);
+  const rec = reconcileStatement(s);
+  assert.equal(rec.reconciled, true, rec.blockingReasons.join('; '));
+  d.lines[0].paidCommissionCents = 15001;
+  const v2 = validateManualDraft(d, 'apply');
+  assert.ok(v2.ok);
+  assert.equal(reconcileStatement(manualDraftToStatement(v2.draft, 'X')).reconciled, false);
+  // With a column total typed, the normal two required checks apply (no final-total-only shortcut).
+  assert.equal(manualDraftToStatement(smicDraft(), 'X').finalTotalOnly, undefined);
+});
+
+test('line limit keeps a saved draft well inside the document size limit', () => {
+  const many = { ...smicDraft(), lines: Array.from({ length: 1001 }, (_, i) => ln({ policyNumberRaw: `P${i}`, paidCommissionCents: 1 })) };
+  const v = validateManualDraft(many, 'draft');
+  assert.ok(!v.ok && v.errors.some((e) => e.includes('At most 1000 lines')));
+  const max = { ...smicDraft(), lines: Array.from({ length: 1000 }, (_, i) => ln({ insuredName: 'X'.repeat(60), policyNumberRaw: `POLICY-${i}-ABCDEFGH`, paidCommissionCents: 123456, premiumForCommissionCents: 1234567, rateBps: 1000, effectiveDate: '2026-11-01', note: 'n'.repeat(80), page: 1 })) };
+  assert.ok(validateManualDraft(max, 'draft').ok);
+  assert.ok(JSON.stringify(max).length < 500_000, `draft of 1000 full lines is ${JSON.stringify(max).length} bytes`);
+});

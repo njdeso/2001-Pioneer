@@ -5,6 +5,7 @@ import {
   type Cents, type ExtractedLine, type ManualDraft, type ManualLine, type StatedTotals, type TransactionType,
 } from '@asm/shared';
 import { api } from '../api';
+import { useAuth } from '../auth';
 import { Badge, Button, Card, ErrorNote, Field, Modal, Money, Select, TextArea, TextInput } from '../ui';
 
 /**
@@ -18,6 +19,7 @@ import { Badge, Button, Card, ErrorNote, Field, Modal, Money, Select, TextArea, 
 export interface ManualStatementInfo {
   id: string;
   status: string;
+  fileType?: string;
   originalPath?: string | null;
   postedCents?: number;
   postingSeq?: number;
@@ -89,6 +91,7 @@ export function ManualReconciliationPanel({ stmt, lines, carriers, onViewOrigina
   onViewOriginal: () => void;
   originalOpen: boolean;
 }) {
+  const { role } = useAuth();
   const blocker = manualEditBlocker(stmt);
   const [open, setOpen] = useState(false);
   const [head, setHead] = useState<Head | null>(null);
@@ -116,7 +119,8 @@ export function ManualReconciliationPanel({ stmt, lines, carriers, onViewOrigina
   function start(d: ManualDraft) {
     setHead(toHead(d)); setRows(d.lines.length ? d.lines.map(toRow) : [blankRow()]);
     setOpen(true); setError(null); setServerErrors([]); setNotice(null); setCsv(null);
-    if (!originalOpen) onViewOriginal();
+    // Open the original beside the editor (PDFs show inline; other files open in a new tab via View original).
+    if (!originalOpen && stmt.fileType === 'pdf') onViewOriginal();
   }
   const fromBlank = () => start({ ...emptyManualDraft(stmt.payerId ?? ''), statementMonth: stmt.statementMonth ?? null, statementDate: stmt.statementDate ?? null, agencyCode: stmt.agencyCode ?? '' });
   const fromExtracted = () => start(draftFromExtracted(stmt, lines));
@@ -159,7 +163,8 @@ export function ManualReconciliationPanel({ stmt, lines, carriers, onViewOrigina
     </p>
   ) : null;
 
-  if (blocker) return banner;
+  // Applying is admin-only on the server (processStatement); staff see the banner only.
+  if (blocker || role !== 'admin') return banner;
   if (!open) {
     return (
       <>
@@ -185,7 +190,7 @@ export function ManualReconciliationPanel({ stmt, lines, carriers, onViewOrigina
       {banner}
       <Card title={<span className="flex items-center gap-2">Manual reconciliation {head?.basedOn === 'extracted' ? <Badge tone="amber">Correcting extracted lines</Badge> : <Badge>Entered from the original</Badge>}</span>}
         actions={<>
-          {!originalOpen && <Button size="sm" variant="secondary" onClick={onViewOriginal}>View original</Button>}
+          <Button size="sm" variant="secondary" onClick={onViewOriginal}>{originalOpen ? 'Reload original' : 'View original'}</Button>
           <Button size="sm" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>Close (unsaved changes are lost)</Button>
         </>}>
         {head && (

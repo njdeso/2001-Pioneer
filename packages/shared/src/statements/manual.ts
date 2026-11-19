@@ -20,7 +20,8 @@ import { TRANSACTION_TYPES, type ExtractedLine, type ExtractedStatement, type St
  */
 
 export const MANUAL_METHOD = 'manual' as const;
-export const MANUAL_MAX_LINES = 2000;
+/** Keeps the saved draft well inside Firestore's 1 MB document limit (about 250 bytes a line). */
+export const MANUAL_MAX_LINES = 1000;
 export const MANUAL_REASON_MIN = 5;
 
 export interface ManualLine {
@@ -244,6 +245,9 @@ export function manualDraftToStatement(d: ManualDraft, carrierName: string): Ext
     adjustments: d.adjustments.map((a) => ({ label: a.label, amountCents: a.amountCents })),
     lines,
     issues: [{ level: 'warning', code: 'manual_entry', text: 'Lines and printed totals were entered manually from the original statement. Check them against the original before approving.' }],
+    // Only the month payable was typed (e.g. a statement that prints just a final total): check lines + adjustments
+    // against that printed figure alone, exactly as the AI reader does. Nothing stands in for a missing total.
+    ...(d.stated.commissionPayableCents === null && d.stated.monthCommissionPayableCents !== null ? { finalTotalOnly: true } : {}),
   };
 }
 
