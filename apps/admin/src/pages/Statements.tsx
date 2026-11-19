@@ -13,6 +13,7 @@ import { useData } from '../data';
 import { Badge, Button, Card, DataTable, Empty, ErrorNote, Field, Modal, Money, PageHeader, Select, Stat, TextArea, cx, type Column } from '../ui';
 import { PostingPanel, type PostingInfo } from './StatementPosting';
 import { AiCorrectionHistory } from './StatementCorrections';
+import { ManualReconciliationPanel, type ManualStatementInfo } from './StatementManual';
 import { ClassificationPicker, DuplicateReview, useDuplicateCheck } from './StatementDuplicates';
 import { BrokerCell, MatchBadge, MatchDialog, MatchedTo, MatchingPanel, lineMatch, matchFilterFn, type MatchFilter, type MatchingInfo, type MatchLine } from './StatementMatching';
 
@@ -61,6 +62,10 @@ interface StatementDoc {
   discardReason?: string;
   matching?: MatchingInfo | null;
   createdAt?: { toDate?: () => Date };
+  postingSeq?: number;
+  reversals?: unknown[];
+  manualDraft?: ManualStatementInfo['manualDraft'];
+  manualReconciliation?: ManualStatementInfo['manualReconciliation'];
 }
 
 type LineDoc = MatchLine;
@@ -76,7 +81,7 @@ const STATUS: Record<StatementDoc['status'], { label: string; tone: 'slate' | 'g
   posted: { label: 'Posted', tone: 'green' },
 };
 
-const METHOD: Record<string, string> = { 'travelers-pl-v1': 'Parsed (Travelers)', 'detailed-statement-v1': 'Parsed (Detailed Statement)', ai: 'AI (PDF)', 'table-ai': 'AI (spreadsheet)' };
+const METHOD: Record<string, string> = { 'travelers-pl-v1': 'Parsed (Travelers)', 'detailed-statement-v1': 'Parsed (Detailed Statement)', ai: 'AI (PDF)', 'table-ai': 'AI (spreadsheet)', manual: 'Manual reconciliation' };
 
 export function StatusBadge({ status }: { status: StatementDoc['status'] }) {
   const s = STATUS[status] ?? { label: status, tone: 'slate' as const };
@@ -474,6 +479,10 @@ export function StatementReviewPage() {
           <p className="mt-1 text-xs text-slate-500">Link expires in 5 minutes. Viewing is recorded in the audit log.</p>
         </Card>
       )}
+
+      {/* Manual reconciliation: hidden once anything from the statement was approved or posted (shared rule). */}
+      <ManualReconciliationPanel stmt={stmt as unknown as ManualStatementInfo} lines={lines} carriers={carriers}
+        onViewOriginal={() => void openOriginal()} originalOpen={!!fileUrl} />
 
       {['needs_review', 'discrepancy', 'approved', 'posted'].includes(stmt.status) && (
         <MatchingPanel statementId={stmt.id} payerId={stmt.payerId} matching={stmt.matching} lines={lines} canMatch={canMatch} />
