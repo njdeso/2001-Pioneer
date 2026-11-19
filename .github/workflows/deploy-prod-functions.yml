@@ -61,9 +61,11 @@ jobs:
       REGION: us-central1
       TARGET_FUNCTIONS: processStatement,setStatementPayer
       EXPECTED_COMMIT: 359b85784570a9a04f2a744b60b2da2ce12accb0
-      WIF_PROVIDER: ${{ vars.GCP_PROD_WIF_PROVIDER }}
-      PROD_SA: ${{ vars.GCP_PROD_SERVICE_ACCOUNT }}
-      PROD_PROJECT_NUMBER: ${{ vars.GCP_PROD_PROJECT_NUMBER }}
+      # Identifiers, not secrets. They live in this reviewed file (changed only through a pull request), not in
+      # editable variables, so a run can never be pointed at another provider, account or project.
+      PROD_PROJECT_NUMBER: '933119340508'
+      WIF_PROVIDER: projects/933119340508/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod
+      PROD_SA: pioneer-prod-deployer@pioneer-285cf.iam.gserviceaccount.com
       INPUT_COMMIT: ${{ inputs.commit }}
       INPUT_CONFIRM: ${{ inputs.confirm }}
       DRY_RUN: ${{ inputs.dry_run }}
@@ -74,9 +76,8 @@ jobs:
           [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::Run this workflow from main only."; exit 1; }
           [ "$INPUT_CONFIRM" = "$PROD_PROJECT_ID" ] || { echo "::error::Confirmation must be exactly $PROD_PROJECT_ID."; exit 1; }
           [ "$INPUT_COMMIT" = "$EXPECTED_COMMIT" ] || { echo "::error::This workflow deploys only $EXPECTED_COMMIT (PR #26). Typed: $INPUT_COMMIT"; exit 1; }
-          [ -n "$WIF_PROVIDER" ] && [ -n "$PROD_SA" ] && [ -n "$PROD_PROJECT_NUMBER" ] || { echo "::error::Set GCP_PROD_WIF_PROVIDER, GCP_PROD_SERVICE_ACCOUNT and GCP_PROD_PROJECT_NUMBER on the production environment (docs/PROD-DEPLOY-GITHUB-ACTIONS.md)."; exit 1; }
-          case "$PROD_SA" in *@"$PROD_PROJECT_ID".iam.gserviceaccount.com) ;; *) echo "::error::GCP_PROD_SERVICE_ACCOUNT must belong to $PROD_PROJECT_ID."; exit 1 ;; esac
-          case "$WIF_PROVIDER" in "projects/$PROD_PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod") ;; *) echo "::error::GCP_PROD_WIF_PROVIDER must be projects/$PROD_PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod"; exit 1 ;; esac
+          case "$PROD_SA" in *@"$PROD_PROJECT_ID".iam.gserviceaccount.com) ;; *) echo "::error::PROD_SA must belong to $PROD_PROJECT_ID."; exit 1 ;; esac
+          case "$WIF_PROVIDER" in "projects/$PROD_PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod") ;; *) echo "::error::WIF_PROVIDER must be projects/$PROD_PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod"; exit 1 ;; esac
           echo "Mode: $([ "$DRY_RUN" = true ] && echo 'DRY RUN (nothing will be deployed)' || echo 'DEPLOY processStatement + setStatementPayer')"
 
       # The workflow's own scripts come from main as it is now (ops/). The code that is deployed comes from the
@@ -132,8 +133,8 @@ jobs:
       - name: Authenticate to Google Cloud (Workload Identity Federation, no key)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ vars.GCP_PROD_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_PROD_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.PROD_SA }}
           project_id: pioneer-285cf
           create_credentials_file: true
           export_environment_variables: true

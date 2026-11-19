@@ -27,7 +27,11 @@ need(!/--force/.test(code), 'must never use --force');
 need(!/firestore:|storage:|--only[^\n]*(firestore|storage|hosting|database|remoteconfig|extensions)/.test(code), 'must not deploy rules, indexes or other products');
 need(!/functions:delete|firebase functions:secrets:set|secrets:access|versions access|secrets versions access/.test(code), 'must not delete functions or read/set secret values');
 need(!/credentials_json|GOOGLE_CREDENTIALS|service_account_key/.test(code), 'must not use a service-account key');
-need(/workload_identity_provider: \$\{\{ vars\.GCP_PROD_WIF_PROVIDER \}\}/.test(code), 'must authenticate with the WIF provider variable');
+need(/^\s+PROD_PROJECT_NUMBER: '933119340508'$/m.test(code), 'PROD_PROJECT_NUMBER must be pioneer-285cf\'s number, 933119340508');
+need(/^\s+WIF_PROVIDER: projects\/933119340508\/locations\/global\/workloadIdentityPools\/pioneer-prod-github\/providers\/deploy-prod$/m.test(code), 'WIF_PROVIDER must be the pioneer-prod-github/deploy-prod provider of 933119340508');
+need(/^\s+PROD_SA: pioneer-prod-deployer@pioneer-285cf\.iam\.gserviceaccount\.com$/m.test(code), 'PROD_SA must be pioneer-prod-deployer@pioneer-285cf');
+need(/workload_identity_provider: \$\{\{ env\.WIF_PROVIDER \}\}/.test(code) && /service_account: \$\{\{ env\.PROD_SA \}\}/.test(code), 'auth must use the fixed WIF_PROVIDER and PROD_SA');
+need(!/\bvars\./.test(code), 'must not read repository/environment variables (identifiers are fixed in the file)');
 need(/^permissions:\n\s+contents: read\n\s+id-token: write/m.test(code), 'permissions must be contents: read and id-token: write only');
 need(/if: env\.DRY_RUN != 'true'/.test(code), 'the deploy step must be skipped in a dry run');
 need(!/upload-artifact[\s\S]*?path: [^\n]*(before|after)\.json/.test(code), 'raw snapshots (they hold variable values) must never be uploaded');
@@ -41,7 +45,7 @@ for (const f of readdirSync('.github/workflows').filter((n) => /\.ya?ml$/.test(n
   if (`.github/workflows/${f}` === path) continue;
   const other = readFileSync(`.github/workflows/${f}`, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
   need(!/environment:\s*['"]?production\b/.test(other), `${f} must not use the production environment`);
-  need(!/GCP_PROD_/.test(other), `${f} must not use the GCP_PROD_ variables`);
+  need(!/GCP_PROD_|pioneer-prod-deployer|pioneer-prod-github/.test(other), `${f} must not use the production deploy account or provider`);
   need(!/deploy-prod-functions\.yml/.test(other), `${f} must not call or reference the production deploy workflow`);
   need(!/pioneer-285cf/.test(other.replace(/^\s*#.*$/gm, '')), `${f} must not target pioneer-285cf`);
 }

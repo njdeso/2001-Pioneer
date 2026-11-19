@@ -7,7 +7,7 @@ Cloud console, GitHub and Netlify. You don't need Cloud Shell or a local install
 
 | | |
 |---|---|
-| Trigger | **Manual only**: Actions → Run workflow, on `main`. It has no push, schedule, pull-request, workflow-call or other trigger. CI (`scripts/check-prod-deploy-workflow.mjs`) fails if one is added, or if any other workflow uses the `production` environment or its variables. |
+| Trigger | **Manual only**: Actions → Run workflow, on `main`. It has no push, schedule, pull-request, workflow-call or other trigger. CI (`scripts/check-prod-deploy-workflow.mjs`) fails if one is added, or if any other workflow uses the `production` environment, the production deploy account or `pioneer-285cf`. |
 | Approval | Every run waits for your approval in the protected GitHub environment `production`. |
 | Dry run | Default **on**: every check and the read-only snapshot, no deploy |
 | Code | Only commit `359b85784570a9a04f2a744b60b2da2ce12accb0` (the PR #26 merge). You type it to confirm, and the run checks that it is on `main`. |
@@ -52,10 +52,10 @@ What the account **cannot** do directly, because it holds no role for it:
 
 ## Order of setup
 
-Do these in order. **Do not merge PR #27 until G1–G3 are done.** If a workflow job names an environment that does not exist, GitHub creates it automatically **without** protection rules.
+Do these in order. **Do not merge PR #27 until G1 and G2 are done.** If a workflow job names an environment that does not exist, GitHub creates it automatically **without** protection rules.
 
 1. **Google Cloud: Part 1.** The provider is created **disabled**.
-2. **GitHub: Part 2.** G1 protected environment, G2 branch protection, G3 variables. Then G4: merge PR #27.
+2. **GitHub: Part 2.** G1 protected environment, G2 branch protection. Then G3: merge PR #27.
 3. **Deploy: Part 3.** Enable the provider → dry run → real deploy → verify → **disable the provider**.
 
 ---
@@ -138,9 +138,12 @@ If the list also shows `pioneer-285cf@appspot.gserviceaccount.com`, do the same 
 - Principals: **Only identities matching the filter** → `repository_id` = `1447842031`
 - **Save** → **Dismiss**: no configuration file is needed.
 
-**C9. Copy the provider name, then disable the provider.**
-- Copy the `deploy-prod` provider's full name: `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod`.
-- On the provider's page, click **Disable**. It stays disabled until you deploy (Part 3).
+**C9. Disable the provider.** On the `deploy-prod` provider's page, click **Disable**. It stays disabled until you deploy (Part 3).
+
+Nothing needs copying: the workflow file already contains the fixed identifiers. A deploy fails safely if the pool, provider or account was created with a different ID:
+- project number `933119340508`
+- provider `projects/933119340508/locations/global/workloadIdentityPools/pioneer-prod-github/providers/deploy-prod`
+- account `pioneer-prod-deployer@pioneer-285cf.iam.gserviceaccount.com`
 
 ---
 
@@ -160,15 +163,7 @@ If the list also shows `pioneer-285cf@appspot.gserviceaccount.com`, do the same 
 - Leave force pushes and deletions **blocked** (the default).
 - **Create**
 
-**G3. Add the environment variables.** Environments → `production` → **Environment variables** → **Add variable**. These are identifiers, not credentials:
-
-| Name | Value |
-|---|---|
-| `GCP_PROD_WIF_PROVIDER` | the provider name from C9 |
-| `GCP_PROD_SERVICE_ACCOUNT` | `pioneer-prod-deployer@pioneer-285cf.iam.gserviceaccount.com` |
-| `GCP_PROD_PROJECT_NUMBER` | the project number from C1 |
-
-**G4. Merge PR #27**, once its checks are green. Merging deploys nothing.
+**G3. Merge PR #27**, once its checks are green. Merging deploys nothing.
 
 ---
 
@@ -222,4 +217,4 @@ A later Firebase deploy of a rolled-back function sends traffic to its newest re
 ## Removing the access entirely
 When the app is retired, or whenever you prefer:
 - Google Cloud: delete the `deploy-prod` provider, the `pioneer-prod-github` pool, the `pioneer-prod-deployer` service account, and the custom role `pioneerProdDeployProjectRead`.
-- GitHub: delete the `production` environment's three variables, or the whole environment.
+- GitHub: delete the `production` environment.
