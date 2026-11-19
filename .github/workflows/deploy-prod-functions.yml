@@ -6,7 +6,12 @@
 #     pull-request or other trigger exists, so nothing deploys automatically.
 #   - Every run waits for approval in the protected GitHub environment "production".
 #   - Deploys ONLY processStatement and setStatementPayer. Never Firestore rules, Storage rules, indexes or any
-#     other function. Never --force. The deploy account has no permission for rules, indexes or data either.
+#     other function. Never --force. The deploy account has no role for rules, indexes or data.
+#   - IMPORTANT: Google cannot restrict the deploy account to these two functions. The Firebase CLI requires
+#     project-level Cloud Functions permissions (create/update/delete on every function, and Cloud Functions
+#     Developer includes project-wide Cloud Run access). The two-function limit is enforced by THIS FILE (checked
+#     in CI, changed only via reviewed PRs), the provider condition, your approval, and the before/after
+#     comparison. Keep the Workload Identity provider DISABLED except while deploying.
 #   - Keeps the production environment variables (OWNER_EMAILS) by copying the values production already uses,
 #     and keeps the ANTHROPIC_API_KEY secret binding. The workflow never reads the secret's value.
 #   - Reads no Firestore or Storage data and writes none.
@@ -153,6 +158,17 @@ jobs:
           [ -n "$v" ] || { echo "::error::ANTHROPIC_API_KEY has no enabled version in $PROD_PROJECT_ID (or the deployer cannot see it)."; exit 1; }
           echo "ANTHROPIC_API_KEY has an enabled version ($(basename "$v"))."
 
+      # Read-only Firebase CLI checks, in dry runs too: they exercise the same sign-in and project lookup as the deploy,
+      # so a missing permission shows up before any real deploy.
+      - name: Firebase CLI read-only checks (function list, secret metadata)
+        working-directory: release
+        run: |
+          set -euo pipefail
+          npx firebase functions:list --project prod --non-interactive > /dev/null
+          echo "Firebase CLI can list the production functions."
+          npx firebase functions:secrets:get ANTHROPIC_API_KEY --project prod --non-interactive > /dev/null
+          echo "Firebase CLI can see ANTHROPIC_API_KEY versions (metadata only)."
+
       - name: Deploy processStatement and setStatementPayer ONLY
         id: deploy
         if: env.DRY_RUN != 'true'
@@ -203,3 +219,5 @@ jobs:
           else
             echo "::notice::Deploy step: ${{ steps.deploy.outcome }}. See the summary for the before/after comparison. Rollback: docs/PROD-DEPLOY-GITHUB-ACTIONS.md."
           fi
+          echo "::warning::After verifying, DISABLE the Workload Identity provider deploy-prod (Google Cloud → IAM & Admin → Workload Identity Federation → pioneer-prod-github → deploy-prod → Disable). Disable it also if this run failed."
+

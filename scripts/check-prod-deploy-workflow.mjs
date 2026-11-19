@@ -2,7 +2,7 @@
 // CI check: the production deploy workflow stays inside its limits. Fails the build if it gains an automatic
 // trigger, leaves main / the "production" environment, deploys anything but the two target functions, uses
 // --force or a key, or reads a secret value. Local files only; no credentials.
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const path = '.github/workflows/deploy-prod-functions.yml';
 const wf = readFileSync(path, 'utf8');
@@ -31,6 +31,20 @@ need(/workload_identity_provider: \$\{\{ vars\.GCP_PROD_WIF_PROVIDER \}\}/.test(
 need(/^permissions:\n\s+contents: read\n\s+id-token: write/m.test(code), 'permissions must be contents: read and id-token: write only');
 need(/if: env\.DRY_RUN != 'true'/.test(code), 'the deploy step must be skipped in a dry run');
 need(!/upload-artifact[\s\S]*?path: [^\n]*(before|after)\.json/.test(code), 'raw snapshots (they hold variable values) must never be uploaded');
+
+// Only read-only Firebase CLI commands besides the one deploy.
+const fbCmds = [...code.matchAll(/firebase ([a-z:]+)/g)].map((m) => m[1]).filter((c) => c !== 'deploy');
+need(fbCmds.every((c) => ['functions:list', 'functions:secrets:get'].includes(c)), `only read-only Firebase CLI commands are allowed besides the deploy (found: ${fbCmds.join(', ')})`);
+
+// No other workflow may use the production environment, its variables, or call this workflow.
+for (const f of readdirSync('.github/workflows').filter((n) => /\.ya?ml$/.test(n))) {
+  if (`.github/workflows/${f}` === path) continue;
+  const other = readFileSync(`.github/workflows/${f}`, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  need(!/environment:\s*['"]?production\b/.test(other), `${f} must not use the production environment`);
+  need(!/GCP_PROD_/.test(other), `${f} must not use the GCP_PROD_ variables`);
+  need(!/deploy-prod-functions\.yml/.test(other), `${f} must not call or reference the production deploy workflow`);
+  need(!/pioneer-285cf/.test(other.replace(/^\s*#.*$/gm, '')), `${f} must not target pioneer-285cf`);
+}
 
 if (errors.length) {
   console.error('Production deploy workflow check FAILED:\n - ' + errors.join('\n - '));
