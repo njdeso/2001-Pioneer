@@ -17,6 +17,7 @@ export * from './statements/originalFile.js';
 export * from './statements/reconcile.js';
 export * from './statements/ai.js';
 export * from './statements/payerHint.js';
+export * from './statements/manual.js';
 export * from './statements/anthropic.js';
 export * from './statements/diagnose.js';
 export * from './statements/match.js';

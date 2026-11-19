@@ -4,13 +4,14 @@ import { logger } from 'firebase-functions';
 import { originalFileAccess, originalFileDisposition } from '@asm/shared';
 import { defineSecret } from 'firebase-functions/params';
 import { getStorage } from 'firebase-admin/storage';
-import type { DocumentData } from 'firebase-admin/firestore';
+import type { DocumentData, DocumentReference, WriteBatch } from 'firebase-admin/firestore';
 import { z } from 'zod';
 import {
   type AiValueCorrection,
   DEFAULT_AI_MODEL, AI_PROMPT_VERSION, DETAILED_STATEMENT_READER, TRAVELERS_PL_PARSER, applyUticaDirectBillRules, extractWithClaude, isUticaDirectBill, readDetailedStatement, isTravelersPlStatement, normalizeName, sniffError, sniffSpreadsheet,
   parseCsv, parseTravelersPl, reconcileStatement, suggestPayerFromFileName, tableToText,
-  type PayerSuggestion,
+  MANUAL_METHOD, manualDraftToStatement, manualEditBlocker, manualLineChanges, validateManualDraft,
+  type PayerSuggestion, type ReconciliationResult,
   type ExtractedStatement, type ExtractionMethod,
   type DupLine,
 } from '@asm/shared';
@@ -305,6 +306,79 @@ async function claimForProcessing(id: string, actor: Actor): Promise<DocumentDat
   });
 }
 
+
+/**
+ * Store a statement that has been read (by a parser, the AI reader, or manual reconciliation): duplicate check,
+ * lines, extraction run, statement fields and audit entry. One code path for every method, so a manually
+ * reconciled statement is stored exactly like an AI-read one and flows through matching, approval and posting
+ * unchanged. Never touches the ledger, clients or policies.
+ */
+async function storeReadStatement(a: {
+  ref: DocumentReference; statementId: string; doc: DocumentData; s: ExtractedStatement; rec: ReconciliationResult;
+  payer: { payerId: string | null; note: string; suggestion: PayerSuggestion | null };
+  actor: Actor; started: number; method: ExtractionMethod | typeof MANUAL_METHOD | null;
+  run: Record<string, unknown>;
+  /** Extra writes committed with the run (e.g. the permanent AI-correction history). */
+  stage?: (b: WriteBatch, runId: string) => void;
+  extraFields?: Record<string, unknown>;
+  auditEntry: { action: string; summary: string; detail?: Record<string, unknown> };
+}) {
+  const { ref, statementId, doc, s, rec, payer, actor, started } = a;
+  // ---- Other statements from this payer for this month (compared by content) ----
+  // Several statements a month are normal (e.g. Personal and Commercial Lines). This is informational;
+  // approval and posting always re-check (functions/src/lib/duplicates.ts). The old carrier+agency+month
+  // identity records (statementIdentity) are left as they are and no longer used.
+  const dupCheck = await duplicateFindings(statementId, {
+    status: rec.reconciled ? 'needs_review' : 'discrepancy', fileName: doc.fileName, payerId: payer.payerId, statementMonth: s.statementMonth,
+    classification: doc.classification ?? null, agencyCode: s.agencyCode, officeCode: s.officeCode, statementDate: s.statementDate, title: s.title,
+    statementTotalCents: s.stated.monthCommissionPayableCents ?? s.stated.commissionPayableCents, postedCents: 0, separateConfirmations: doc.separateConfirmations ?? {},
+  }, s.lines as unknown as DupLine[]);
+  const possibleDuplicateOf: string | null = dupCheck.findings.find((f) => !f.confirmed)?.otherId ?? null;
+
+  await replaceLines(ref, s, payer.payerId);
+  const runRef = db.collection('extractionRuns').doc();
+  const b = db.batch();
+  b.set(runRef, { ...a.run, ok: true, reconciled: rec.reconciled, lineCount: s.lines.length, durationMs: Date.now() - started, at: FieldValue.serverTimestamp(), by: actor.uid });
+  a.stage?.(b, runRef.id);
+  b.update(ref, {
+    status: rec.reconciled ? 'needs_review' : 'discrepancy',
+    failure: null,
+    method: a.method,
+    carrierName: s.carrierName,
+    agencyCode: s.agencyCode,
+    officeCode: s.officeCode,
+    statementMonth: s.statementMonth,
+    statementDate: s.statementDate,
+    pageCount: s.pageCount,
+    stated: s.stated,
+    sections: s.sections ?? [],
+    adjustments: s.adjustments,
+    statementIssues: s.issues,
+    sourceAccounting: s.sourceAccounting ?? null,
+    reconciliation: rec,
+    reconciled: rec.reconciled,
+    payerId: payer.payerId,
+    payerNote: payer.note,
+    payerSuggestion: payer.suggestion,
+    possibleDuplicateOf,
+    title: s.title,
+    contentDigest: dupCheck.current.digest,
+    duplicateCheck: { at: new Date().toISOString(), others: dupCheck.findings.length, sameStatement: dupCheck.findings.filter((f) => f.hard).length, unconfirmed: dupCheck.findings.filter((f) => !f.hard && !f.confirmed).length },
+    statementTotalCents: s.stated.monthCommissionPayableCents ?? s.stated.commissionPayableCents,
+    extractedCommissionCents: rec.totals.commissionCents,
+    postedCents: 0,
+    pendingCents: rec.totals.commissionCents,
+    lastRunId: runRef.id,
+    matching: null, // lines were replaced; matching starts again
+    extractedAt: FieldValue.serverTimestamp(),
+    ...(a.extraFields ?? {}),
+    ...meta(actor, false),
+  });
+  audit(b, actor, { action: a.auditEntry.action, entityType: 'statement', entityId: statementId, summary: a.auditEntry.summary, ...(a.auditEntry.detail ? { detail: a.auditEntry.detail } : {}) });
+  await b.commit();
+  return { status: rec.reconciled ? 'needs_review' : 'discrepancy', reconciled: rec.reconciled, lines: s.lines.length, possibleDuplicateOf };
+}
+
 const processInput = z.object({ statementId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), method: z.enum(['auto', 'ai']).default('auto') });
 
 /** Step 2: verify the uploaded file, preserve it, extract, validate and reconcile. */
@@ -312,6 +386,9 @@ export const processStatement = onCall(
   { secrets: [ANTHROPIC_API_KEY], memory: '1GiB', timeoutSeconds: 540 },
   async (req) => {
     const actor = requireRole(req);
+    // Manual reconciliation goes through this same function (no new function to deploy): save unfinished work,
+    // or apply keyed / corrected lines. It never calls the AI reader.
+    if ((req.data as { method?: unknown } | null)?.method === MANUAL_METHOD) return processManual(actor, req.data);
     const { statementId, method: force } = parse(processInput, req.data);
     const doc = await claimForProcessing(statementId, actor);
     const ref = db.collection('statements').doc(statementId);
@@ -368,61 +445,16 @@ export const processStatement = onCall(
       const rec = reconcileStatement(s);
       const payer = await resolvePayer(s, String(doc.fileName));
 
-      // ---- Other statements from this payer for this month (compared by content) ----
-      // Several statements a month are normal (e.g. Personal and Commercial Lines). This is informational;
-      // approval and posting always re-check (functions/src/lib/duplicates.ts). The old carrier+agency+month
-      // identity records (statementIdentity) are left as they are and no longer used.
-      const dupCheck = await duplicateFindings(statementId, {
-        status: rec.reconciled ? 'needs_review' : 'discrepancy', fileName: doc.fileName, payerId: payer.payerId, statementMonth: s.statementMonth,
-        classification: doc.classification ?? null, agencyCode: s.agencyCode, officeCode: s.officeCode, statementDate: s.statementDate, title: s.title,
-        statementTotalCents: s.stated.monthCommissionPayableCents ?? s.stated.commissionPayableCents, postedCents: 0, separateConfirmations: doc.separateConfirmations ?? {},
-      }, s.lines as unknown as DupLine[]);
-      const possibleDuplicateOf: string | null = dupCheck.findings.find((f) => !f.confirmed)?.otherId ?? null;
-
-      await replaceLines(ref, s, payer.payerId);
-      const runRef = db.collection('extractionRuns').doc();
-      const b = db.batch();
-      b.set(runRef, { ...runBase, ok: true, reconciled: rec.reconciled, lineCount: s.lines.length, aiValuesCorrected: out.corrections?.length ?? 0, durationMs: Date.now() - started, at: FieldValue.serverTimestamp(), by: actor.uid });
-      recordAiCorrections(b, actor, statementId, runRef.id, out.corrections ?? []);
-      b.update(ref, {
-        status: rec.reconciled ? 'needs_review' : 'discrepancy',
-        failure: null,
+      return await storeReadStatement({
+        ref, statementId, doc, s, rec, payer, actor, started,
+        run: { ...runBase, aiValuesCorrected: out.corrections?.length ?? 0 },
         method: out.method,
-        carrierName: s.carrierName,
-        agencyCode: s.agencyCode,
-        officeCode: s.officeCode,
-        statementMonth: s.statementMonth,
-        statementDate: s.statementDate,
-        pageCount: s.pageCount,
-        stated: s.stated,
-        sections: s.sections ?? [],
-        adjustments: s.adjustments,
-        statementIssues: s.issues,
-        sourceAccounting: s.sourceAccounting ?? null,
-        reconciliation: rec,
-        reconciled: rec.reconciled,
-        payerId: payer.payerId,
-        payerNote: payer.note,
-        payerSuggestion: payer.suggestion,
-        possibleDuplicateOf,
-        title: s.title,
-        contentDigest: dupCheck.current.digest,
-        duplicateCheck: { at: new Date().toISOString(), others: dupCheck.findings.length, sameStatement: dupCheck.findings.filter((f) => f.hard).length, unconfirmed: dupCheck.findings.filter((f) => !f.hard && !f.confirmed).length },
-        statementTotalCents: s.stated.monthCommissionPayableCents ?? s.stated.commissionPayableCents,
-        extractedCommissionCents: rec.totals.commissionCents,
-        postedCents: 0,
-        pendingCents: rec.totals.commissionCents,
-        lastRunId: runRef.id,
-        matching: null, // lines were replaced; matching starts again
-        extractedAt: FieldValue.serverTimestamp(),
-        ...meta(actor, false),
+        stage: (b, runId) => recordAiCorrections(b, actor, statementId, runId, out.corrections ?? []),
+        auditEntry: {
+          action: 'extract',
+          summary: `Extracted ${s.lines.length} lines by ${out.method}; ${rec.reconciled ? 'reconciled exactly' : `not reconciled (${rec.blockingReasons.length} issue${rec.blockingReasons.length === 1 ? '' : 's'})`}`,
+        },
       });
-      audit(b, actor, {
-        action: 'extract', entityType: 'statement', entityId: statementId,
-        summary: `Extracted ${s.lines.length} lines by ${out.method}; ${rec.reconciled ? 'reconciled exactly' : `not reconciled (${rec.blockingReasons.length} issue${rec.blockingReasons.length === 1 ? '' : 's'})`}`,
-      });
-      await b.commit();
-      return { status: rec.reconciled ? 'needs_review' : 'discrepancy', reconciled: rec.reconciled, lines: s.lines.length, possibleDuplicateOf };
     } catch (err) {
       if (err instanceof HttpsError) {
         await fail(err.code, err.message);
@@ -433,6 +465,94 @@ export const processStatement = onCall(
     }
   },
 );
+
+
+// ---------------------------------------------------------------- manual reconciliation
+
+const manualInput = z.object({
+  statementId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+  method: z.literal(MANUAL_METHOD),
+  action: z.enum(['save_draft', 'apply']),
+  draft: z.unknown(),
+}).strict();
+
+/**
+ * Manual reconciliation of a statement from its preserved original, when automatic reading fails or reads it
+ * wrongly. The lines and printed totals are validated by the shared rules (validateManualDraft: a closed list of
+ * fields, no broker data), then stored by the SAME code as an AI read (storeReadStatement): reconciliation
+ * exact to the cent, duplicate check, matching starts again, approval and posting unchanged.
+ *
+ *   save_draft: keep unfinished work on the statement (manualDraft) to resume later. Lines are not changed.
+ *   apply:      replace the statement's (unposted) lines with the manual ones and reconcile.
+ *
+ * Refused when anything from the statement was approved or posted, or ever had posting history
+ * (manualEditBlocker + claimForProcessing), so posted financial records are never changed. Every save and apply
+ * is in the audit log; apply records the reason and a line-by-line list of what changed.
+ */
+async function processManual(actor: Actor, data: unknown) {
+  const { statementId, action, draft: raw } = parse(manualInput, data);
+  const v = validateManualDraft(raw, action === 'apply' ? 'apply' : 'draft');
+  if (!v.ok) throw new HttpsError('invalid-argument', v.errors.slice(0, 10).join(' '), { manualErrors: v.errors.slice(0, 50) });
+  const d = v.draft;
+  const ref = db.collection('statements').doc(statementId);
+
+  if (action === 'save_draft') {
+    return db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) throw new HttpsError('not-found', 'Statement not found.');
+      const blocker = manualEditBlocker(snap.data()!);
+      if (blocker) throw new HttpsError('failed-precondition', blocker);
+      tx.update(ref, { manualDraft: { ...d, savedAt: FieldValue.serverTimestamp(), savedBy: actor.email, appliedAt: null }, ...meta(actor, false) });
+      audit(tx, actor, { action: 'manual_draft_saved', entityType: 'statement', entityId: statementId, summary: `Saved unfinished manual reconciliation (${d.lines.length} line${d.lines.length === 1 ? '' : 's'})` });
+      return { status: String(snap.get('status')), saved: true, lines: d.lines.length };
+    });
+  }
+
+  const pre = await ref.get();
+  if (!pre.exists) throw new HttpsError('not-found', 'Statement not found.');
+  const blocker = manualEditBlocker(pre.data()!);
+  if (blocker) throw new HttpsError('failed-precondition', blocker);
+  const carrier = await db.collection('carriers').doc(d.payerId).get();
+  if (!carrier.exists) throw new HttpsError('not-found', 'Carrier not found. Choose an existing carrier or wholesaler.');
+  const s = manualDraftToStatement(d, String(carrier.get('name') ?? ''));
+  const rec = reconcileStatement(s);
+  const before = (await ref.collection('lines').get()).docs.map((x) => x.data() as { lineNo: number });
+  const changes = manualLineChanges(before, s.lines);
+
+  // Same claim as a re-read: re-checks the status and posting history atomically and marks it processing.
+  const doc = await claimForProcessing(statementId, actor);
+  const started = Date.now();
+  if (manualEditBlocker({ ...doc, status: pre.get('status') }) || doc.status !== pre.get('status')) {
+    await ref.update({ status: doc.status, ...meta(actor, false) }); // put it back exactly as it was
+    throw new HttpsError('failed-precondition', 'The statement changed while saving. Reload and try again; your manual work is kept if you saved it.');
+  }
+  try {
+    return await storeReadStatement({
+      ref, statementId, doc, s, rec, actor, started,
+      method: MANUAL_METHOD,
+      payer: { payerId: d.payerId, note: `Chosen by ${actor.email} (manual reconciliation)`, suggestion: null },
+      run: { statementId, method: MANUAL_METHOD, model: null, promptVersion: null, attempts: 0, usage: null, manual: { reason: d.reason, basedOn: d.basedOn } },
+      extraFields: {
+        manualDraft: { ...d, savedAt: FieldValue.serverTimestamp(), savedBy: actor.email, appliedAt: FieldValue.serverTimestamp() },
+        manualReconciliation: { by: actor.email, at: FieldValue.serverTimestamp(), reason: d.reason, basedOn: d.basedOn, linesBefore: changes.before, linesAfter: changes.after, changedLines: changes.changedLines },
+      },
+      auditEntry: {
+        action: 'manual_reconcile',
+        summary: `Reconciled manually (${d.basedOn === 'extracted' ? 'corrected the extracted lines' : 'entered from the original'}): ${s.lines.length} lines; ${rec.reconciled ? 'reconciled exactly' : `not reconciled (${rec.blockingReasons.length} issue${rec.blockingReasons.length === 1 ? '' : 's'})`}. Reason: ${d.reason}`,
+        detail: { reason: d.reason, basedOn: d.basedOn, previousStatus: pre.get('status') ?? null, previousMethod: pre.get('method') ?? null, lineChanges: changes },
+      },
+    });
+  } catch (err) {
+    // The draft is kept, so applying again is one click. Nothing was posted: posting is impossible from these statuses.
+    const message = err instanceof HttpsError ? err.message : 'Saving the manual lines stopped unexpectedly. Apply again; your manual work is kept.';
+    logger.error('manual reconciliation stopped', { statementId, message: String((err as Error)?.message ?? err).slice(0, 300) });
+    const b = db.batch();
+    b.update(ref, { status: 'extraction_failed', failure: { code: 'manual_store_failed', message }, ...meta(actor, false) });
+    audit(b, actor, { action: 'manual_reconcile_failed', entityType: 'statement', entityId: statementId, summary: `Manual reconciliation stopped: ${message}` });
+    await b.commit().catch(() => undefined);
+    throw err instanceof HttpsError ? err : new HttpsError('internal', message);
+  }
+}
 
 /** Choose the carrier/wholesaler a statement belongs to when it could not be matched automatically. */
 export const setStatementPayer = onCall(async (req) => {

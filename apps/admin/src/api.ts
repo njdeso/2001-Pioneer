@@ -1,6 +1,6 @@
 import type { AiDiagnosis, DuplicateFinding, LineMatch, MatchSummary, PostingPlan, StatementClassification } from '@asm/shared';
 import { httpsCallable } from 'firebase/functions';
-import { classifyProbe, describeCallableError, PROBE_SAFE_FUNCTIONS, type ProbeResult, type BrokerAdvanceInput, type ParsedAdvanceRow } from '@asm/shared';
+import { classifyProbe, describeCallableError, PROBE_SAFE_FUNCTIONS, type ProbeResult, type BrokerAdvanceInput, type ParsedAdvanceRow, type ManualDraft } from '@asm/shared';
 
 export type AdvanceForm = BrokerAdvanceInput;
 import type {
@@ -122,6 +122,10 @@ export const api = {
   processStatement: (statementId: string, method: 'auto' | 'ai' = 'auto') =>
     call<{ statementId: string; method: string }, { status: string; reconciled?: boolean; lines?: number; possibleDuplicateOf?: string | null; failure?: StatementFailure }>(
       'processStatement', { statementId, method }, 540_000),
+  /** Manual reconciliation (same function as reading): save unfinished work, or apply keyed / corrected lines. */
+  manualStatement: (statementId: string, action: 'save_draft' | 'apply', draft: ManualDraft) =>
+    call<{ statementId: string; method: 'manual'; action: string; draft: ManualDraft }, { status: string; saved?: boolean; reconciled?: boolean; lines?: number; possibleDuplicateOf?: string | null }>(
+      'processStatement', { statementId, method: 'manual', action, draft }, 120_000),
   setStatementPayer: (statementId: string, payerId: string) =>
     call<{ statementId: string; payerId: string }, { ok: true }>('setStatementPayer', { statementId, payerId }),
   discardStatement: (statementId: string, reason: string) =>
