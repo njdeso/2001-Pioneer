@@ -119,7 +119,7 @@ export const api = {
   registerStatementUpload: (fileName: string, sha256: string, size: number) =>
     call<{ fileName: string; sha256: string; size: number }, { duplicate: true; statementId: string } | { duplicate: false; resumed?: boolean; statementId: string; uploadPath: string }>(
       'registerStatementUpload', { fileName, sha256, size }),
-  processStatement: (statementId: string, method: 'auto' | 'ai' = 'auto') =>
+  processStatement: (statementId: string, method: 'auto' | 'ai' | 'prepare_manual' = 'auto') =>
     call<{ statementId: string; method: string }, { status: string; reconciled?: boolean; lines?: number; possibleDuplicateOf?: string | null; failure?: StatementFailure }>(
       'processStatement', { statementId, method }, 540_000),
   /** Manual reconciliation (same function as reading): save unfinished work, or apply keyed / corrected lines. */

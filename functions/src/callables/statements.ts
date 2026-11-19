@@ -284,7 +284,7 @@ async function resolvePayer(s: ExtractedStatement, fileName: string): Promise<{ 
   return { payerId: null, note: `No carrier set up for "${s.carrierName}"${code ? ` / agency code ${code}` : ''}; add it or choose one on the review screen`, suggestion: null };
 }
 
-async function claimForProcessing(id: string, actor: Actor): Promise<DocumentData> {
+async function claimForProcessing(id: string, actor: Actor, prepareManual = false): Promise<DocumentData> {
   return db.runTransaction(async (tx) => {
     const ref = db.collection('statements').doc(id);
     const snap = await tx.get(ref);
@@ -292,6 +292,9 @@ async function claimForProcessing(id: string, actor: Actor): Promise<DocumentDat
     const status = snap.get('status');
     const updatedMs = (snap.get('updatedAt') as { toMillis?: () => number } | undefined)?.toMillis?.() ?? 0;
     const abandoned = status === 'processing' && Date.now() - updatedMs > STALE_PROCESSING_MS;
+    if (prepareManual && status !== 'awaiting_upload' && !abandoned) {
+      throw new HttpsError('failed-precondition', 'Open the existing statement to enter or correct its lines.');
+    }
     if (!abandoned && !['awaiting_upload', 'extraction_failed', 'needs_review', 'discrepancy'].includes(status)) {
       throw new HttpsError('failed-precondition', `This statement is ${status}.`);
     }
@@ -379,7 +382,7 @@ async function storeReadStatement(a: {
   return { status: rec.reconciled ? 'needs_review' : 'discrepancy', reconciled: rec.reconciled, lines: s.lines.length, possibleDuplicateOf };
 }
 
-const processInput = z.object({ statementId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), method: z.enum(['auto', 'ai']).default('auto') });
+const processInput = z.object({ statementId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/), method: z.enum(['auto', 'ai', 'prepare_manual']).default('auto') });
 
 /** Step 2: verify the uploaded file, preserve it, extract, validate and reconcile. */
 export const processStatement = onCall(
@@ -390,7 +393,7 @@ export const processStatement = onCall(
     // or apply keyed / corrected lines. It never calls the AI reader.
     if ((req.data as { method?: unknown } | null)?.method === MANUAL_METHOD) return processManual(actor, req.data);
     const { statementId, method: force } = parse(processInput, req.data);
-    const doc = await claimForProcessing(statementId, actor);
+    const doc = await claimForProcessing(statementId, actor, force === 'prepare_manual');
     const ref = db.collection('statements').doc(statementId);
     const started = Date.now();
     const bucket = getStorage().bucket();
@@ -436,6 +439,18 @@ export const processStatement = onCall(
       }
 
       // ---- Extract ----
+      if (force === 'prepare_manual') {
+        // Use the existing unread state to keep approval and posting blocked until entry is complete.
+        const b = db.batch();
+        b.update(ref, {
+          status: 'extraction_failed',
+          failure: { code: 'manual_entry_pending', message: 'Original saved. Enter the statement lines and printed totals below.' },
+          ...meta(actor, false),
+        });
+        audit(b, actor, { action: 'manual_entry_prepared', entityType: 'statement', entityId: statementId, summary: 'Original saved for manual entry' });
+        await b.commit();
+        return { status: 'manual_entry_pending' };
+      }
       const out = await extract(buf, type, String(doc.fileName), force);
       const runBase = { statementId, method: out.method, model: out.model, promptVersion: out.method === TRAVELERS_PL_PARSER || out.method === DETAILED_STATEMENT_READER ? null : AI_PROMPT_VERSION, attempts: out.attempts, usage: out.usage };
       if (out.failure || !out.statement) return await fail(out.failure?.code ?? 'unknown', out.failure?.message ?? 'Extraction failed.', runBase, out.failure ?? {});
