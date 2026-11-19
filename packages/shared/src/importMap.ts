@@ -309,7 +309,7 @@ export function similarity(a: string, b: string): number {
 }
 
 export const importOptionsInput = z.object({
-  defaultLine: z.enum(['personal', 'commercial']).default('commercial'),
+  defaultLine: z.enum(['personal', 'commercial']).default('personal'),
   defaultBrokerId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).default('UNASSIGNED'),
   updateExisting: z.boolean().default(true),
   updateBrokerOnExisting: z.boolean().default(false),
