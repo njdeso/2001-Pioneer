@@ -16,11 +16,13 @@ export type LobDecision = Line | 'review';
 export interface LobResult {
   /** null = cannot tell; the policy must be reviewed by a person. */
   line: Line | null;
-  basis: 'override' | 'rule' | 'none';
+  basis: 'override' | 'rule' | 'none' | 'evidence';
   /** Plain-language reason, shown in previews and import warnings. */
   reason: string;
   /** The phrases that decided it (for the preview's LOB table). */
   matched: string[];
+  /** Spelling/abbreviation corrections made before matching, e.g. "homowners → homeowners". Shown in the preview. */
+  corrections: string[];
 }
 
 /** Lower-case, "&" → "and", punctuation → spaces, single-spaced. "Business-Owners (BOP)" → "business owners bop". */
@@ -82,12 +84,84 @@ const AMBIGUOUS: string[] = [
   'annuity', 'travel', 'pet', 'other', 'misc', 'miscellaneous', 'unknown', 'n a', 'na', 'none', 'tbd',
 ];
 
+/**
+ * Common abbreviations, applied as whole words to the normalized text before matching (longest first).
+ * Expanding only makes text MORE explicit: an abbreviation that is itself ambiguous expands to an ambiguous word.
+ */
+const ABBREVIATIONS: [string, string][] = ([
+  ['gen l', 'general'], ['genl', 'general'], ['gen liab', 'general liability'], ['gen liability', 'general liability'],
+  ['liab', 'liability'], ['lia', 'liability'],
+  ['coml', 'commercial'], ['comml', 'commercial'], ['cml', 'commercial'], ['comm', 'commercial'], ['commrcl', 'commercial'], ['comrcl', 'commercial'],
+  ['persnl', 'personal'], ['prsnl', 'personal'], ['pers', 'personal'],
+  ['h o', 'homeowners'], ['hmeowners', 'homeowners'],
+  ['pvt pass', 'private passenger'], ['priv pass', 'private passenger'], ['pvt passenger', 'private passenger'], ['priv passenger', 'private passenger'],
+  ['bus auto', 'business auto'], ['bus', 'business'],
+  ['wkrs comp', 'workers comp'], ['wrkrs comp', 'workers comp'], ['wkr comp', 'workers comp'], ['w c', 'workers comp'], ['workers comp comp', 'workers comp'],
+  ['umb', 'umbrella'], ['umbr', 'umbrella'], ['umbrl', 'umbrella'],
+  ['dwel', 'dwelling'], ['dwell', 'dwelling'],
+  ['prof liab', 'professional liability'], ['prof', 'professional'],
+  ['empl prac', 'employment practices'], ['emp prac', 'employment practices'],
+  ['pkg', 'package'], ['prop', 'property'], ['inland mar', 'inland marine'],
+] as [string, string][]).sort((a, b) => b[0].length - a[0].length);
+
+function expandAbbreviations(text: string, corrections: string[]): string {
+  let out = ` ${text} `;
+  for (const [abbr, full] of ABBREVIATIONS) {
+    const needle = ` ${abbr} `;
+    if (!out.includes(needle)) continue;
+    // Don't re-expand a word that is already the full form (e.g. "general liability" contains no "genl").
+    while (out.includes(needle)) out = out.replace(needle, ` ${full} `);
+    corrections.push(`${abbr} → ${full}`);
+  }
+  return out.trim();
+}
+
+/** Damerau–Levenshtein (optimal string alignment) distance. */
+function editDistance(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length];
+}
+
 type Entry = { phrase: string; cls: Line | 'ambiguous' };
 const ENTRIES: Entry[] = [
   ...COMMERCIAL.map((phrase) => ({ phrase, cls: 'commercial' as const })),
   ...PERSONAL.map((phrase) => ({ phrase, cls: 'personal' as const })),
   ...AMBIGUOUS.map((phrase) => ({ phrase, cls: 'ambiguous' as const })),
 ].sort((a, b) => b.phrase.length - a.phrase.length || a.phrase.localeCompare(b.phrase));
+
+/** Every word in the rule phrases, for spelling correction. */
+const VOCAB = new Set(ENTRIES.flatMap((e) => e.phrase.split(' ')));
+const FUZZY_TARGETS = [...VOCAB].filter((w) => w.length >= 6 && /^[a-z]+$/.test(w));
+
+/**
+ * Correct an obvious misspelling of a rule word (e.g. "homowners", "liabilty", "commerical"). Cautious:
+ * only words of 6+ letters, same first letter, 1 edit away (2 when both words are 9+ letters), and only
+ * when exactly one rule word is that close. Anything else is left as typed.
+ */
+function correctSpelling(text: string, corrections: string[]): string {
+  return text.split(' ').map((w) => {
+    if (w.length < 6 || VOCAB.has(w) || !/^[a-z]+$/.test(w)) return w;
+    let best: string[] = [];
+    let bestD = Infinity;
+    for (const t of FUZZY_TARGETS) {
+      if (t[0] !== w[0] || Math.abs(t.length - w.length) > 2) continue;
+      const limit = w.length >= 9 && t.length >= 9 ? 2 : 1;
+      const dist = editDistance(w, t);
+      if (dist > limit) continue;
+      if (dist < bestD) { bestD = dist; best = [t]; } else if (dist === bestD) best.push(t);
+    }
+    if (best.length !== 1) return w;
+    corrections.push(`${w} → ${best[0]}`);
+    return best[0];
+  }).join(' ');
+}
 
 /**
  * Reviewed per-value decisions, keyed by normalized line of business. They win over the built-in rules,
@@ -97,13 +171,16 @@ export type LobOverrides = Readonly<Record<string, LobDecision>>;
 
 export function classifyLineOfBusiness(raw: unknown, overrides: LobOverrides = {}): LobResult {
   const text = normalizeLob(raw);
-  if (!text) return { line: null, basis: 'none', reason: 'Line of business is blank', matched: [] };
+  const corrections: string[] = [];
+  if (!text) return { line: null, basis: 'none', reason: 'Line of business is blank', matched: [], corrections };
 
   const ov = overrides[text];
-  if (ov === 'personal' || ov === 'commercial') return { line: ov, basis: 'override', reason: `Reviewed decision for "${text}"`, matched: [text] };
-  if (ov === 'review') return { line: null, basis: 'override', reason: `Marked for manual review: "${text}"`, matched: [text] };
+  if (ov === 'personal' || ov === 'commercial') return { line: ov, basis: 'override', reason: `Reviewed decision for "${text}"`, matched: [text], corrections };
+  if (ov === 'review') return { line: null, basis: 'override', reason: `Marked for manual review: "${text}"`, matched: [text], corrections };
 
-  let rest = ` ${text} `;
+  const fixed = correctSpelling(expandAbbreviations(text, corrections), corrections);
+  const note = corrections.length ? ` [read as "${fixed}": ${corrections.join(', ')}]` : '';
+  let rest = ` ${fixed} `;
   const hits: Record<Line | 'ambiguous', string[]> = { personal: [], commercial: [], ambiguous: [] };
   for (const e of ENTRIES) {
     const needle = ` ${e.phrase} `;
@@ -115,12 +192,12 @@ export function classifyLineOfBusiness(raw: unknown, overrides: LobOverrides = {
   const p = hits.personal.length > 0;
   const c = hits.commercial.length > 0;
   if (p && c) {
-    return { line: null, basis: 'none', reason: `Conflicting terms: personal (${hits.personal.join(', ')}) and commercial (${hits.commercial.join(', ')})`, matched: [...hits.personal, ...hits.commercial] };
+    return { line: null, basis: 'none', reason: `Conflicting terms: personal (${hits.personal.join(', ')}) and commercial (${hits.commercial.join(', ')})${note}`, matched: [...hits.personal, ...hits.commercial], corrections };
   }
-  if (p) return { line: 'personal', basis: 'rule', reason: `Personal line of business (${hits.personal.join(', ')})`, matched: hits.personal };
-  if (c) return { line: 'commercial', basis: 'rule', reason: `Commercial line of business (${hits.commercial.join(', ')})`, matched: hits.commercial };
-  if (hits.ambiguous.length) return { line: null, basis: 'none', reason: `Could be personal or commercial (${hits.ambiguous.join(', ')})`, matched: hits.ambiguous };
-  return { line: null, basis: 'none', reason: `Line of business not recognized: "${text}"`, matched: [] };
+  if (p) return { line: 'personal', basis: 'rule', reason: `Personal line of business (${hits.personal.join(', ')})${note}`, matched: hits.personal, corrections };
+  if (c) return { line: 'commercial', basis: 'rule', reason: `Commercial line of business (${hits.commercial.join(', ')})${note}`, matched: hits.commercial, corrections };
+  if (hits.ambiguous.length) return { line: null, basis: 'none', reason: `Could be personal or commercial (${hits.ambiguous.join(', ')})${note}`, matched: hits.ambiguous, corrections };
+  return { line: null, basis: 'none', reason: `Line of business not recognized: "${text}"${note}`, matched: [], corrections };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -133,11 +210,67 @@ export const CORRECTION_FIELDS = { clients: 'classification', policies: 'line' }
 export interface CorrectionClientIn { id: string; name: string; classification: unknown; updateTime: string }
 export interface CorrectionPolicyIn {
   id: string; clientId: unknown; policyNumber: string; policyType: unknown; line: unknown; status: unknown; updateTime: string;
+  /** Optional, used only as evidence for an ambiguous line of business. */
+  namedInsured?: unknown; carrierId?: unknown; wholesalerId?: unknown;
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Evidence for policies whose line of business is ambiguous (e.g. "Auto")
+// ---------------------------------------------------------------------------------------------------------
+
+/**
+ * Kinds of evidence, most reliable first. Applied only when the owner accepts that kind (`acceptEvidence`):
+ *  - statement_classification: the policy's matched lines are on a statement YOU classified Personal Lines /
+ *    Commercial Lines (duplicate check).
+ *  - statement_section: the carrier printed the line inside a section whose label says Personal/Commercial
+ *    (e.g. "PERSONAL AUTO" subtotal).
+ *  - statement_title: the carrier's statement title says Personal/Commercial (e.g. "Personal Lines Statement").
+ *  - entity_name: the named insured or client name is a business entity (LLC, Inc, Corp…) → Commercial only.
+ *  - policy_number_pattern: at the same carrier, every one of ≥10 policies with the same number pattern and a
+ *    clear line of business is one type.
+ * Never used as evidence: the policy's current Personal/Commercial value and the client's classification
+ * (they are what is being corrected), and the client's other policies (a business owner can have a
+ * personal home and a commercial auto) — the latter is shown for information only.
+ */
+export const EVIDENCE_KINDS = ['statement_classification', 'statement_section', 'statement_title', 'entity_name', 'policy_number_pattern'] as const;
+export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
+export const DEFAULT_EVIDENCE: readonly EvidenceKind[] = ['statement_classification', 'statement_section', 'statement_title'];
+export const EVIDENCE_LABELS: Record<EvidenceKind, string> = {
+  statement_classification: 'statement you classified',
+  statement_section: 'carrier statement section',
+  statement_title: 'carrier statement title',
+  entity_name: 'business-entity name',
+  policy_number_pattern: 'policy-number pattern at the carrier',
+};
+
+export interface EvidenceSignal { kind: EvidenceKind; line: Line; detail: string }
+/** Statement evidence gathered by the script from matched statement lines (the planner adds the rest). */
+export type StatementEvidence = ReadonlyMap<string, EvidenceSignal[]>;
+
+const ENTITY = /(^| )(llc|l l c|inc|incorporated|corp|corporation|ltd|llp|l l p|pllc|lp|dba|d b a)( |$)/;
+/** Business-entity name → Commercial evidence. Individuals, trusts and estates give no signal. */
+export function entityNameSignal(...names: unknown[]): EvidenceSignal | null {
+  for (const n of names) {
+    const t = normalizeLob(n);
+    const m = t.match(ENTITY);
+    if (m) return { kind: 'entity_name', line: 'commercial', detail: `name "${String(n).trim()}" is a business entity (${m[2]})` };
+  }
+  return null;
+}
+
+/** Shape of a policy number for pattern evidence: leading letters ("BA"), else first digit + length ("6/10"). */
+export function policyNumberShape(raw: unknown): string | null {
+  const n = String(raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (n.length < 4) return null;
+  const letters = n.match(/^[A-Z]+/)?.[0];
+  return letters ? `${letters}…` : `${n[0]}… (${n.length} digits/letters)`;
+}
+export const PATTERN_MIN = 10;
 
 export type ExceptionCode =
   | 'policy_lob_blank'
   | 'policy_lob_review'
+  | 'policy_evidence_conflict'
   | 'policy_client_missing'
   | 'client_no_policies'
   | 'client_has_review_policies'
@@ -155,6 +288,12 @@ export interface PolicyDecision {
   id: string; clientId: string; policyNumber: string; status: string; lob: string; lobNormalized: string;
   current: string | null; target: Line | null; action: 'change' | 'unchanged' | 'review';
   basis: LobResult['basis']; reason: string; updateTime: string;
+  /** Ambiguous line of business only: every evidence signal found (accepted or not). */
+  evidence?: EvidenceSignal[];
+  /** Ambiguous line of business only: the client's other policies with a clear line (information only). */
+  siblings?: { personal: number; commercial: number };
+  /** Clear line of business that statement evidence contradicts (reported; the line of business still decides). */
+  crossCheck?: string;
 }
 
 export interface ClientDecision {
@@ -168,6 +307,10 @@ export interface LobSummaryRow {
   decision: Line | 'review'; basis: LobResult['basis']; reason: string;
   /** How many of these policies the correction changes. */
   changes: number;
+  /** Spelling/abbreviation corrections used to read this value. */
+  corrections: string[];
+  /** Ambiguous values: how many of its policies evidence resolved (→ Personal / → Commercial) or left for review. */
+  evidence?: { personal: number; commercial: number; conflict: number; none: number };
 }
 
 export interface CorrectionPlan {
@@ -182,6 +325,21 @@ export interface CorrectionPlan {
     policiesUnchanged: number; policiesReview: number;
     policiesByStatus: Record<string, { total: number; change: number; review: number }>;
     exceptionsByCode: Partial<Record<ExceptionCode, number>>;
+    evidence: {
+      accepted: EvidenceKind[];
+      /** Policies whose line of business alone could not decide. */
+      ambiguousPolicies: number;
+      resolvedPersonal: number;
+      resolvedCommercial: number;
+      conflicting: number;
+      noAcceptedEvidence: number;
+      /** Of the unresolved: how many have a signal of a kind you have NOT accepted (what accepting it would add). */
+      availableNotAccepted: Partial<Record<EvidenceKind, { personal: number; commercial: number }>>;
+      /** Policies with a clear line of business that statement evidence contradicts (reported, not changed). */
+      lobStatementDisagreements: number;
+      /** Policies read using a spelling/abbreviation correction. */
+      spellingCorrected: number;
+    };
   };
 }
 
@@ -199,33 +357,108 @@ export function planLineCorrection(input: {
   clients: CorrectionClientIn[];
   policies: CorrectionPolicyIn[];
   overrides?: LobOverrides;
+  /** Statement evidence per policy id (from matched statement lines). */
+  statementEvidence?: StatementEvidence;
+  /** Evidence kinds the owner accepts for ambiguous lines of business. Default: none (line of business only). */
+  acceptEvidence?: readonly EvidenceKind[];
 }): CorrectionPlan {
   const overrides = input.overrides ?? {};
+  const accept = new Set(input.acceptEvidence ?? []);
+  const stmtEv = input.statementEvidence ?? new Map<string, EvidenceSignal[]>();
   const exceptions: CorrectionException[] = [];
   const clientIds = new Set(input.clients.map((c) => c.id));
+  const clientName = new Map(input.clients.map((c) => [c.id, c.name]));
   const lobRows = new Map<string, LobSummaryRow>();
+  const sorted = [...input.policies].sort((a, b) => a.id.localeCompare(b.id));
+  const lobOf = new Map(sorted.map((p) => [p.id, classifyLineOfBusiness(str(p.policyType), overrides)]));
 
-  const policies: PolicyDecision[] = [...input.policies].sort((a, b) => a.id.localeCompare(b.id)).map((p) => {
+  // Policy-number patterns among policies whose line of business is clear: carrier + shape → counts.
+  const patterns = new Map<string, { personal: number; commercial: number }>();
+  const patternKey = (p: CorrectionPolicyIn) => { const sh = policyNumberShape(p.policyNumber); const k = str(p.carrierId); return sh && k ? `${k}|${sh}` : null; };
+  for (const p of sorted) {
+    const r = lobOf.get(p.id)!; const k = patternKey(p);
+    if (!k || !r.line || r.basis === 'override') continue;
+    const c = patterns.get(k) ?? { personal: 0, commercial: 0 };
+    c[r.line]++; patterns.set(k, c);
+  }
+  // Client's other policies with a clear line of business (information only).
+  const clearByClient = new Map<string, { personal: number; commercial: number }>();
+  for (const p of sorted) {
+    const r = lobOf.get(p.id)!;
+    if (!r.line) continue;
+    const c = clearByClient.get(str(p.clientId)) ?? { personal: 0, commercial: 0 };
+    c[r.line]++; clearByClient.set(str(p.clientId), c);
+  }
+  const ev = { ambiguousPolicies: 0, resolvedPersonal: 0, resolvedCommercial: 0, conflicting: 0, noAcceptedEvidence: 0, lobStatementDisagreements: 0, spellingCorrected: 0 };
+  const available: CorrectionPlan['counts']['evidence']['availableNotAccepted'] = {};
+  const L = (v: Line) => (v === 'personal' ? 'Personal' : 'Commercial');
+
+  const policies: PolicyDecision[] = sorted.map((p) => {
     const lob = str(p.policyType);
     const lobNormalized = normalizeLob(lob);
-    const r = classifyLineOfBusiness(lob, overrides);
+    let r = lobOf.get(p.id)!;
+    if (r.corrections.length) ev.spellingCorrected++;
+    let evidence: EvidenceSignal[] | undefined;
+    let siblings: PolicyDecision['siblings'];
+    let crossCheck: string | undefined;
+    let evOutcome: 'personal' | 'commercial' | 'conflict' | 'none' | null = null;
+    const stmt = stmtEv.get(p.id) ?? [];
+    if (r.line) {
+      const against = stmt.filter((x) => x.line !== r.line);
+      if (against.length) { ev.lobStatementDisagreements++; crossCheck = `line of business says ${L(r.line)}, but ${against.map((x) => x.detail).join('; ')}`; }
+    } else if (r.basis !== 'override') {
+      // Ambiguous/blank line of business (not one the owner marked "review"): look for evidence.
+      ev.ambiguousPolicies++;
+      const others = clearByClient.get(str(p.clientId)) ?? { personal: 0, commercial: 0 };
+      siblings = others;
+      evidence = [...stmt];
+      const ent = entityNameSignal(p.namedInsured, clientName.get(str(p.clientId)));
+      if (ent) evidence.push(ent);
+      const k = patternKey(p);
+      const pc = k ? patterns.get(k) : undefined;
+      if (pc && pc.personal + pc.commercial >= PATTERN_MIN && (pc.personal === 0 || pc.commercial === 0)) {
+        const line: Line = pc.personal ? 'personal' : 'commercial';
+        evidence.push({ kind: 'policy_number_pattern', line, detail: `all ${pc.personal + pc.commercial} policies numbered ${policyNumberShape(p.policyNumber)} at this carrier with a clear line of business are ${L(line)}` });
+      }
+      const used = evidence.filter((x) => accept.has(x.kind));
+      const lines = new Set(used.map((x) => x.line));
+      const contradicted = evidence.some((x) => used.length && x.line !== used[0].line);
+      if (!used.length) {
+        evOutcome = 'none';
+        ev.noAcceptedEvidence++;
+        for (const x of evidence) { const a = (available[x.kind] ??= { personal: 0, commercial: 0 }); a[x.line]++; }
+      } else if (lines.size > 1 || contradicted) {
+        evOutcome = 'conflict';
+        ev.conflicting++;
+        r = { ...r, reason: `${r.reason}; evidence conflicts: ${evidence.map((x) => `${L(x.line)} (${x.detail})`).join('; ')}` };
+      } else {
+        const line = used[0].line;
+        evOutcome = line;
+        if (line === 'personal') ev.resolvedPersonal++; else ev.resolvedCommercial++;
+        r = { ...r, line, basis: 'evidence', reason: `${r.reason}; decided by evidence: ${used.map((x) => `${EVIDENCE_LABELS[x.kind]} — ${x.detail}`).join('; ')}` };
+      }
+    }
     const current = isLine(p.line) ? p.line : p.line == null ? null : str(p.line);
     const clientId = str(p.clientId);
     const action: PolicyDecision['action'] = r.line === null ? 'review' : r.line === current ? 'unchanged' : 'change';
     const d: PolicyDecision = {
       id: p.id, clientId, policyNumber: str(p.policyNumber), status: str(p.status) || 'active', lob, lobNormalized,
       current, target: r.line, action, basis: r.basis, reason: r.reason, updateTime: p.updateTime,
+      ...(evidence ? { evidence, siblings } : {}), ...(crossCheck ? { crossCheck } : {}),
     };
     if (r.line === null) {
-      exceptions.push({ code: lobNormalized ? 'policy_lob_review' : 'policy_lob_blank', entityType: 'policy', id: p.id, clientId: clientId || null, detail: r.reason });
+      const code: ExceptionCode = evOutcome === 'conflict' ? 'policy_evidence_conflict' : lobNormalized ? 'policy_lob_review' : 'policy_lob_blank';
+      exceptions.push({ code, entityType: 'policy', id: p.id, clientId: clientId || null, detail: r.reason });
     }
     if (!clientId || !clientIds.has(clientId)) {
       exceptions.push({ code: 'policy_client_missing', entityType: 'policy', id: p.id, clientId: clientId || null, detail: `Client ${clientId || '(none)'} not found` });
     }
     const key = lobNormalized || '(blank)';
-    const row = lobRows.get(key) ?? { lobNormalized: key, examples: [], policies: 0, decision: r.line ?? 'review', basis: r.basis, reason: r.reason, changes: 0 };
+    const lr = lobOf.get(p.id)!;
+    const row = lobRows.get(key) ?? { lobNormalized: key, examples: [], policies: 0, decision: lr.line ?? 'review', basis: lr.basis, reason: lr.reason, changes: 0, corrections: lr.corrections };
     row.policies++;
     if (action === 'change') row.changes++;
+    if (evOutcome) { const e = (row.evidence ??= { personal: 0, commercial: 0, conflict: 0, none: 0 }); e[evOutcome]++; }
     if (row.examples.length < 3 && lob.trim() && !row.examples.includes(lob.trim())) row.examples.push(lob.trim());
     lobRows.set(key, row);
     return d;
@@ -297,6 +530,7 @@ export function planLineCorrection(input: {
       policiesReview: n(policies, (p) => p.action === 'review'),
       policiesByStatus,
       exceptionsByCode,
+      evidence: { accepted: EVIDENCE_KINDS.filter((k) => accept.has(k)), ...ev, availableNotAccepted: available },
     },
   };
 }

@@ -31,10 +31,13 @@ function fakeFirestore() {
     const reply = (status, json) => ({ ok: status < 300, status, json: async () => json });
     const u = new URL(url);
     const p = decodeURIComponent(u.pathname).replace(`/v1/${ROOT}`, '');
-    if (p === ':runQuery') {
+    const rq = p.match(/^(?:\/(.+))?:runQuery$/);
+    if (rq) {
       const q = body.structuredQuery;
       const col = q.from[0].collectionId;
-      let names = [...docs.keys()].filter((k) => k.split('/').length === 2 && k.startsWith(`${col}/`)).sort();
+      const prefix = rq[1] ? `${rq[1]}/${col}/` : `${col}/`;
+      const depth = prefix.split('/').length;
+      let names = [...docs.keys()].filter((k) => k.split('/').length === depth && k.startsWith(prefix)).sort();
       if (q.startAt) names = names.filter((n) => `${ROOT}/${n}` > q.startAt.values[0].referenceValue);
       return reply(200, names.slice(0, q.limit).map((n) => ({ document: asDoc(n) })));
     }
@@ -279,4 +282,66 @@ test('an apply that stops part-way still records exactly what changed, and rollb
   h.setAnswer(`ROLLBACK 4 ${PROJECT}`);
   assert.equal(await h.run('rollback', dir), 0, h.logs.join('\n'));
   for (const a of result.applied) assert.equal(h.fs.val(`${a.collection}/${a.id}`, a.field), a.before);
+});
+
+
+test('statement evidence decides ambiguous Auto policies only when it is consistent; all of it is reported', async () => {
+  const h = harness();
+  const P = (id, clientId, policyType, extra = {}) => h.fs.put(`policies/${id}`, { clientId, policyNumber: `PN-${id}`, policyType, line: 'commercial', status: 'active', carrierId: 'TRAV', brokerId: 'BRK-SECRET', namedInsured: '', ...extra });
+  h.fs.put('clients/pa', { name: 'Pat Auto', classification: 'commercial', brokerId: 'BRK-SECRET' });
+  P('au1', 'pa', 'Auto');
+  h.fs.put('clients/ca', { name: 'Example Hauling LLC', classification: 'personal', brokerId: 'BRK-SECRET' });
+  P('au2', 'ca', 'Auto');
+  h.fs.put('clients/cf', { name: 'Chris Conflict', classification: 'commercial', brokerId: 'BRK-SECRET' });
+  P('au3', 'cf', 'Auto');
+  h.fs.put('clients/nn', { name: 'Nora None', classification: 'commercial', brokerId: 'BRK-SECRET' });
+  P('au4', 'nn', 'Auto');
+  h.fs.put('clients/sp', { name: 'Sam Spelling', classification: 'commercial', brokerId: 'BRK-SECRET' });
+  P('sp1', 'sp', 'Homowners'); P('sp2', 'sp', 'Genl Liability');
+  // Statements: a Personal Lines statement (owner-classified), a carrier statement with a COMMERCIAL AUTO section, a discarded one.
+  h.fs.put('statements/S1', { classification: 'personal', title: 'Agency Statement', status: 'posted' });
+  h.fs.put('statements/S1/lines/l1', { section: '', match: { status: 'matched', policyId: 'au1' } });
+  h.fs.put('statements/S1/lines/l2', { section: '', match: { status: 'matched', policyId: 'au3' } });
+  h.fs.put('statements/S1/lines/l3', { section: '', match: { status: 'ambiguous', policyId: 'au4' } });
+  h.fs.put('statements/S2', { classification: null, title: 'Monthly Commission', status: 'needs_review' });
+  h.fs.put('statements/S2/lines/l1', { section: 'COMMERCIAL AUTO', match: { status: 'matched', policyId: 'au2' } });
+  h.fs.put('statements/S2/lines/l2', { section: 'COMMERCIAL AUTO', match: { status: 'matched', policyId: 'au3' } });
+  h.fs.put('statements/S3', { classification: 'personal', title: '', status: 'discarded' });
+  h.fs.put('statements/S3/lines/l1', { section: '', match: { status: 'matched', policyId: 'au4' } });
+
+  const before = JSON.stringify([...h.fs.docs]);
+  assert.equal(await h.run('preview', '--project', PROJECT), 0, h.logs.join('\n'));
+  assert.equal(JSON.stringify([...h.fs.docs]), before, 'still read-only');
+  const dir = join(h.cwd, previewDir(h.cwd));
+  const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
+  assert.deepEqual(plan.evidenceAccepted, ['statement_classification', 'statement_section', 'statement_title']);
+  const ch = new Map(plan.changes.map((c) => [`${c.collection}/${c.id}`, c.after]));
+  assert.equal(ch.get('policies/au1'), 'personal', 'Personal Lines statement');
+  assert.equal(ch.get('clients/pa'), 'personal');
+  assert.equal(ch.get('policies/au2'), undefined, 'already commercial: unchanged');
+  assert.equal(ch.get('clients/ca'), 'commercial', 'COMMERCIAL AUTO section');
+  assert.equal(ch.has('policies/au3'), false, 'Personal Lines statement AND Commercial Auto section: conflict');
+  assert.equal(ch.has('policies/au4'), false, 'only an unconfirmed match and a discarded statement: no evidence');
+  assert.equal(ch.get('policies/sp1'), 'personal', 'Homowners');
+  assert.equal(ch.has('policies/sp2'), false, 'Genl Liability is already commercial');
+  assert.equal(ch.has('clients/sp'), false, 'mixed client kept');
+  const e = plan.counts.evidence;
+  assert.equal(e.resolvedPersonal, 1); assert.equal(e.resolvedCommercial, 1); assert.equal(e.conflicting, 1);
+  assert.ok(e.noAcceptedEvidence >= 1);
+  assert.deepEqual(e.availableNotAccepted.entity_name, undefined, 'the LLC client was decided by statement evidence');
+  const evCsv = readFileSync(join(dir, 'evidence-review.csv'), 'utf8');
+  assert.match(evCsv, /you classified Personal Lines/);
+  assert.match(evCsv, /carrier section ""COMMERCIAL AUTO""/);
+  assert.ok(!/BRK-SECRET|brokerId/.test(evCsv));
+  const md = readFileSync(join(dir, 'preview.md'), 'utf8');
+  assert.match(md, /Ambiguous lines of business — evidence/);
+  assert.match(md, /\| Homowners \| homowners → homeowners \|/);
+  assert.match(md, /\| Genl Liability \| genl → general \|/);
+
+  // Without evidence nothing ambiguous is decided, and the plan hash differs.
+  assert.equal(await h.run('preview', '--project', PROJECT, '--evidence', 'none'), 0);
+  const plan2 = JSON.parse(readFileSync(join(h.cwd, previewDir(h.cwd), 'plan.json'), 'utf8'));
+  assert.equal(plan2.changes.some((c) => c.id === 'au1'), false);
+  assert.notEqual(plan2.planHash, plan.planHash);
+  assert.equal(await h.run('preview', '--project', PROJECT, '--evidence', 'guesswork'), 1);
 });

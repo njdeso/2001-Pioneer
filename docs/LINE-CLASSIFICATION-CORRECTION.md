@@ -24,8 +24,35 @@ without reading the line of business. Do not run `scripts/prod-client-classifica
 | BOP, Businessowners, Commercial…, CPP, GL / CGL, Workers Comp / WC, NYS DBL, PFL, Business / Commercial Auto, Garage, Builders Risk, E&O, D&O, EPLI, Cyber, Bonds, Condo / Homeowners **Association**, Home-based business, Apartment building | **Commercial** |
 | Auto, Umbrella, Excess, Flood, Inland Marine, Property, Liability, Package, Landlord, Life, Fire, blank, unknown, or words of both kinds (e.g. "Home Improvement Contractor") | **Manual review**: never changed |
 
+**Spelling and abbreviations.** These are read before matching, and every correction is listed in the preview:
+
+- **Abbreviations:** Genl/Gen'l/Gen → General, Liab → Liability, Comm/Coml/Cml → Commercial, Pers → Personal,
+  H/O → Homeowners, Pvt Pass → Private Passenger, Bus Auto → Business Auto, Wkrs Comp / W/C → Workers Comp,
+  Umb → Umbrella, Dwell → Dwelling, Prof → Professional.
+- **Typos** such as Homowners → Homeowners. A word is corrected only if it is 6+ letters, starts with the same
+  letter, is one letter off (two for long words), and matches exactly one known word. Anything else stays as
+  typed (e.g. "Personnel", "Trust", "Contracts").
+
+**Evidence for ambiguous lines of business** (e.g. a bare "Auto"). It is used only for policies whose line of
+business doesn't decide, and only when every signal found agrees. Any contradicting signal keeps the policy
+unchanged, even a signal of a kind you didn't accept.
+
+| Evidence | Source | Used |
+|---|---|---|
+| Statement classification | Matched lines on a statement **you** marked Personal Lines / Commercial Lines (duplicate check) | default |
+| Statement section | The carrier printed the line under a section such as "PERSONAL AUTO" / "COMMERCIAL AUTO" | default |
+| Statement title | The carrier's title says Personal/Commercial (e.g. "Personal Lines Statement") | default |
+| Business-entity name | Named insured or client is an LLC, Inc, Corp, Ltd, LLP, PLLC, LP or DBA → Commercial only | opt-in: `--evidence statement,entity_name` |
+| Policy-number pattern | At the same carrier, all of ≥10 policies with the same number pattern and a clear line of business are one type | opt-in: `--evidence statement,policy_number_pattern` |
+| Client's other policies | Shown for information only | **never** (a business owner can have a personal home and a commercial auto) |
+
+Only confirmed matches count (`matched`, not suggested/ambiguous), and discarded statements are ignored. These are
+**never** evidence: the policy's current Personal/Commercial value, the client's classification (both are what's
+being corrected), commission rates and premiums. `--evidence none` uses the line of business only. The accepted
+kinds are sealed into the plan hash. The preview always reports evidence you didn't accept, and what it would decide.
+
 You can settle any review value after reading the preview, e.g. `{"umbrella": "personal"}`. Run preview again
-with `--overrides`. Your decisions are sealed into the plan.
+with `--overrides`. Your decisions are sealed into the plan, and a value you mark `"review"` is never decided by evidence.
 
 **Policies:** every status counts (active, expired, cancelled, pending).
 
@@ -76,7 +103,9 @@ This creates `line-correction-preview-<UTC time>/` with:
 | `preview.md` | Counts of clients and policies to change (→ Personal / → Commercial), by policy status; exceptions by type; every line of business and its decision |
 | `preview-policies.csv`, `preview-clients.csv` | Every record: current value, new value, action, reason |
 | `exceptions.csv` | Records left for manual review |
-| `line-of-business.csv` | Every distinct policy type, how many policies, the decision |
+| `line-of-business.csv` | Every distinct policy type, how many policies, the decision, spelling corrections, evidence counts |
+| `evidence-review.csv` | Every ambiguous policy: carrier, wholesaler, named insured, every evidence signal (accepted or not), the client's other policies, decision |
+| `crosscheck-lob-vs-statements.csv` | Policies whose clear line of business is contradicted by statement evidence (the line of business still decides) |
 | `lob-overrides.template.json` | The review values, ready for you to settle |
 | `backup-clients-policies.json` | **Full backup** of all clients and policies exactly as stored |
 | `plan.json` | The sealed plan (SHA-256 hash) that apply will execute |

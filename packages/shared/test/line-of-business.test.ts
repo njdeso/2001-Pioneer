@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  classifyLineOfBusiness, normalizeLob, planLineCorrection, planLineRollback, CORRECTION_FIELDS,
+  classifyLineOfBusiness, normalizeLob, planLineCorrection, planLineRollback, entityNameSignal, CORRECTION_FIELDS,
   type CorrectionClientIn, type CorrectionPolicyIn, type AppliedChange,
 } from '../src/lineOfBusiness.ts';
 
@@ -153,4 +153,130 @@ test('rollback restores only records the correction still owns', () => {
   const r = planLineRollback(applied, current);
   assert.deepEqual(r.restore.map((c) => c.id), ['p1']);
   assert.deepEqual(r.skipped.map((s) => s.change.id), ['p2', 'c1', 'c2']);
+});
+
+// --------------------------------------------------------------------------------------------- spelling
+
+test('obvious spelling variations and abbreviations are read, and reported', () => {
+  const cases: [string, 'personal' | 'commercial'][] = [
+    ['Homowners', 'personal'], ['Genl Liability', 'commercial'], ['Gen. Liab.', 'commercial'], ["Gen'l Liability", 'commercial'],
+    ['Homeownres', 'personal'], ['H/O', 'personal'], ['Pers Auto', 'personal'], ['Pvt Pass Auto', 'personal'], ['Pers Umb', 'personal'],
+    ['Comm Auto', 'commercial'], ['Coml Auto', 'commercial'], ['Bus Auto', 'commercial'], ['Wkrs Comp', 'commercial'], ['W/C', 'commercial'],
+    ['Dwell Fire', 'personal'], ['Motorcyle', 'personal'], ['Prof Liab', 'commercial'],
+  ];
+  for (const [s, want] of cases) {
+    const r = classifyLineOfBusiness(s);
+    assert.equal(r.line, want, s);
+    assert.ok(r.corrections.length > 0, `${s} should list its correction`);
+    assert.match(r.reason, /read as/);
+  }
+  assert.deepEqual(classifyLineOfBusiness('Homowners').corrections, ['homowners → homeowners']);
+});
+
+test('spelling correction is cautious: short, distant or unclear words are left as typed', () => {
+  for (const s of ['Personnel', 'Trust', 'Contracts', 'Comprehensive', 'Auto', 'Umb', 'Liabilty', 'Inland Mar']) {
+    assert.equal(classifyLineOfBusiness(s).line, null, s);
+  }
+});
+
+// --------------------------------------------------------------------------------------------- evidence
+
+const ALL = ['statement_classification', 'statement_section', 'statement_title', 'entity_name', 'policy_number_pattern'] as const;
+const stmt = (kind: 'statement_classification' | 'statement_section' | 'statement_title', line: 'personal' | 'commercial') =>
+  ({ kind, line, detail: `${kind} ${line}` });
+
+test('Auto is never classified without evidence, and never all Personal', () => {
+  const plan = planLineCorrection({
+    clients: [client('c1'), client('c2')],
+    policies: [policy('a1', 'c1', 'Auto'), policy('a2', 'c2', 'Auto', 'personal')],
+    acceptEvidence: ALL,
+  });
+  assert.deepEqual(plan.policies.map((p) => p.action), ['review', 'review']);
+  assert.equal(plan.counts.evidence.noAcceptedEvidence, 2);
+});
+
+test('statement evidence resolves an ambiguous Auto policy, and the client follows', () => {
+  const ev = new Map([['a1', [stmt('statement_classification', 'personal'), stmt('statement_section', 'personal')]], ['a2', [stmt('statement_title', 'commercial')]]]);
+  const plan = planLineCorrection({
+    clients: [client('c1'), client('c2', 'personal')],
+    policies: [policy('a1', 'c1', 'Auto'), policy('h1', 'c1', 'Homeowners'), policy('a2', 'c2', 'Auto', 'personal')],
+    statementEvidence: ev, acceptEvidence: ['statement_classification', 'statement_section', 'statement_title'],
+  });
+  const a1 = plan.policies.find((p) => p.id === 'a1')!;
+  assert.equal(a1.target, 'personal'); assert.equal(a1.basis, 'evidence'); assert.match(a1.reason, /decided by evidence/);
+  assert.equal(plan.policies.find((p) => p.id === 'a2')!.target, 'commercial');
+  assert.equal(plan.clients.find((c) => c.id === 'c1')!.target, 'personal');
+  assert.equal(plan.clients.find((c) => c.id === 'c2')!.target, 'commercial');
+  assert.equal(plan.counts.evidence.resolvedPersonal, 1);
+  assert.equal(plan.counts.evidence.resolvedCommercial, 1);
+  const row = plan.lobSummary.find((r) => r.lobNormalized === 'auto')!;
+  assert.deepEqual(row.evidence, { personal: 1, commercial: 1, conflict: 0, none: 0 });
+});
+
+test('evidence that is not accepted is reported, never applied', () => {
+  const ev = new Map([['a1', [stmt('statement_classification', 'personal')]]]);
+  const plan = planLineCorrection({
+    clients: [{ ...client('c1'), name: 'Synthetic Towing LLC' }],
+    policies: [policy('a1', 'c1', 'Auto'), policy('a2', 'c1', 'Auto')],
+    statementEvidence: ev, acceptEvidence: [],
+  });
+  assert.ok(plan.policies.every((p) => p.action === 'review'));
+  assert.deepEqual(plan.counts.evidence.availableNotAccepted.statement_classification, { personal: 1, commercial: 0 });
+  assert.deepEqual(plan.counts.evidence.availableNotAccepted.entity_name, { personal: 0, commercial: 2 });
+});
+
+test('any contradicting evidence keeps the policy unchanged — even evidence of a kind not accepted', () => {
+  const ev = new Map([['a1', [stmt('statement_classification', 'personal')]], ['a2', [stmt('statement_classification', 'personal'), stmt('statement_section', 'commercial')]]]);
+  const plan = planLineCorrection({
+    clients: [{ ...client('c1'), name: 'Synthetic Towing LLC' }, client('c2')],
+    policies: [policy('a1', 'c1', 'Auto'), policy('a2', 'c2', 'Auto')],
+    statementEvidence: ev, acceptEvidence: ['statement_classification', 'statement_section', 'statement_title'],
+  });
+  assert.equal(plan.policies.find((p) => p.id === 'a1')!.action, 'review', 'personal statement but an LLC name');
+  assert.equal(plan.policies.find((p) => p.id === 'a2')!.action, 'review', 'personal and commercial statements');
+  assert.equal(plan.counts.exceptionsByCode.policy_evidence_conflict, 2);
+});
+
+test('business-entity names give Commercial evidence only; individuals and trusts give none', () => {
+  for (const n of ['Synthetic Cab LLC', 'Example Towing, Inc.', 'Acme Corp', 'Smith Holdings L.L.C.', 'Joe Smith DBA Joe Plumbing']) {
+    assert.equal(entityNameSignal(n)?.line, 'commercial', n);
+  }
+  for (const n of ['Pat Example', 'Smith Family Trust', 'Estate of J Doe', 'Lincoln Smith', 'Vince Coco']) assert.equal(entityNameSignal(n), null, n);
+});
+
+test('policy-number pattern evidence needs at least 10 clear policies, all one type, at the same carrier', () => {
+  const pol = (id: string, num: string, type: string, carrierId = 'K1') => ({ ...policy(id, 'c1', type), policyNumber: num, carrierId });
+  const clear = Array.from({ length: 10 }, (_, i) => pol(`h${i}`, `HP${1000 + i}`, 'Homeowners'));
+  const plan = planLineCorrection({
+    clients: [client('c1')],
+    policies: [...clear, pol('a1', 'HP5555', 'Auto'), pol('a2', 'HP6666', 'Auto', 'K2'), pol('a3', 'ZZ1234', 'Auto')],
+    acceptEvidence: ['policy_number_pattern'],
+  });
+  const by = new Map(plan.policies.map((p) => [p.id, p]));
+  assert.equal(by.get('a1')!.target, 'personal');
+  assert.equal(by.get('a2')!.action, 'review', 'other carrier');
+  assert.equal(by.get('a3')!.action, 'review', 'other pattern');
+  const nine = planLineCorrection({ clients: [client('c1')], policies: [...clear.slice(1), pol('a1', 'HP5555', 'Auto')], acceptEvidence: ['policy_number_pattern'] });
+  assert.equal(nine.policies.find((p) => p.id === 'a1')!.action, 'review', 'only 9 examples');
+});
+
+test("the client's other policies are shown but never decide", () => {
+  const plan = planLineCorrection({ clients: [client('c1')], policies: [policy('a1', 'c1', 'Auto'), policy('h1', 'c1', 'Homeowners')], acceptEvidence: ALL });
+  const a1 = plan.policies.find((p) => p.id === 'a1')!;
+  assert.equal(a1.action, 'review');
+  assert.deepEqual(a1.siblings, { personal: 1, commercial: 0 });
+});
+
+test('a value the owner marked "review" is not decided by evidence', () => {
+  const ev = new Map([['a1', [stmt('statement_classification', 'personal')]]]);
+  const plan = planLineCorrection({ clients: [client('c1')], policies: [policy('a1', 'c1', 'Auto')], overrides: { auto: 'review' }, statementEvidence: ev, acceptEvidence: ALL });
+  assert.equal(plan.policies[0].action, 'review');
+});
+
+test('a clear line of business still decides when statement evidence disagrees, and the disagreement is reported', () => {
+  const ev = new Map([['h1', [stmt('statement_classification', 'commercial')]]]);
+  const plan = planLineCorrection({ clients: [client('c1')], policies: [policy('h1', 'c1', 'Homeowners')], statementEvidence: ev, acceptEvidence: ALL });
+  assert.equal(plan.policies[0].target, 'personal');
+  assert.match(plan.policies[0].crossCheck ?? '', /line of business says Personal/);
+  assert.equal(plan.counts.evidence.lobStatementDisagreements, 1);
 });

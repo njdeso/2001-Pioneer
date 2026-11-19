@@ -7,6 +7,7 @@
 // Run in a NEW, empty folder (e.g. ~/pioneer-release/line-correction-2026-11), signed in with gcloud:
 //
 //   node ~/2001-pioneer/scripts/prod-line-correction.mts preview  [--project pioneer-285cf] [--overrides lob-overrides.json]
+//                                                                  [--evidence statement|none|KIND,KIND…]
 //   node ~/2001-pioneer/scripts/prod-line-correction.mts apply    PREVIEW_FOLDER
 //   node ~/2001-pioneer/scripts/prod-line-correction.mts verify   PREVIEW_FOLDER
 //   node ~/2001-pioneer/scripts/prod-line-correction.mts rollback PREVIEW_FOLDER
@@ -14,7 +15,8 @@
 // (Node 22.18+ runs .mts directly; on older Node 22 add --experimental-strip-types after `node`.)
 //
 // What each mode may do:
-//   preview   READ-ONLY. Reads every client and policy (all statuses), writes a full backup of both collections,
+//   preview   READ-ONLY. Reads every client and policy (all statuses), the statements and their matched lines
+//             (evidence for ambiguous lines of business such as "Auto"), writes a full backup of both collections,
 //             the plan (plan.json, sealed with a SHA-256 hash) and the preview reports to a new local folder.
 //   apply     Asks you to type the confirmation shown. Re-reads every affected record and saves it again
 //             (apply-backup.json) BEFORE writing. Creates maintenance/line-correction-2026-11 with "must not
@@ -37,8 +39,8 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { pathToFileURL } from 'node:url';
 import {
-  CORRECTION_FIELDS, normalizeLob, planLineCorrection, planLineRollback,
-  type AppliedChange, type CorrectionPlan, type Line, type LobOverrides,
+  CORRECTION_FIELDS, DEFAULT_EVIDENCE, EVIDENCE_KINDS, EVIDENCE_LABELS, classifyLineOfBusiness, normalizeLob, planLineCorrection, planLineRollback,
+  type AppliedChange, type CorrectionPlan, type EvidenceKind, type EvidenceSignal, type Line, type LobOverrides,
 } from '../packages/shared/src/lineOfBusiness.ts';
 
 export const RUN_ID = 'line-correction-2026-11';
@@ -147,13 +149,15 @@ class Firestore {
     return r.json;
   }
   /** Every document of a top-level collection, full fields, paged by document name (no index needed). */
-  async readAll(collection: string): Promise<FsDoc[]> {
+  async readAll(collection: string, opts: { parent?: string; fields?: string[] } = {}): Promise<FsDoc[]> {
     const out: FsDoc[] = [];
     let last: string | null = null;
+    const url = opts.parent ? `${this.base}/${opts.parent}:runQuery` : `${this.base}:runQuery`;
     for (;;) {
       const q: Record<string, unknown> = { from: [{ collectionId: collection }], orderBy: [{ field: { fieldPath: '__name__' } }], limit: 500 };
+      if (opts.fields) q.select = { fields: opts.fields.map((fieldPath) => ({ fieldPath })) };
       if (last) q.startAt = { values: [{ referenceValue: last }], before: false };
-      const res = (await this.must('POST', `${this.base}:runQuery`, { structuredQuery: q })) as { document?: FsDoc }[];
+      const res = (await this.must('POST', url, { structuredQuery: q })) as { document?: FsDoc }[];
       const page = res.filter((x) => x.document).map((x) => x.document!);
       out.push(...page);
       if (page.length < 500) return out;
@@ -203,14 +207,16 @@ export interface PlanChange { collection: 'clients' | 'policies'; id: string; fi
 export interface PlanFile {
   runId: string; project: string; createdAt: string; account: string;
   overrides: LobOverrides; overridesHash: string;
+  /** Evidence kinds accepted for ambiguous lines of business (sealed into the hash). */
+  evidenceAccepted: EvidenceKind[];
   counts: CorrectionPlan['counts'];
   changes: PlanChange[];
   planHash: string;
 }
 
-export function planHashOf(p: Pick<PlanFile, 'runId' | 'project' | 'overridesHash' | 'changes'>): string {
+export function planHashOf(p: Pick<PlanFile, 'runId' | 'project' | 'overridesHash' | 'evidenceAccepted' | 'changes'>): string {
   const canon = p.changes.map((c) => [c.collection, c.id, c.field, c.before, c.after, c.updateTime]);
-  return sha256(JSON.stringify([p.runId, p.project, p.overridesHash, canon]));
+  return sha256(JSON.stringify([p.runId, p.project, p.overridesHash, [...(p.evidenceAccepted ?? [])].sort(), canon]));
 }
 
 function changesOf(plan: CorrectionPlan): PlanChange[] {
@@ -248,11 +254,76 @@ export function readOverrides(file: string | undefined, cwd: string): LobOverrid
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
 }
 
-async function preview(project: string, overridesFile: string | undefined, d: Deps): Promise<string> {
+/** `--evidence`: "statement" (default: the three statement kinds), "none", "all", or a comma list of kinds. */
+export function parseEvidence(arg: string | undefined): EvidenceKind[] {
+  if (arg === undefined || arg === 'statement') return [...DEFAULT_EVIDENCE];
+  if (arg === 'none') return [];
+  if (arg === 'all') return [...EVIDENCE_KINDS];
+  const out = new Set<EvidenceKind>();
+  for (const raw of arg.split(',').map((x) => x.trim()).filter(Boolean)) {
+    if (raw === 'statement') { DEFAULT_EVIDENCE.forEach((k) => out.add(k)); continue; }
+    if (!(EVIDENCE_KINDS as readonly string[]).includes(raw)) throw new Refusal(`--evidence: unknown kind "${raw}". Use statement, none, all, or: ${EVIDENCE_KINDS.join(', ')}.`);
+    out.add(raw as EvidenceKind);
+  }
+  return EVIDENCE_KINDS.filter((k) => out.has(k));
+}
+
+
+/**
+ * READ-ONLY: statement evidence per policy, from lines matched to it (match.status "matched"), on statements that
+ * are not discarded: the statement's classification (set by you), the carrier's section label, the carrier's title.
+ */
+async function collectStatementEvidence(fs: Firestore): Promise<{ evidence: Map<string, EvidenceSignal[]>; statements: number; matchedLines: number }> {
+  const stmts = (await fs.readAll('statements', { fields: ['classification', 'title', 'status'] })).filter((x) => sv(x.fields?.status) !== 'discarded');
+  type Acc = Map<string, { line: Line; lines: number; statements: Set<string>; label: string }>;
+  const acc = new Map<string, { cls: Acc; sec: Acc; title: Acc }>();
+  let matchedLines = 0;
+  const add = (a: Acc, key: string, line: Line, label: string, sid: string) => {
+    const e = a.get(key) ?? { line, lines: 0, statements: new Set<string>(), label };
+    e.lines++; e.statements.add(sid); a.set(key, e);
+  };
+  for (const st of stmts) {
+    const sid = docId(st.name);
+    const cls = sv(st.fields?.classification);
+    const title = sv(st.fields?.title) ?? '';
+    const t = title ? classifyLineOfBusiness(title) : null;
+    const lines = await fs.readAll('lines', { parent: `statements/${sid}`, fields: ['match.status', 'match.policyId', 'section'] });
+    for (const ln of lines) {
+      const m = (ln.fields?.match as { mapValue?: { fields?: Record<string, FsValue> } } | undefined)?.mapValue?.fields;
+      if (sv(m?.status) !== 'matched') continue;
+      const pid = sv(m?.policyId);
+      if (!pid) continue;
+      matchedLines++;
+      const a = acc.get(pid) ?? { cls: new Map(), sec: new Map(), title: new Map() };
+      acc.set(pid, a);
+      if (cls === 'personal' || cls === 'commercial') add(a.cls, cls, cls, cls === 'personal' ? 'Personal Lines' : 'Commercial Lines', sid);
+      const section = sv(ln.fields?.section);
+      const sr = section ? classifyLineOfBusiness(section) : null;
+      if (sr?.line && sr.basis === 'rule') add(a.sec, `${sr.line}|${normalizeLob(section)}`, sr.line, section!.trim(), sid);
+      if (t?.line && t.basis === 'rule') add(a.title, `${t.line}|${normalizeLob(title)}`, t.line, title.trim(), sid);
+    }
+  }
+  const evidence = new Map<string, EvidenceSignal[]>();
+  const n = (x: number, w: string) => `${x} ${w}${x === 1 ? '' : 's'}`;
+  for (const [pid, a] of acc) {
+    const out: EvidenceSignal[] = [];
+    for (const e of a.cls.values()) out.push({ kind: 'statement_classification', line: e.line, detail: `${n(e.lines, 'matched line')} on ${n(e.statements.size, 'statement')} you classified ${e.label}` });
+    for (const e of a.sec.values()) out.push({ kind: 'statement_section', line: e.line, detail: `${n(e.lines, 'matched line')} in carrier section "${e.label}"` });
+    for (const e of a.title.values()) out.push({ kind: 'statement_title', line: e.line, detail: `${n(e.lines, 'matched line')} on statement titled "${e.label}"` });
+    if (out.length) evidence.set(pid, out);
+  }
+  return { evidence, statements: stmts.length, matchedLines };
+}
+
+async function preview(project: string, overridesFile: string | undefined, evidenceArg: string | undefined, d: Deps): Promise<string> {
+  const evidenceAccepted = parseEvidence(evidenceArg);
   await guardProject(project, d);
   const fs = new Firestore(project, d);
   const overrides = readOverrides(overridesFile, d.cwd);
   const [clientDocs, policyDocs] = [await fs.readAll('clients'), await fs.readAll('policies')];
+  const carrierDocs = await fs.readAll('carriers', { fields: ['name'] });
+  const carrierName = new Map(carrierDocs.map((c) => [docId(c.name), sv(c.fields?.name) ?? '']));
+  const se = await collectStatementEvidence(fs);
   const markers = (await fs.getMany([MARKER_PATH, ...OTHER_MARKERS]));
 
   const plan = planLineCorrection({
@@ -260,12 +331,16 @@ async function preview(project: string, overridesFile: string | undefined, d: De
     policies: policyDocs.map((p) => ({
       id: docId(p.name), clientId: sv(p.fields?.clientId), policyNumber: sv(p.fields?.policyNumber) ?? '', policyType: sv(p.fields?.policyType),
       line: sv(p.fields?.line), status: sv(p.fields?.status), updateTime: p.updateTime!,
+      namedInsured: sv(p.fields?.namedInsured), carrierId: sv(p.fields?.carrierId), wholesalerId: sv(p.fields?.wholesalerId),
     })),
     overrides,
+    statementEvidence: se.evidence,
+    acceptEvidence: evidenceAccepted,
   });
+  const policyCarrier = new Map(policyDocs.map((p) => [docId(p.name), { carrier: carrierName.get(sv(p.fields?.carrierId) ?? '') ?? '', wholesaler: carrierName.get(sv(p.fields?.wholesalerId) ?? '') ?? '', namedInsured: sv(p.fields?.namedInsured) ?? '' }]));
   const changes = changesOf(plan);
   const overridesHash = sha256(JSON.stringify(overrides));
-  const file: PlanFile = { runId: RUN_ID, project, createdAt: d.now().toISOString(), account: d.account(), overrides, overridesHash, counts: plan.counts, changes, planHash: '' };
+  const file: PlanFile = { runId: RUN_ID, project, createdAt: d.now().toISOString(), account: d.account(), overrides, overridesHash, evidenceAccepted, counts: plan.counts, changes, planHash: '' };
   file.planHash = planHashOf(file);
 
   const dir = join(d.cwd, `line-correction-preview-${stamp(d.now())}`);
@@ -290,8 +365,23 @@ async function preview(project: string, overridesFile: string | undefined, d: De
     ...plan.exceptions.map((e) => [e.code, e.entityType, e.id, e.clientId, e.clientId ? clientName.get(e.clientId) ?? '' : '', e.detail]),
   ]));
   writeFileSync(join(dir, 'line-of-business.csv'), csv([
-    ['line_of_business', 'examples', 'policies', 'decision', 'basis', 'changes', 'reason'],
-    ...plan.lobSummary.map((r) => [r.lobNormalized, r.examples.join(' | '), r.policies, r.decision, r.basis, r.changes, r.reason]),
+    ['line_of_business', 'examples', 'policies', 'decision', 'basis', 'changes', 'spelling', 'evidence_personal', 'evidence_commercial', 'evidence_conflict', 'no_evidence', 'reason'],
+    ...plan.lobSummary.map((r) => [r.lobNormalized, r.examples.join(' | '), r.policies, r.decision, r.basis, r.changes, r.corrections.join('; '),
+      r.evidence?.personal ?? '', r.evidence?.commercial ?? '', r.evidence?.conflict ?? '', r.evidence?.none ?? '', r.reason]),
+  ]));
+  writeFileSync(join(dir, 'evidence-review.csv'), csv([
+    ['policy_id', 'client_id', 'client', 'named_insured', 'policy_number', 'carrier', 'wholesaler', 'status', 'line_of_business', 'current', 'new', 'action',
+      'evidence_personal', 'evidence_commercial', 'other_policies_personal', 'other_policies_commercial', 'reason'],
+    ...plan.policies.filter((p) => p.evidence).map((p) => {
+      const pc = policyCarrier.get(p.id)!;
+      const sig = (line: Line) => p.evidence!.filter((x) => x.line === line).map((x) => `${EVIDENCE_LABELS[x.kind]}${evidenceAccepted.includes(x.kind) ? '' : ' (not accepted)'}: ${x.detail}`).join(' | ');
+      return [p.id, p.clientId, clientName.get(p.clientId) ?? '', pc.namedInsured, p.policyNumber, pc.carrier, pc.wholesaler, p.status, p.lob, L(p.current), L(p.target), p.action,
+        sig('personal'), sig('commercial'), p.siblings?.personal ?? 0, p.siblings?.commercial ?? 0, p.reason];
+    }),
+  ]));
+  writeFileSync(join(dir, 'crosscheck-lob-vs-statements.csv'), csv([
+    ['policy_id', 'client', 'policy_number', 'line_of_business', 'new', 'note'],
+    ...plan.policies.filter((p) => p.crossCheck).map((p) => [p.id, clientName.get(p.clientId) ?? '', p.policyNumber, p.lob, L(p.target), p.crossCheck!]),
   ]));
   // Template for settling review values: fill in "personal" or "commercial", then run preview again with --overrides.
   const template: Record<string, string> = { _comment: 'Replace "review" with "personal" or "commercial" for values you have checked; leave "review" to keep them for manual review.' };
@@ -304,6 +394,8 @@ async function preview(project: string, overridesFile: string | undefined, d: De
     `- Project: **${project}**   Run: ${RUN_ID}   Taken: ${file.createdAt} by ${file.account}`,
     `- Plan hash: \`${file.planHash}\``,
     `- Overrides: ${Object.keys(overrides).length ? Object.entries(overrides).map(([k, v]) => `${k} → ${v}`).join('; ') : 'none'}`,
+    `- Evidence accepted for ambiguous lines of business: ${evidenceAccepted.length ? evidenceAccepted.map((k) => EVIDENCE_LABELS[k]).join(', ') : 'none (line of business only)'}`,
+    `- Statements read for evidence: ${se.statements} (not discarded), ${se.matchedLines} matched lines`,
     `- Single-run marker ${MARKER_PATH}: ${markers.get(MARKER_PATH) ? '**EXISTS — apply will be refused**' : 'not present'}`,
     ...OTHER_MARKERS.map((m) => `- Earlier correction marker ${m}: ${markers.get(m) ? '**EXISTS (PR #25 script was run)**' : 'not present'}`),
     '', '## Summary', '',
@@ -315,17 +407,35 @@ async function preview(project: string, overridesFile: string | undefined, d: De
     '', '## Exceptions (never changed; listed in exceptions.csv)', '', '| Code | Count | Meaning |', '|---|---:|---|',
     ...([
       ['policy_lob_blank', 'Policy has no line of business'],
-      ['policy_lob_review', 'Line of business is ambiguous or not recognized'],
+      ['policy_lob_review', 'Line of business is ambiguous or not recognized, and no accepted evidence decides it'],
+      ['policy_evidence_conflict', 'Ambiguous line of business with contradicting evidence'],
       ['policy_client_missing', 'Policy points to a client that does not exist'],
       ['client_no_policies', 'Client has no policies'],
       ['client_has_review_policies', 'Client has at least one policy needing review'],
       ['client_mixed', 'Client has both Personal and Commercial policies (current value kept)'],
     ] as const).map(([k, m]) => `| ${k} | ${c.exceptionsByCode[k] ?? 0} | ${m} |`),
+    '', '## Ambiguous lines of business — evidence', '',
+    `${c.evidence.ambiguousPolicies} policies have a line of business that does not say Personal or Commercial. Evidence accepted: ${evidenceAccepted.length ? evidenceAccepted.map((k) => EVIDENCE_LABELS[k]).join(', ') : 'none'}.`, '',
+    '| | Policies |', '|---|---:|',
+    `| Decided Personal by evidence | ${c.evidence.resolvedPersonal} |`, `| Decided Commercial by evidence | ${c.evidence.resolvedCommercial} |`,
+    `| Evidence conflicts (kept, review) | ${c.evidence.conflicting} |`, `| No accepted evidence (kept, review) | ${c.evidence.noAcceptedEvidence} |`, '',
+    '| Line of business | Policies | → Personal | → Commercial | Conflict | No evidence |', '|---|---:|---:|---:|---:|---:|',
+    ...plan.lobSummary.filter((r) => r.evidence).map((r) => `| ${r.lobNormalized} | ${r.policies} | ${r.evidence!.personal} | ${r.evidence!.commercial} | ${r.evidence!.conflict} | ${r.evidence!.none} |`),
+    '', 'Evidence found but NOT accepted (would decide these if accepted with --evidence; still subject to the no-conflict rule):', '',
+    '| Evidence kind | → Personal | → Commercial |', '|---|---:|---:|',
+    ...EVIDENCE_KINDS.filter((k) => c.evidence.availableNotAccepted[k]).map((k) => `| ${EVIDENCE_LABELS[k]} | ${c.evidence.availableNotAccepted[k]!.personal} | ${c.evidence.availableNotAccepted[k]!.commercial} |`),
+    '', `Cross-check: ${c.evidence.lobStatementDisagreements} policies with a clear line of business sit on statement evidence of the other type (the line of business still decides; listed in crosscheck-lob-vs-statements.csv).`,
+    '', '## Spelling and abbreviation corrections', '',
+    `${c.evidence.spellingCorrected} policies were read with a correction. Check each; mark any wrong one "review" in --overrides.`, '',
+    '| As typed | Read as | Policies | Decision |', '|---|---|---:|---|',
+    ...plan.lobSummary.filter((r) => r.corrections.length).map((r) => `| ${r.examples[0] ?? r.lobNormalized} | ${r.corrections.join('; ')} | ${r.policies} | ${r.decision} |`),
     '', '## Lines of business (top 40; all in line-of-business.csv)', '', '| Line of business | Policies | Decision | Changes | Reason |', '|---|---:|---|---:|---|',
     ...plan.lobSummary.slice(0, 40).map((r) => `| ${r.lobNormalized} | ${r.policies} | ${r.decision} | ${r.changes} | ${r.reason.replace(/\|/g, '/')} |`),
     '', '## Files', '',
     '- preview-policies.csv, preview-clients.csv — every record, current and new value, reason (no broker data)',
-    '- exceptions.csv — records left for manual review', '- line-of-business.csv — every distinct line of business and its decision',
+    '- exceptions.csv — records left for manual review', '- line-of-business.csv — every distinct line of business, its decision, spelling corrections and evidence counts',
+    '- evidence-review.csv — every ambiguous policy: carrier, wholesaler, named insured, all evidence found, the client\'s other policies, decision',
+    '- crosscheck-lob-vs-statements.csv — clear lines of business that statement evidence contradicts (not changed by evidence)',
     '- lob-overrides.template.json — settle review values, then run preview again with `--overrides`',
     '- backup-clients-policies.json — FULL backup of both collections (contains broker fields: owner only)',
     '- plan.json — the sealed plan that `apply` will execute', '',
@@ -336,6 +446,7 @@ async function preview(project: string, overridesFile: string | undefined, d: De
   d.log(`PREVIEW (read-only) — ${project}`);
   d.log(`  policies: ${c.policiesTotal} total, ${c.policiesChange} will change (→ Personal ${c.policiesToPersonal}, → Commercial ${c.policiesToCommercial}), ${c.policiesReview} for review`);
   d.log(`  clients:  ${c.clientsTotal} total, ${c.clientsChange} will change (→ Personal ${c.clientsToPersonal}, → Commercial ${c.clientsToCommercial}), ${c.clientsReview} for review`);
+  d.log(`  ambiguous: ${c.evidence.ambiguousPolicies} — by evidence → Personal ${c.evidence.resolvedPersonal}, → Commercial ${c.evidence.resolvedCommercial}; conflicts ${c.evidence.conflicting}; no evidence ${c.evidence.noAcceptedEvidence}`);
   d.log(`  exceptions: ${plan.exceptions.length}   plan hash: ${file.planHash.slice(0, 12)}`);
   if (markers.get(MARKER_PATH)) d.log(`  NOTE: ${MARKER_PATH} already exists — apply will be refused.`);
   d.log(`  Files: ${dir}`);
@@ -584,11 +695,11 @@ export async function main(argv: string[], deps: Partial<Deps> = {}): Promise<nu
   const flag = (name: string) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
   const positional = rest.filter((a, i) => !a.startsWith('--') && !(i > 0 && rest[i - 1].startsWith('--')));
   try {
-    if (mode === 'preview') await preview(flag('--project') ?? 'pioneer-285cf', flag('--overrides'), d);
+    if (mode === 'preview') await preview(flag('--project') ?? 'pioneer-285cf', flag('--overrides'), flag('--evidence'), d);
     else if (mode === 'apply' && positional[0]) await apply(positional[0], d);
     else if (mode === 'verify' && positional[0]) return (await verify(positional[0], d)) ? 0 : 1;
     else if (mode === 'rollback' && positional[0]) await rollback(positional[0], d);
-    else { d.log('Usage: preview [--project ID] [--overrides FILE] | apply DIR | verify DIR | rollback DIR'); return 2; }
+    else { d.log('Usage: preview [--project ID] [--overrides FILE] [--evidence statement|none|all|KIND,…] | apply DIR | verify DIR | rollback DIR'); return 2; }
     return 0;
   } catch (e) {
     if (e instanceof Refusal) { d.log(`REFUSED: ${e.message}`); return 1; }
