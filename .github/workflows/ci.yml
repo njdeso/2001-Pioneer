@@ -56,6 +56,9 @@ jobs:
       - name: Production backup scripts fail closed and only verify by restore (fake gcloud, no Google access)
         run: node --test scripts/prod-backup.test.mjs scripts/prod-backup-restore-test.test.mjs scripts/prod-fingerprint.test.mjs scripts/prod-preflight-compare.test.mjs scripts/inspect-statement-xlsx.test.mjs
 
+      - name: One-time Personal/Commercial correction (in-memory Firestore; plain node, as run in Cloud Shell)
+        run: node --experimental-strip-types --test scripts/prod-line-correction.test.mjs
+
       - name: Cloud Functions runtime dependencies load from a clean install (as Cloud Functions installs them)
         run: |
           mkdir -p /tmp/fn-deps && cp functions/package.json /tmp/fn-deps/ && cd /tmp/fn-deps

@@ -47,8 +47,11 @@ export interface ImportExisting {
 }
 
 export interface ImportOptions {
-  /** Classification for new clients/policies when the file doesn't say. */
-  defaultLine: 'personal' | 'commercial';
+  /**
+   * Personal/Commercial for a row when neither the file's column nor the policy type says.
+   * null = don't guess: the row is flagged with an error and not imported.
+   */
+  defaultLine: 'personal' | 'commercial' | null;
   /** Broker for rows that don't name one. */
   defaultBrokerId: string;
   /** Update existing policies/clients with non-blank values from the file. */
@@ -144,7 +147,10 @@ export function planImport(records: NormalizedRecord[], existing: ImportExisting
   const newByExternal = new Map<string, string>();
   const newByName = new Map<string, string>();
   const seenPolicyKeys = new Map<string, number>();
+  /** New clients whose classification the file states (its Personal/Commercial column). */
+  const explicitNewClass = new Set<string>();
   let newCount = 0;
+  const L = (v: 'personal' | 'commercial') => (v === 'personal' ? 'Personal' : 'Commercial');
   const rows: PlannedRow[] = [];
 
   for (const rec of records) {
@@ -230,13 +236,15 @@ export function planImport(records: NormalizedRecord[], existing: ImportExisting
         key, isNew: true,
         data: {
           name: rec.client.name, normalizedName: norm, externalId: rec.client.externalId,
-          classification: rec.client.classification ?? rec.policy?.line ?? options.defaultLine,
+          // Provisional; settled after all rows from the client's policies (see "New-client classification" below).
+          classification: rec.client.classification ?? rec.policy?.line ?? options.defaultLine ?? 'personal',
           brokerId: recordBroker ?? defaultBroker,
           contact: { name: '', phone: rec.client.contact.phone, email: rec.client.contact.email, address: rec.client.contact.address, notes: '' },
         },
         changes: {}, rows: [],
       };
       clients.set(key, planned);
+      if (rec.client.classification) explicitNewClass.add(key);
       row.clientAction = 'create';
       // Similar-name warning against existing clients (e.g. "Smith Trucking" vs "Smith Truckng")
       for (const c of existing.clients) {
@@ -280,7 +288,6 @@ export function planImport(records: NormalizedRecord[], existing: ImportExisting
     }
     seenPolicyKeys.set(pkey, rec.rowNumber);
 
-    const line = p.line ?? planned.data.classification;
     const ex = policyByKey.get(pkey);
     if (ex) {
       row.policyId = ex.id;
@@ -298,7 +305,12 @@ export function planImport(records: NormalizedRecord[], existing: ImportExisting
         if (ex[field] !== after) ch[field] = { before: ex[field] ?? null, after };
       };
       set('policyType', p.policyType);
-      if (p.line) set('line', p.line);
+      // Only the file's own Personal/Commercial column changes an existing policy's line. A line inferred from
+      // the policy type is reported, never applied, so an import cannot silently flip a policy you set by hand.
+      if (p.line && p.lineSource === 'column') set('line', p.line);
+      else if (p.line && p.lineSource === 'lob' && p.line !== ex.line) {
+        messages.push({ level: 'warning', text: `Policy type "${p.policyType}" is ${L(p.line)} but the policy is recorded as ${L(ex.line)} (not changed by the import)` });
+      }
       set('namedInsured', p.namedInsured);
       set('effectiveDate', p.effectiveDate);
       set('expirationDate', p.expirationDate);
@@ -312,6 +324,16 @@ export function planImport(records: NormalizedRecord[], existing: ImportExisting
       continue;
     }
 
+    let line = p.line;
+    if (!line && options.defaultLine) {
+      line = options.defaultLine;
+      messages.push({ level: 'warning', text: `Personal/Commercial not in the file and policy type "${p.policyType || '(blank)'}" doesn't say; used your default, ${L(line)}` });
+    }
+    if (!line) {
+      messages.push({ level: 'error', text: `Can't tell if this policy is Personal or Commercial: policy type "${p.policyType || '(blank)'}" doesn't say. Add a Personal/Commercial column, or choose a default` });
+      finish(row);
+      continue;
+    }
     row.policyAction = 'create';
     row.policyData = {
       clientKey: planned.key,
@@ -331,8 +353,35 @@ export function planImport(records: NormalizedRecord[], existing: ImportExisting
       : r.messages.some((m) => m.level === 'warning') ? 'warning' : 'ok';
   }
 
-  // A new client whose every row failed is not created (no orphan clients from bad rows).
   const rowByNumber = new Map(rows.map((r) => [r.rowNumber, r]));
+
+  // New-client classification: the file's own column if it gave one; otherwise from ALL the client's new
+  // policies in the file (all Personal → Personal, all Commercial → Commercial); otherwise your default;
+  // otherwise the client's rows are flagged. Existing clients are never reclassified by an import.
+  for (const [k, c] of clients) {
+    if (!c.isNew || explicitNewClass.has(k)) continue;
+    const lines = new Set(rows.filter((r) => r.clientKey === k && r.policyData).map((r) => r.policyData!.line));
+    const first = rowByNumber.get(c.rows[0])!;
+    if (lines.size === 1) c.data.classification = [...lines][0];
+    else if (lines.size > 1) {
+      const firstLine = rows.find((r) => r.clientKey === k && r.policyData)!.policyData!.line;
+      c.data.classification = firstLine;
+      first.messages.push({ level: 'warning', text: `New client has both Personal and Commercial policies; classified ${L(firstLine)} from its first policy — review the client` });
+    } else if (options.defaultLine) {
+      c.data.classification = options.defaultLine;
+      if (c.rows.some((n) => rowByNumber.get(n)?.status !== 'error')) {
+        first.messages.push({ level: 'warning', text: `No Personal/Commercial for this new client in the file; used your default, ${L(options.defaultLine)}` });
+      }
+    } else {
+      for (const n of c.rows) {
+        const r = rowByNumber.get(n)!;
+        if (r.status !== 'error') r.messages.push({ level: 'error', text: `Can't tell if new client "${c.data.name}" is Personal or Commercial. Add a Personal/Commercial column or a policy type, or choose a default` });
+      }
+    }
+    for (const n of c.rows) finish(rowByNumber.get(n)!);
+  }
+
+  // A new client whose every row failed is not created (no orphan clients from bad rows).
   for (const [k, c] of clients) {
     if (c.isNew && c.rows.every((n) => rowByNumber.get(n)?.status === 'error')) {
       clients.delete(k);

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { parseMoneyToCents, type Cents } from './money.js';
 import { isIsoDate, type IsoDate } from './period.js';
+import { classifyLineOfBusiness } from './lineOfBusiness.js';
 
 /** Fields an imported client/policy list can supply. Only clientName is required. */
 export const IMPORT_FIELDS = [
@@ -201,6 +202,8 @@ export interface NormalizedRecord {
     wholesalerId: string | null;
     policyType: string;
     line: 'personal' | 'commercial' | null;
+    /** Where `line` came from: the file's Personal/Commercial column, or the line of business (policy type). */
+    lineSource: 'column' | 'lob' | null;
     namedInsured: string;
     effectiveDate: IsoDate | null;
     expirationDate: IsoDate | null;
@@ -218,7 +221,7 @@ export function normalizeRecord(input: ImportRecordRaw): NormalizedRecord {
   if (!name) messages.push({ level: 'error', text: 'Client name is blank' });
 
   const line = interpretLine(r.line);
-  if (r.line.trim() && !line) messages.push({ level: 'warning', text: `Could not read personal/commercial value "${r.line}"; default used` });
+  if (r.line.trim() && !line) messages.push({ level: 'warning', text: `Could not read personal/commercial value "${r.line}"; using the policy type instead` });
 
   const email = r.email.trim();
   const emailOk = !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -281,7 +284,7 @@ export function normalizeRecord(input: ImportRecordRaw): NormalizedRecord {
     carrierId: r.carrierId,
     wholesalerId: r.wholesalerId ?? null,
     policyType: r.policyType.trim(),
-    line,
+    ...policyLine(line, r.policyType, messages),
     namedInsured: r.namedInsured.trim(),
     effectiveDate,
     expirationDate,
@@ -289,6 +292,24 @@ export function normalizeRecord(input: ImportRecordRaw): NormalizedRecord {
     status,
   };
   return out;
+}
+
+/**
+ * A policy's Personal/Commercial: the file's own column wins; otherwise it comes from the line of business
+ * (policy type). When neither says, it stays null — the plan then uses the default you chose, or flags the row.
+ * A column that contradicts the line of business is imported as given, with a warning to check it.
+ */
+function policyLine(column: 'personal' | 'commercial' | null, policyType: string, messages: Message[]):
+  { line: 'personal' | 'commercial' | null; lineSource: 'column' | 'lob' | null } {
+  const lob = classifyLineOfBusiness(policyType);
+  if (column) {
+    if (lob.line && lob.line !== column) {
+      messages.push({ level: 'warning', text: `File says ${column === 'personal' ? 'Personal' : 'Commercial'} but policy type "${policyType.trim()}" is ${lob.line === 'personal' ? 'Personal' : 'Commercial'} — check this row` });
+    }
+    return { line: column, lineSource: 'column' };
+  }
+  if (lob.line) return { line: lob.line, lineSource: 'lob' };
+  return { line: null, lineSource: null };
 }
 
 /** Levenshtein similarity in [0, 1] for "possible duplicate" warnings. */
@@ -309,7 +330,11 @@ export function similarity(a: string, b: string): number {
 }
 
 export const importOptionsInput = z.object({
-  defaultLine: z.enum(['personal', 'commercial']).default('commercial'),
+  /**
+   * Used only when a row has no Personal/Commercial column value AND its policy type doesn't say.
+   * null (the default) = don't guess: such a row is flagged and not imported until it says.
+   */
+  defaultLine: z.enum(['personal', 'commercial']).nullable().default(null),
   defaultBrokerId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).default('UNASSIGNED'),
   updateExisting: z.boolean().default(true),
   updateBrokerOnExisting: z.boolean().default(false),

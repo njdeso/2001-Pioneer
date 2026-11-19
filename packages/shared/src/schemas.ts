@@ -57,7 +57,7 @@ export const brokerInput = z.object({
 });
 export type BrokerInput = z.infer<typeof brokerInput>;
 
-export const lineSchema = z.enum(['personal', 'commercial']);
+export const lineSchema = z.enum(['personal', 'commercial'], { error: 'Choose Personal or Commercial' });
 
 export const clientInput = z.object({
   name: trimmed(200).min(1, 'Client name is required'),

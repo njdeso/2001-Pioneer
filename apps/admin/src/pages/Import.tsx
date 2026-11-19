@@ -88,7 +88,7 @@ function ImportWizard({ onFinished }: { onFinished: () => void }) {
   const [carrierMap, setCarrierMap] = useState<Record<string, string>>({});
   const [wholesalerMap, setWholesalerMap] = useState<Record<string, string>>({});
   const [brokerMap, setBrokerMap] = useState<Record<string, string>>({});
-  const [options, setOptions] = useState<ImportOptionsInput>({ defaultLine: 'commercial', defaultBrokerId: UNASSIGNED_BROKER_ID, updateExisting: true, updateBrokerOnExisting: false });
+  const [options, setOptions] = useState<ImportOptionsInput>({ defaultLine: null, defaultBrokerId: UNASSIGNED_BROKER_ID, updateExisting: true, updateBrokerOnExisting: false });
   const [staged, setStaged] = useState<StageResult | null>(null);
   const [committed, setCommitted] = useState<CommitResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -282,9 +282,11 @@ function ImportWizard({ onFinished }: { onFinished: () => void }) {
           <div>
             <h3 className="mb-2 text-sm font-semibold text-ink">Options</h3>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <Field label="When the file doesn't say personal/commercial">
-                <Select value={options.defaultLine} onChange={(e) => setOptions({ ...options, defaultLine: e.target.value as 'personal' | 'commercial' })}
-                  options={[{ value: 'commercial', label: 'Commercial' }, { value: 'personal', label: 'Personal' }]} />
+              <Field label="When neither the file nor the policy type says personal/commercial"
+                hint="Policy types like Homeowners or BOP decide on their own; this covers the rest">
+                <Select value={options.defaultLine ?? ''} onChange={(e) => setOptions({ ...options, defaultLine: e.target.value === '' ? null : (e.target.value as 'personal' | 'commercial') })}
+                  placeholder="Don't guess — flag the row"
+                  options={[{ value: 'personal', label: 'Use Personal' }, { value: 'commercial', label: 'Use Commercial' }]} />
               </Field>
               <Field label="Default broker">
                 <Select value={options.defaultBrokerId} onChange={(e) => setOptions({ ...options, defaultBrokerId: e.target.value })}
