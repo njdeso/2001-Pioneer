@@ -51,9 +51,10 @@ const s = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v
 const lineOf = (v: unknown): 'personal' | 'commercial' | 'unclassified' => (v === 'personal' || v === 'commercial' ? v : 'unclassified');
 
 export const LINE_BREAKDOWN_NOTICE =
-  'PRELIMINARY — subject to classification reconciliation. A correction of Personal/Commercial classifications is in progress: ' +
-  'many Personal Lines records are currently recorded as Commercial Lines. These figures come directly from the records as they ' +
-  'stand today and are not final. Commission is assigned to a line only through the policy it was posted to; nothing is estimated.';
+  'PRELIMINARY — subject to classification reconciliation. The agency is reviewing and correcting Personal/Commercial ' +
+  'classifications; some records may still be misclassified or awaiting manual review. These figures come directly from the ' +
+  'records as they stand at the time shown and are not final. Commission is assigned to a line only through the policy it was ' +
+  'posted to; nothing is estimated.';
 
 export function reviewerLineBreakdown(input: {
   entries: ReportEntry[]; policies: Doc[]; clients: Doc[]; carriers: Doc[]; statements: Doc[];
