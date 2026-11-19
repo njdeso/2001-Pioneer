@@ -114,6 +114,7 @@ interface UploadItem {
 
 export function StatementUploadPage() {
   const [items, setItems] = useState<UploadItem[]>([]);
+  const [manualEntry, setManualEntry] = useState(false);
   const update = (key: string, patch: Partial<UploadItem>) => setItems((xs) => xs.map((x) => (x.key === key ? { ...x, ...patch } : x)));
 
   async function handle(file: File) {
@@ -136,7 +137,10 @@ export function StatementUploadPage() {
         task.on('state_changed', (snap) => update(key, { progress: Math.round((snap.bytesTransferred / snap.totalBytes) * 100) }), reject, () => resolve());
       });
       update(key, { state: 'processing', progress: 100 });
-      const res = await api.processStatement(reg.statementId);
+      const res = await api.processStatement(reg.statementId, manualEntry ? 'prepare_manual' : 'auto');
+      if (res.status === 'manual_entry_pending') {
+        return update(key, { state: 'done', message: 'Ready for manual entry. Open the statement to enter the figures.' });
+      }
       update(key, {
         state: res.status === 'extraction_failed' ? 'error' : 'done',
         message: res.status === 'extraction_failed' ? res.failure?.message
@@ -152,6 +156,10 @@ export function StatementUploadPage() {
     <div className="space-y-5">
       <PageHeader title="Upload Commission Statements" subtitle="PDF, Excel or CSV statements from carriers and wholesalers. Nothing is posted from this screen." />
       <Card>
+        <label className="mb-3 flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={manualEntry} onChange={(e) => setManualEntry(e.target.checked)} />
+          Manual entry (skip AI and automatic reading)
+        </label>
         <label className="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 px-6 py-14 text-center hover:border-ink"
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => { e.preventDefault(); [...e.dataTransfer.files].forEach((f) => void handle(f)); }}>
@@ -167,7 +175,7 @@ export function StatementUploadPage() {
               <li key={it.key} className="flex flex-wrap items-center gap-3 py-2">
                 <span className="min-w-0 flex-1 truncate font-medium">{it.file.name}</span>
                 <span className="text-xs text-slate-500">
-                  {it.state === 'uploading' ? `Uploading ${it.progress}%` : it.state === 'processing' ? 'Reading and reconciling…' : it.state === 'hashing' ? 'Fingerprinting…' : it.state === 'registering' ? 'Checking for duplicates…' : ''}
+                  {it.state === 'uploading' ? `Uploading ${it.progress}%` : it.state === 'processing' ? 'Preparing statement…' : it.state === 'hashing' ? 'Fingerprinting…' : it.state === 'registering' ? 'Checking for duplicates…' : ''}
                 </span>
                 {it.state === 'done' && <Badge tone="green">Done</Badge>}
                 {it.state === 'duplicate' && <Badge tone="amber">Duplicate</Badge>}
@@ -371,7 +379,10 @@ export function StatementReviewPage() {
       <ErrorNote message={error} />
       {!original.available && <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">Original statement: {original.reason}</p>}
 
-      {stmt.status === 'extraction_failed' && stmt.failure && (
+      {stmt.status === 'extraction_failed' && stmt.failure?.code === 'manual_entry_pending' && (
+        <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm">{stmt.failure.message}</p>
+      )}
+      {stmt.status === 'extraction_failed' && stmt.failure && stmt.failure.code !== 'manual_entry_pending' && (
         <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
           <b>Processing failed:</b> {stmt.failure.message}
           {(stmt.failure.httpStatus || stmt.failure.requestId) && (
