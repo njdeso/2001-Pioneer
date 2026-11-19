@@ -113,11 +113,13 @@ async function buildView(view: string, statementId?: string) {
       return { settings, transactions: reviewerTransactions({ entries, carriers, clients, policies, ...win }) };
     }
     case 'overview': {
-      const [rawSettings, entries, carriers, policies, statements] = await Promise.all([
+      // Personal/Commercial breakdown: policy line, client IDs (no client fields), statement marking. Still allowlisted.
+      const [rawSettings, entries, carriers, policies, statements, clients] = await Promise.all([
         db.collection('settings').doc('app').get().then((s) => (s.exists ? { agencyName: s.get('agencyName'), snapshotStartMonth: s.get('snapshotStartMonth'), snapshotMonths: s.get('snapshotMonths') } : null)),
-        ledger(), read('carriers', CARRIER_FIELDS), read('policies', ['clientId', 'carrierId', 'wholesalerId', 'policyNumber', 'status']), read('statements', STATEMENT_FIELDS),
+        ledger(), read('carriers', CARRIER_FIELDS), read('policies', ['clientId', 'carrierId', 'wholesalerId', 'policyNumber', 'status', 'line']), read('statements', [...STATEMENT_FIELDS, 'classification']),
+        read('clients', ['status']),
       ]);
-      return { overview: reviewerOverview({ settings: rawSettings, entries, carriers, policies, statements }) };
+      return { overview: reviewerOverview({ settings: rawSettings, entries, carriers, policies, statements, clients }) };
     }
     default: throw new HttpsError('invalid-argument', 'Unknown view.');
   }

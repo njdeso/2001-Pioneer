@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
-  formatMonth, DILIGENCE_CATEGORY_LABELS,
+  formatMonth, pct, DILIGENCE_CATEGORY_LABELS,
   type ReviewerBook, type ReviewerCarrier, type ReviewerOverview, type ReviewerStatement, type ReviewerStatementDetail, type ReviewerTransaction, type ReviewerView, type ReviewerExport,
 } from '@asm/shared';
 import { api } from '../api';
@@ -120,6 +120,77 @@ export function ReviewerPortal({ preview = false }: { preview?: boolean }) {
 
 function Section({ title, children }: { title: string; children: ReactNode }) { return <Card title={title}>{children}</Card>; }
 
+/** Personal Lines vs Commercial Lines — always shown as PRELIMINARY until the classification correction is reconciled. */
+function LineBreakdownView({ l }: { l: NonNullable<ReviewerOverview['lines']> }) {
+  const c = l.commission;
+  const row = (label: string, n: number, total: number) => (
+    <tr className="border-t border-slate-100"><td className="py-1">{label}</td><td className="text-right">{n.toLocaleString()}</td><td className="text-right text-slate-600">{pct(n, total)}</td></tr>
+  );
+  const money = (label: string, cents: number, bold = false) => (
+    <tr className={cx('border-t', bold ? 'border-slate-300 font-semibold' : 'border-slate-100')}><td className="py-1">{label}</td><td className="text-right"><Money cents={cents} /></td><td className="text-right text-slate-600">{pct(cents, c.total)}</td></tr>
+  );
+  const head = <thead><tr className="text-left text-xs uppercase text-slate-500"><th /><th className="text-right">Personal</th><th className="text-right">Commercial</th><th className="text-right">Unclassified</th><th className="text-right">Not attributable</th><th className="text-right">Total</th></tr></thead>;
+  const cells = (x: typeof c) => (<><td className="text-right"><Money cents={x.personal} /></td><td className="text-right"><Money cents={x.commercial} /></td><td className="text-right"><Money cents={x.unclassified} /></td><td className="text-right"><Money cents={x.notAttributable} /></td><td className="text-right font-medium"><Money cents={x.total} /></td></>);
+  return (
+    <div className="space-y-3 rounded border-2 border-amber-400 bg-amber-50/40 p-3">
+      <div className="rounded border border-amber-300 bg-amber-100 p-2 text-sm text-amber-950">
+        <div className="font-semibold">Personal Lines vs Commercial Lines — PRELIMINARY</div>
+        <div className="text-xs">{l.notice}</div>
+        {!l.tiesToSummaryTotal && <div className="mt-1 text-xs font-semibold text-red-700">These amounts do not tie to the posted commission total. Do not rely on this breakdown; contact the agency.</div>}
+      </div>
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <Stat label="Personal Lines commission (preliminary)" value={<Money cents={c.personal} />} sub={`${pct(c.personal, c.total)} of ${formatMonth(l.from)} – ${formatMonth(l.to)} posted`} />
+        <Stat label="Commercial Lines commission (preliminary)" value={<Money cents={c.commercial} />} sub={`${pct(c.commercial, c.total)} of posted`} />
+        <Stat label="Active policies: Personal / Commercial" value={`${l.activePolicies.personal.toLocaleString()} / ${l.activePolicies.commercial.toLocaleString()}`} sub={`of ${l.activePolicies.total.toLocaleString()} active (preliminary)`} />
+        <Stat label="Clients: Personal / Commercial / Mixed" value={`${l.clients.personal.toLocaleString()} / ${l.clients.commercial.toLocaleString()} / ${l.clients.mixed.toLocaleString()}`} sub={`of ${l.clients.total.toLocaleString()} clients (preliminary)`} />
+      </div>
+      <div className="grid gap-3 lg:grid-cols-3">
+        <Section title="Clients (each counted once, by active policies)">
+          <table className="min-w-full text-sm"><tbody>
+            {row('Personal Lines', l.clients.personal, l.clients.total)}{row('Commercial Lines', l.clients.commercial, l.clients.total)}
+            {row('Mixed (both lines)', l.clients.mixed, l.clients.total)}{row('Has an unclassified policy', l.clients.unclassified, l.clients.total)}
+            {row('No active policies', l.clients.noActivePolicies, l.clients.total)}{row('Total clients', l.clients.total, l.clients.total)}
+          </tbody></table>
+        </Section>
+        <Section title="Active policies">
+          <table className="min-w-full text-sm"><tbody>
+            {row('Personal Lines', l.activePolicies.personal, l.activePolicies.total)}{row('Commercial Lines', l.activePolicies.commercial, l.activePolicies.total)}
+            {row('Unclassified', l.activePolicies.unclassified, l.activePolicies.total)}{row('Total active', l.activePolicies.total, l.activePolicies.total)}
+            {row('All policies, every status', l.allPolicies.total, l.allPolicies.total)}
+          </tbody></table>
+        </Section>
+        <Section title={`Posted commission ${formatMonth(l.from)} – ${formatMonth(l.to)} (rolling 12 months)`}>
+          <table className="min-w-full text-sm"><tbody>
+            {money('Personal Lines', c.personal)}{money('Commercial Lines', c.commercial)}{money('Policy unclassified', c.unclassified)}
+            {money('Not attributable to a line (bonuses, profit sharing, adjustments, unmatched)', c.notAttributable)}{money('Total posted', c.total, true)}
+          </tbody></table>
+        </Section>
+      </div>
+      <Section title="Monthly posted commission by line">
+        <table className="min-w-full text-sm">{head}<tbody>{l.byMonth.map((m) => <tr key={m.month} className="border-t border-slate-100"><td className="py-1">{formatMonth(m.month)}</td>{cells(m.cents)}</tr>)}</tbody></table>
+      </Section>
+      <Section title="By carrier and line">
+        <table className="min-w-full text-sm">{head}<tbody>{l.byCarrier.map((x) => <tr key={x.name} className="border-t border-slate-100"><td className="py-1">{x.name}</td>{cells(x.cents)}</tr>)}</tbody></table>
+      </Section>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <Section title="Carrier bonuses and profit sharing (carrier-level, not attributed to a line)">
+          <table className="min-w-full text-sm"><thead><tr className="text-left text-xs uppercase text-slate-500"><th>Carrier</th><th className="text-right">Bonus</th><th className="text-right">Profit sharing</th></tr></thead><tbody>
+            {l.bonusProfitSharing.byCarrier.map((b) => <tr key={b.name} className="border-t border-slate-100"><td className="py-1">{b.name}</td><td className="text-right"><Money cents={b.bonusCents} /></td><td className="text-right"><Money cents={b.profitSharingCents} /></td></tr>)}
+            <tr className="border-t border-slate-300 font-semibold"><td className="py-1">Total</td><td className="text-right"><Money cents={l.bonusProfitSharing.bonusCents} /></td><td className="text-right"><Money cents={l.bonusProfitSharing.profitSharingCents} /></td></tr>
+          </tbody></table>
+        </Section>
+        <Section title="Cross-check: posted commission by carrier statement marking (independent of policy classification)">
+          <table className="min-w-full text-sm"><tbody>
+            {money('Personal Lines statements', l.byStatementMarking.personal)}{money('Commercial Lines statements', l.byStatementMarking.commercial)}
+            {money('Other statements', l.byStatementMarking.other)}{money('Statements not marked', l.byStatementMarking.unmarked)}
+            {money('Not from a statement (retained, manual)', l.byStatementMarking.notFromStatement)}{money('Total', l.byStatementMarking.total, true)}
+          </tbody></table>
+        </Section>
+      </div>
+    </div>
+  );
+}
+
 function OverviewView({ o }: { o: ReviewerOverview }) {
   const tone = o.status === 'READY' ? 'border-emerald-300 bg-emerald-50 text-emerald-900' : o.status === 'CHECKS_FAILED' || o.status === 'NO_PERIOD' ? 'border-red-300 bg-red-50 text-red-900' : 'border-amber-300 bg-amber-50 text-amber-900';
   return (
@@ -135,6 +206,7 @@ function OverviewView({ o }: { o: ReviewerOverview }) {
           <Stat key={x.status} label={`${STATUS_SHORT[x.status]} (${x.count})`} value={<Money cents={x.carrierTotalCents} />} sub="Carrier printed total — NOT included" />
         ))}
       </div>
+      {o.lines && <LineBreakdownView l={o.lines} />}
       <Section title="Posted commission by category">
         <table className="min-w-full text-sm"><tbody>
           {Object.entries(o.postedTotal).filter(([k]) => k !== 'total').map(([k, v]) => (

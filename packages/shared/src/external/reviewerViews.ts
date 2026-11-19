@@ -7,6 +7,7 @@ import {
 } from '../reports/diligence.js';
 import { csvCell, centsToDecimal } from '../reports/ledger.js';
 import { displayName } from '../displayName.js';
+import { reviewerLineBreakdown, pct, type ReviewerLineBreakdown } from './lineBreakdown.js';
 
 /**
  * Allowlisted, read-only representations of the acquisition records for external reviewers (Pioneer Bank
@@ -366,8 +367,10 @@ export interface ReviewerOverview {
   checks: { name: string; pass: boolean; detail: string }[];
   /** Statements NOT in the posted totals, by reviewer status, with the carrier-printed and extracted amounts. */
   notPosted: { status: ReviewerStatementStatus; label: string; count: number; carrierTotalCents: Cents; extractedCents: Cents }[];
+  /** Personal Lines vs Commercial Lines (always marked PRELIMINARY). null when there is no snapshot window or no client list was given. */
+  lines: ReviewerLineBreakdown | null;
 }
-export function reviewerOverview(input: { settings: Record<string, unknown> | null | undefined; entries: ReportEntry[]; carriers: Doc[]; policies: Doc[]; statements: Doc[] }): ReviewerOverview {
+export function reviewerOverview(input: { settings: Record<string, unknown> | null | undefined; entries: ReportEntry[]; carriers: Doc[]; policies: Doc[]; statements: Doc[]; clients?: Doc[] }): ReviewerOverview {
   const settings = reviewerSettings(input.settings);
   const summary: DiligenceSummary = buildDiligenceSummary({
     entries: input.entries, start: settings.snapshotStartMonth, months: settings.snapshotMonths,
@@ -393,6 +396,9 @@ export function reviewerOverview(input: { settings: Record<string, unknown> | nu
     // A failed check's detail can quote ledger-audit wording (broker/agency columns); reviewers get a generic detail.
     checks: summary.checks.map((c) => ({ name: c.name, pass: c.pass, detail: !c.pass || /broker|agency|split|share/i.test(c.detail) ? 'This check did not pass. Details are available from the agency.' : c.detail })),
     notPosted,
+    lines: input.clients
+      ? reviewerLineBreakdown({ entries: input.entries, policies: input.policies, clients: input.clients, carriers: input.carriers, statements: input.statements, start: settings.snapshotStartMonth, months: settings.snapshotMonths, summaryTotalCents: summary.status === 'NO_PERIOD' ? null : summary.total.total })
+      : null,
   };
 }
 
@@ -420,6 +426,36 @@ export function reviewerSummaryCsv(o: ReviewerOverview, preparedAtIso: string): 
   for (const x of o.notPosted) out.push(row([x.label, x.count, money(x.carrierTotalCents), money(x.extractedCents)]));
   out.push('', row(['Check', 'Result', 'Detail']));
   for (const c of o.checks) out.push(row([c.name, c.pass ? 'PASS' : 'FAIL', c.detail]));
+  const L = o.lines;
+  if (L) {
+    const lc = L.commission;
+    out.push('', row(['PERSONAL LINES vs COMMERCIAL LINES — ' + L.notice]));
+    out.push(row(['Clients (each counted once, by active policies)', 'Count', '% of clients']));
+    for (const [label, n] of [['Personal Lines', L.clients.personal], ['Commercial Lines', L.clients.commercial], ['Mixed (both)', L.clients.mixed], ['Unclassified policy', L.clients.unclassified], ['No active policies', L.clients.noActivePolicies], ['TOTAL', L.clients.total]] as const) {
+      out.push(row([label, n, pct(n, L.clients.total)]));
+    }
+    out.push('', row(['Active policies', 'Count', '% of active policies']));
+    for (const [label, n] of [['Personal Lines', L.activePolicies.personal], ['Commercial Lines', L.activePolicies.commercial], ['Unclassified', L.activePolicies.unclassified], ['TOTAL', L.activePolicies.total]] as const) {
+      out.push(row([label, n, pct(n, L.activePolicies.total)]));
+    }
+    out.push('', row([`Posted commission ${L.from} to ${L.to}`, 'Amount', '% of total']));
+    for (const [label, c] of [['Personal Lines', lc.personal], ['Commercial Lines', lc.commercial], ['Policy unclassified', lc.unclassified], ['Not attributable to a line (carrier-level)', lc.notAttributable], ['TOTAL', lc.total]] as const) {
+      out.push(row([label, money(c), pct(c, lc.total)]));
+    }
+    out.push('', row(['Month', 'Personal Lines', 'Commercial Lines', 'Unclassified', 'Not attributable', 'Total']));
+    for (const m of L.byMonth) out.push(row([m.month, money(m.cents.personal), money(m.cents.commercial), money(m.cents.unclassified), money(m.cents.notAttributable), money(m.cents.total)]));
+    out.push('', row(['Carrier', 'Personal Lines', 'Commercial Lines', 'Unclassified', 'Not attributable', 'Total']));
+    for (const c of L.byCarrier) out.push(row([c.name, money(c.cents.personal), money(c.cents.commercial), money(c.cents.unclassified), money(c.cents.notAttributable), money(c.cents.total)]));
+    out.push('', row(['Carrier bonuses and profit sharing (carrier-level)', 'Bonus', 'Profit sharing']));
+    for (const b of L.bonusProfitSharing.byCarrier) out.push(row([b.name, money(b.bonusCents), money(b.profitSharingCents)]));
+    out.push(row(['TOTAL', money(L.bonusProfitSharing.bonusCents), money(L.bonusProfitSharing.profitSharingCents)]));
+    const sm = L.byStatementMarking;
+    out.push('', row(['Posted commission by statement marking (independent of policy classification)', 'Amount']));
+    for (const [label, c] of [['Personal Lines statements', sm.personal], ['Commercial Lines statements', sm.commercial], ['Other statements', sm.other], ['Statements not marked', sm.unmarked], ['Not from a statement (retained, manual)', sm.notFromStatement], ['TOTAL', sm.total]] as const) {
+      out.push(row([label, money(c)]));
+    }
+    out.push(row([L.tiesToSummaryTotal ? 'Ties to the posted commission total: yes' : 'Ties to the posted commission total: NO — do not rely on this breakdown']));
+  }
   return out.join('\r\n') + '\r\n';
 }
 export function reviewerBookCsv(b: ReviewerBook, agency: string, preparedAtIso: string): string {
