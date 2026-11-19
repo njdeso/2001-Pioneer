@@ -23,9 +23,9 @@ The original opens automatically above the editor (**View original** if closed).
 ## What you can enter
 - **Carrier or wholesaler:** existing ones only. Manual reconciliation never creates a carrier.
 - **Statement fields:** month, date and agency code.
-- **Printed totals, typed exactly as printed:** the commission total and/or month payable. Year-to-date is reference only and is never used as the total.
+- **Printed totals, typed exactly as printed:** the commission total and/or month payable. If you type only the month payable, the lines plus adjustments must equal it to the cent. Year-to-date is reference only and is never used as the total.
 - **Adjustments:** agency-only adjustments, e.g. MVR charges.
-- **Lines:** insured, policy number as printed, effective date, transaction type, commission or payment-only, premium, rate, paid commission, payment received, page and a note. You can add, edit and remove lines.
+- **Lines (up to 1,000):** insured, policy number as printed, effective date, transaction type, commission or payment-only, premium, rate, paid commission, payment received, page and a note. You can add, edit and remove lines.
 - **CSV import:** the **CSV template** link gives the columns. Import is all-or-nothing: a file with any bad row, or an unknown column, imports nothing. Imported lines only fill the editor.
 - **Reason:** required to apply. It is kept in the audit log.
 
